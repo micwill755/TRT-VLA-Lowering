@@ -1,0 +1,9 @@
+# Install from this directory with:
+#   python -m pip install -r requirements.txt
+#
+# The test scripts import LeRobot datasets and the PI0.5 policy.
+-e ../lerobot[dataset,pi]
+
+# Local helper used by the scripts; make sure this directory is on PYTHONPATH
+# or copy vla_test_data.py next to the scripts:
+#   ../forks/TensorRT/tests/export
