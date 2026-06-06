@@ -1,4 +1,5 @@
 # Test/pi05_compile_vla_trt.py
+import tensorrt as trt
 import torch
 import torch.nn as nn
 import torch_tensorrt
@@ -7,12 +8,30 @@ from lerobot.policies.pi05 import PI05Policy
 from lerobot.utils.constants import ACTION
 
 from trt.compile import compile_trt_module
-from trt.measure import compare_full_vla_to_eager_actions, compare_language, compare_vision
+from trt.measure import (
+    compare_action_step,
+    compare_full_vla_to_eager_actions,
+    compare_language,
+    compare_vision,
+)
 from trt.diffusion import PI05StaticKVDiffusionStep
 from trt.utils import load_policy, build_prefix_inputs, sample_actions_eager, prepare_policy_inputs, make_suffix_position_and_mask
 from trt.data import make_batch
 from trt.vision import PI05VisualEmbed
-from trt.language import PI05PrefixLanguagePrefill
+from trt.language import (
+    compact_prefix_inputs,
+    compile_pi05_lm_trt_with_plugin,
+    pi05_plugin_lm_smoke_check,
+    run_pi05_plugin_language,
+    run_pi05_preprocessing,
+)
+from trt.attention import PluginAttention, ViTPluginAttention
+from trt.plugin_utils import (
+    load_edge_vit_attention_plugin,
+    patch_vision_attention,  
+    restore_attention,
+    infer_siglip_seq_len,
+)
 
 TRT_SETTINGS = {
     "disable_tf32": True,
@@ -23,6 +42,7 @@ TRT_SETTINGS = {
     "use_python_runtime": True,
     "immutable_weights": True,
     "decompose_attention": True,
+    "require_full_compilation": True,
 }
 
 ACTION_TRT_SETTINGS = {
@@ -56,12 +76,51 @@ def make_compile_inputs(core, action_step, batch_size, prefix_len, device):
     position_ids, attention_mask = make_suffix_position_and_mask(core, prefix_pad_masks, x_t, device)
     return x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask
 
+def debug_prefix_eager_contract(prefix_embs, prefix_pad_masks, attention_mask, position_ids, name="prefix"):
+    # attention_mask is 0 for allowed positions and large negative for blocked positions.
+    allowed = attention_mask == 0
+    if allowed.ndim != 4:
+        raise ValueError(f"expected 4D attention_mask, got {allowed.shape}")
+
+    bsz, _, q_len, kv_len = allowed.shape
+    causal = torch.tril(
+        torch.ones(q_len, kv_len, dtype=torch.bool, device=allowed.device)
+    )[None, None, :, :]
+
+    valid = prefix_pad_masks.to(torch.bool)
+    valid_2d = valid[:, None, :, None] & valid[:, None, None, :]
+
+    allowed_valid = allowed & valid_2d
+    allowed_above_diag = allowed_valid & ~causal
+    blocked_valid = valid_2d & ~allowed
+
+    print(f"[{name}] prefix_embs:", tuple(prefix_embs.shape), prefix_embs.dtype)
+    print(f"[{name}] prefix_pad_masks:", tuple(prefix_pad_masks.shape))
+    print(f"[{name}] attention_mask:", tuple(attention_mask.shape), attention_mask.dtype)
+    print(f"[{name}] position_ids:", tuple(position_ids.shape), position_ids.dtype)
+
+    print(f"[{name}] valid tokens per batch:", valid.sum(dim=1).detach().cpu().tolist())
+    print(f"[{name}] total seq len:", prefix_embs.shape[1])
+    print(f"[{name}] position min/max:", int(position_ids.min()), int(position_ids.max()))
+
+    print(f"[{name}] allowed valid entries:", int(allowed_valid.sum()))
+    print(f"[{name}] allowed above diagonal:", int(allowed_above_diag.sum()))
+    print(f"[{name}] blocked valid entries:", int(blocked_valid.sum()))
+
+    is_plain_causal = torch.equal(allowed_valid, valid_2d & causal)
+    is_full_valid_prefix = torch.equal(allowed_valid, valid_2d)
+
+    print(f"[{name}] mask == causal valid mask:", is_plain_causal)
+    print(f"[{name}] mask == full valid prefix mask:", is_full_valid_prefix)
+
 def main() -> int:
+    # We disabled TF32 so eager and TRT comparisons use stricter, more reproducible math while debugging accuracy.
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.set_float32_matmul_precision("highest")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     policy = load_policy(PI05Policy, MODEL_ID, device, False).to(device).eval()
     batch = make_batch(policy, MODEL_ID, device, fill_missing=True)
     core = policy.model.to(device).eval()
@@ -72,32 +131,138 @@ def main() -> int:
     # Vision engine
     # -------------------------
     print("compiling vision")
+    
+    load_edge_vit_attention_plugin()
+
+    vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
+    batch_size, seq_len = infer_siglip_seq_len(vision_model, images[0])
+
+    patched = patch_vision_attention(
+        vision_model,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        name="PI05 SigLIP",
+    )
     trt_visual = compile_trt_module(
         PI05VisualEmbed(core).eval().to(device),
         (images[0],),
         TRT_SETTINGS,
     )
 
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
+    restore_attention(patched)
+
+    # -------------------------
+    # Prefix preprocessing
+    # -------------------------
+    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = run_pi05_preprocessing(
         core,
         images,
         img_masks,
         tokens,
         masks,
-        visual_runner=trt_visual,
+        trt_vision=trt_visual,
+        dtype=torch.float16,
+    )
+
+    debug_prefix_eager_contract(
+        prefix_embs,
+        prefix_pad_masks,
+        prefix_attention_mask,
+        prefix_position_ids,
+        name="compile prefix",
+    )
+
+    # -------------------------
+    # Metrics
+    # -------------------------
+    print("metrics")
+    compare_vision(core, images, trt_visual)
+
+    eager_prefix_embs, eager_prefix_pad_masks, eager_prefix_attention_mask, eager_prefix_position_ids = build_prefix_inputs(
+        core,
+        images,
+        img_masks,
+        tokens,
+        masks,
+        visual_runner=None,
+    )
+
+    print("compact language sanity")
+    compact_prefix_embs, compact_prefix_pad_masks, compact_prefix_attention_mask, compact_prefix_position_ids = compact_prefix_inputs(
+        prefix_embs,
+        prefix_pad_masks,
+        prefix_position_ids,
+    )
+
+    debug_prefix_eager_contract(
+        compact_prefix_embs,
+        compact_prefix_pad_masks,
+        compact_prefix_attention_mask,
+        compact_prefix_position_ids,
+        name="compact compile prefix",
+    )
+
+    compact_eager_prefix_embs, compact_eager_prefix_pad_masks, compact_eager_prefix_attention_mask, compact_eager_prefix_position_ids = compact_prefix_inputs(
+        eager_prefix_embs,
+        eager_prefix_pad_masks,
+        eager_prefix_position_ids,
+    )
+
+    debug_prefix_eager_contract(
+        compact_eager_prefix_embs,
+        compact_eager_prefix_pad_masks,
+        compact_eager_prefix_attention_mask,
+        compact_eager_prefix_position_ids,
+        name="compact eager compare prefix",
     )
 
     # -------------------------
     # Language/context engine
     # -------------------------
-    print("compiling language")
-    core.paligemma_with_expert.paligemma.model.language_model.config._attn_implementation = "eager"
+    print("compiling compact language")
+    language_attention_cls = PluginAttention
 
-    trt_language = compile_trt_module(
-        PI05PrefixLanguagePrefill(core).eval().to(device),
-        (prefix_embs, prefix_attention_mask, prefix_position_ids),
-        TRT_SETTINGS,
+    compact_trt_language, compact_language_max_seq_len = compile_pi05_lm_trt_with_plugin(
+        core,
+        compact_prefix_embs,
+        device=device,
+        position_ids=compact_prefix_position_ids,
+        attention_cls=language_attention_cls,
+        settings=TRT_SETTINGS,
+        compile_trt_module=compile_trt_module,
     )
+
+    pi05_plugin_lm_smoke_check(
+        core,
+        compact_trt_language,
+        compact_prefix_embs,
+        max_seq_len=compact_language_max_seq_len,
+        device=device,
+        attention_mask=compact_prefix_attention_mask,
+        position_ids=compact_prefix_position_ids,
+        prefix_pad_masks=compact_prefix_pad_masks,
+        max_logit_tokens=16,
+    )
+
+    compact_prefix_k, compact_prefix_v = run_pi05_plugin_language(
+        compact_trt_language,
+        core,
+        compact_prefix_embs,
+        max_seq_len=compact_language_max_seq_len,
+        device=device,
+        prefix_pad_masks=compact_prefix_pad_masks,
+    )
+
+    def compact_prefix_runner(prefix_embs, attention_mask=None, position_ids=None, return_hidden=False):
+        return run_pi05_plugin_language(
+            compact_trt_language,
+            core,
+            prefix_embs,
+            max_seq_len=compact_language_max_seq_len,
+            device=device,
+            attention_mask=attention_mask,
+            return_hidden=return_hidden,
+        )
 
     # -------------------------
     # Eager baseline before action compile/offload
@@ -113,7 +278,7 @@ def main() -> int:
     )
 
     eager_actions = sample_actions_eager(policy, batch, noise, num_steps)
-
+    
     # -------------------------
     # Action engine
     # -------------------------
@@ -124,7 +289,7 @@ def main() -> int:
         core,
         action_module,
         batch_size=tokens.shape[0],
-        prefix_len=prefix_pad_masks.shape[1],
+        prefix_len=compact_prefix_pad_masks.shape[1],
         device=device,
     )
 
@@ -137,10 +302,11 @@ def main() -> int:
     # -------------------------
     # Metrics
     # -------------------------
+    
     print("metrics")
     compare_vision(core, images, trt_visual)
 
-    eager_prefix_embs, _, eager_prefix_attention_mask, eager_prefix_position_ids = build_prefix_inputs(
+    eager_prefix_embs, eager_prefix_pad_masks, eager_prefix_attention_mask, eager_prefix_position_ids = build_prefix_inputs(
         core,
         images,
         img_masks,
@@ -149,12 +315,35 @@ def main() -> int:
         visual_runner=None,
     )
 
-    compare_language(
-        core.paligemma_with_expert.paligemma.model.language_model,
-        trt_language,
+    debug_prefix_eager_contract(
         eager_prefix_embs,
+        eager_prefix_pad_masks,
         eager_prefix_attention_mask,
         eager_prefix_position_ids,
+        name="eager compare prefix",
+    )
+
+    compare_language(
+        core.paligemma_with_expert.paligemma.model.language_model,
+        compact_prefix_runner,
+        compact_eager_prefix_embs,
+        compact_eager_prefix_attention_mask,
+        compact_eager_prefix_position_ids,
+        compact_eager_prefix_pad_masks,
+    )
+    
+    print("direct action step metrics")
+    timestep = torch.ones(tokens.shape[0], dtype=torch.float32, device=device)
+    compare_action_step(
+        core,
+        action_module,
+        trt_action,
+        compact_prefix_pad_masks,
+        compact_prefix_k,
+        compact_prefix_v,
+        noise,
+        timestep,
+        device=device,
     )
 
     print("full action metrics")
@@ -162,12 +351,13 @@ def main() -> int:
         policy,
         batch,
         trt_visual,
-        trt_language,
+        compact_prefix_runner,
         trt_action,
         eager_actions,
         noise,
         num_steps,
         device=device,
+        compact_prefix=True,
     )
 
     return 0

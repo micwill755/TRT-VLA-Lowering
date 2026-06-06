@@ -20,6 +20,12 @@ from trt.utils import load_policy
 from trt.vision import SmolVLAVisualEmbed
 from trt.language import SmolVLAPrefixLanguagePrefill
 from trt.diffusion import SmolVLAStaticKVDiffusionStep
+from trt.attention import PI05SigLIPViTPluginAttention
+from trt.plugin_utils import (
+    load_edge_vit_attention_plugin,
+    patch_vision_attention,  
+    restore_attention,
+)
 
 MODEL_ID = "lerobot/smolvla_base"
 DATASET_ID = "lerobot/libero"
@@ -282,16 +288,17 @@ def main() -> int:
     masks = masks.to(device=device)
     state = state.to(device=device, dtype=torch.float32)
 
-    print("vision dtype:", next(core.vlm_with_expert.get_vlm_model().vision_model.parameters()).dtype)
-    print("action dtype:", next(core.action_in_proj.parameters()).dtype)
-    print("image dtype:", images[0].dtype)
-
     print("compiling vision")
-    trt_visual = compile_trt_module(
-        SmolVLAVisualEmbed(core).eval().to(device),
-        (images[0],),
-        TRT_SETTINGS,
-    )
+    load_edge_vit_attention_plugin()
+    patched = patch_vision_attention(core.vlm_with_expert.get_vlm_model().vision_model, SmolVLAViTPluginAttention, "SmolVLA")
+    try:
+        trt_visual = compile_trt_module(
+            SmolVLAVisualEmbed(core).eval().to(device),
+            (images[0],),
+            TRT_SETTINGS,
+        )
+    finally:
+        restore_attention(patched)
 
     prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_smolvla_prefix_inputs(
         core,

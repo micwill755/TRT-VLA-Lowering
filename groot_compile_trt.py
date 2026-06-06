@@ -12,9 +12,13 @@ from trt.utils import load_policy
 from trt.data import make_batch
 from trt.vision import GROOTVisualEmbed
 from trt.language import GROOTLanguageEmbed
-
 from trt.measure import tensor_error_metrics
-
+from trt.attention import ViTPluginAttention
+from trt.plugin_utils import (
+    load_edge_vit_attention_plugin,
+    patch_vision_attention,  
+    restore_attention,
+)
 
 @torch.no_grad()
 def compare_groot_vision(core, pixel_values, visual_runner):
@@ -369,13 +373,16 @@ def main() -> int:
     # Vision engine
     # -------------------------
     print("compiling vision")
-    trt_visual = compile_trt_module(
-        GROOTVisualEmbed(core).eval().to(device),
-        (pixel_values,),
-        TRT_SETTINGS,
-    )
-
-    vit_embs = trt_visual(pixel_values)
+    load_edge_vit_attention_plugin()
+    patched = patch_vision_attention(core.backbone.eagle_model.vision_model, ViTPluginAttention, "SigLIP")
+    try:
+        trt_visual = compile_trt_module(
+            GROOTVisualEmbed(core).eval().to(device),
+            (pixel_values,),
+            TRT_SETTINGS,
+        )
+    finally:
+        restore_attention(patched)
 
     # -------------------------
     # Language/context engine

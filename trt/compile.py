@@ -1,17 +1,32 @@
 import torch
 import torch_tensorrt
 
-def compile_trt_module(module, sample_inputs, trt_settings):
-    input_specs = [
-        torch_tensorrt.Input(shape=t.shape, dtype=t.dtype)
-        for t in sample_inputs
-    ]
+def _make_input_spec(x):
+    if isinstance(x, torch.Tensor):
+        return torch_tensorrt.Input(
+            shape=tuple(x.shape),
+            dtype=x.dtype,
+        )
 
-    with torch.no_grad():
-        exported = torch.export.export(module, sample_inputs, strict=False)
+    if isinstance(x, (list, tuple)):
+        return type(x)(_make_input_spec(v) for v in x)
+
+    raise TypeError(f"Unsupported TRT input type: {type(x)}")
+
+
+def compile_trt_module(module, sample_inputs, settings):
+    module = module.eval()
+
+    exported = torch.export.export(
+        module,
+        args=sample_inputs,
+        strict=False,
+    )
+
+    input_specs = _make_input_spec(sample_inputs)
 
     return torch_tensorrt.dynamo.compile(
         exported,
         inputs=input_specs,
-        **trt_settings,
+        **settings,
     )
