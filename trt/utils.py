@@ -32,27 +32,40 @@ def load_policy(policy_cls, model_id, device, disable_flash_attn=True):
 
 # hugging face utils ----
 
-# pi05 utils ----
+# utils ----
 
-def prepare_policy_inputs(policy, batch):
+def prepare_policy_inputs_groot(policy, batch, device):
+    allowed_base = {"state", "state_mask", "embodiment_id"}
+    model_inputs = {
+        k: v
+        for k, v in batch.items()
+        if (k in allowed_base or k.startswith("eagle_"))
+        and not (k.startswith("next.") or k == "info")
+    }
+
+    return policy._groot_model.to(device).eval().prepare_input(model_inputs)
+
+def prepare_policy_inputs(policy, batch, device):
     # returns four arguments that PI0.5’s core model needs for inference
-    device = next(policy.parameters()).device
     images, img_masks = policy._preprocess_images(batch)
     tokens = batch[OBS_LANGUAGE_TOKENS].to(device)
     masks = batch[OBS_LANGUAGE_ATTENTION_MASK].to(device)
     return images, img_masks, tokens, masks
 
 @torch.no_grad()
-def build_prefix_inputs(core, images, img_masks, tokens, masks, visual_runner=None):
+def build_prefix_inputs(core, image_embs, img_masks, tokens, masks):
+    # 1. Build one long prefix embedding sequence:
+    #    image patch embeddings from the vision tower, followed by language token embeddings.
     embs = []
     pad_masks = []
     att_masks = []
 
-    image_embs = embed_images_with_visual_trt(core, images, visual_runner)
-
     for img_emb, img_mask in zip(image_embs, img_masks, strict=True):
         bsz, n_img = img_emb.shape[:2]
         embs.append(img_emb)
+
+        # 2. Build prefix_pad_masks:
+        #    if an image is present, all of its patch tokens are valid.
         pad_masks.append(img_mask[:, None].expand(bsz, n_img))
         att_masks += [0] * n_img
 
@@ -64,6 +77,8 @@ def build_prefix_inputs(core, images, img_masks, tokens, masks, visual_runner=No
     prefix_embs = torch.cat(embs, dim=1)
     prefix_pad_masks = torch.cat(pad_masks, dim=1)
 
+    # 3. Build the prefix attention mask:
+    #    all-zero att_masks make all valid prefix tokens mutually visible.
     prefix_att_masks = torch.tensor(
         att_masks,
         dtype=torch.bool,
@@ -72,24 +87,17 @@ def build_prefix_inputs(core, images, img_masks, tokens, masks, visual_runner=No
 
     prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
     prefix_attention_mask = core._prepare_attention_masks_4d(prefix_att_2d_masks)
+
+    # 4. Build position ids:
+    #    valid tokens count upward; padding does not advance the position.
     prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
     return prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids
 
 @torch.no_grad()
-def embed_images_with_visual_trt(core, images, visual_runner=None):
-    image_embs = []
-    for image in images:
-        if visual_runner is None:
-            image_embs.append(core.paligemma_with_expert.embed_image(image))
-        else:
-            image_embs.append(visual_runner(image))
-    return image_embs
-
-@torch.no_grad()
-def sample_actions_eager(policy, batch, noise, num_steps):
+def sample_actions_eager(policy, batch, noise, num_steps, device):
     core = policy.model
-    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch)
+    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
     return core.sample_actions(
         images,
         img_masks,

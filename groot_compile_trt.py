@@ -8,25 +8,29 @@ from lerobot.utils.constants import OBS_STATE
 
 from trt.compile import compile_trt_module
 from trt.diffusion import GrootStaticDiffusionStep
-from trt.utils import load_policy
+from trt.utils import load_policy, prepare_policy_inputs_groot
 from trt.data import make_batch
 from trt.vision import GROOTVisualEmbed
-from trt.language import GROOTLanguageEmbed
-from trt.measure import tensor_error_metrics
+from trt.language import (
+    compact_prefix_inputs,
+    compile_pi05_lm_trt_with_plugin,
+    pi05_plugin_lm_smoke_check,
+    run_pi05_plugin_language,
+    run_pi05_preprocessing,
+)
+from trt.measure import (
+    compare_action_step,
+    compare_full_vla_to_eager_actions,
+    compare_language,
+    compare_vision,
+)
 from trt.attention import ViTPluginAttention
 from trt.plugin_utils import (
-    load_edge_vit_attention_plugin,
+    load_plugin,
     patch_vision_attention,  
     restore_attention,
+    infer_siglip_seq_len,
 )
-
-@torch.no_grad()
-def compare_groot_vision(core, pixel_values, visual_runner):
-    eager = GROOTVisualEmbed(core).eval().to(pixel_values.device)(pixel_values)
-    trt = visual_runner(pixel_values)
-    tensor_error_metrics("vision", trt, eager)
-    return eager, trt
-
 
 @torch.no_grad()
 def compare_groot_language(core, language_runner, input_ids, attention_mask, vit_embs):
@@ -122,21 +126,6 @@ TRT_SETTINGS = {
     "use_python_runtime": True,
     "decompose_attention": True,
 }
-
-def filter_groot_inputs(batch):
-    allowed_base = {"state", "state_mask", "embodiment_id"}
-
-    return {
-        k: v
-        for k, v in batch.items()
-        if (k in allowed_base or k.startswith("eagle_"))
-        and not (k.startswith("next.") or k == "info")
-    }
-
-def build_action_step(policy, device):
-    action_head = policy._groot_model.action_head
-    action_head.eval()
-    return GrootStaticDiffusionStep(action_head).eval().to(device)
 
 def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
     batch_size = vl_embs.shape[0]
@@ -341,54 +330,66 @@ def main() -> int:
     torch.set_float32_matmul_precision("highest")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     policy = load_policy(GrootPolicy, MODEL_ID, device, True).to(device).eval()
-    core = policy._groot_model
-
-    # Force GR00T out of bf16 mode.
-    policy.config.use_bf16 = False
-    core.compute_dtype = "float32"
-    core.config.compute_dtype = "float32"
-
-    policy = policy.to(device=device, dtype=torch.float32).eval()
-    core = core.to(device=device, dtype=torch.float32).eval()
-
     batch = make_batch(policy, None, device, fill_missing=False)
+    core = policy._groot_model.to(device).eval()
 
-    groot_inputs = filter_groot_inputs(batch)
-    backbone_inputs, action_inputs = core.prepare_input(groot_inputs)
+    backbone_inputs, action_inputs = prepare_policy_inputs_groot(policy, batch, device)
+    # images here are raw pixels
+    images = [backbone_inputs["eagle_pixel_values"].to(device=device, dtype=torch.float16)]
+    pixel_values = images[0]
 
-    pixel_values = backbone_inputs["eagle_pixel_values"].to(device=device, dtype=torch.float32)
-    input_ids = backbone_inputs["eagle_input_ids"].to(device=device)
-    attention_mask = backbone_inputs["eagle_attention_mask"].to(device=device)
-
-    state = action_inputs["state"].to(device=device, dtype=torch.float32)
-    embodiment_id = action_inputs["embodiment_id"].to(device=device)
-
-    print("backbone dtype:", next(core.backbone.parameters()).dtype)
-    print("action dtype:", next(core.action_head.parameters()).dtype)
-    print("pixel_values dtype:", pixel_values.dtype)
-    print("state dtype:", state.dtype)
+    load_plugin()
 
     # -------------------------
     # Vision engine
     # -------------------------
     print("compiling vision")
-    load_edge_vit_attention_plugin()
-    patched = patch_vision_attention(core.backbone.eagle_model.vision_model, ViTPluginAttention, "SigLIP")
-    try:
-        trt_visual = compile_trt_module(
-            GROOTVisualEmbed(core).eval().to(device),
-            (pixel_values,),
-            TRT_SETTINGS,
-        )
-    finally:
-        restore_attention(patched)
+
+    # inner SigLIP transformer to infer batch size and seq_len
+    vision_model = core.backbone.eagle_model.vision_model.vision_model
+    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    
+    patched = patch_vision_attention(
+        vision_model,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        name="SigLIP"
+    )
+
+    eager_model = GROOTVisualEmbed(core).eval().to(device=device, dtype=torch.float16)
+    trt_vision_model = compile_trt_module(
+        eager_model,
+        (pixel_values,),
+        TRT_SETTINGS,
+    )
+
+    restore_attention(patched)
+
+    compare_vision(core, images, trt_vision_model, eager_model)
 
     # -------------------------
     # Language/context engine
     # -------------------------
     print("compiling language")
-    core.backbone.eagle_model.language_model.config._attn_implementation = "eager"
+        
+    # image embeddings are the image patch tokens after vision tower forward
+    image_embs = []
+    for image in images:
+        if trt_vision_model is None:
+            image_embs.append(core.backbone.eagle_model.extract_feature(image))
+        else:
+            image_embs.append(trt_vision_model(image))
+
+    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
+        core,
+        image_embs,
+        img_masks,
+        tokens,
+        masks,
+        trt_vision=trt_vision_model
+    )
 
     trt_language = compile_trt_module(
         GROOTLanguageEmbed(core).eval().to(device),
@@ -400,7 +401,7 @@ def main() -> int:
     state = action_inputs["state"].to(device=device)
     embodiment_id = action_inputs["embodiment_id"].to(device=device)
 
-    # -------------------------
+    '''# -------------------------
     # Action engine
     # -------------------------
     print("compiling action")
@@ -462,7 +463,7 @@ def main() -> int:
         eager_actions,
         noise,
         device=device,
-    )
+    )'''
 
     return 0
 

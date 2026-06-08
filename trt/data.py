@@ -6,7 +6,15 @@ from lerobot.utils.constants import OBS_STATE
 IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
 DEFAULT_DATASET_ID = "lerobot/libero"
 
+from lerobot.processor import ProcessorStepRegistry, RelativeActionsProcessorStep
+
+def register_lerobot_processor_aliases():
+    if "relative_actions_processor" not in ProcessorStepRegistry._registry:
+        ProcessorStepRegistry._registry["relative_actions_processor"] = RelativeActionsProcessorStep
+
 def make_batch(policy, model_id, device, fill_missing=False, dataset_id=DEFAULT_DATASET_ID, episode_index=0, frame_index=0):
+    register_lerobot_processor_aliases()
+
     preprocess, _ = make_pre_post_processors(
         policy.config,
         model_id,

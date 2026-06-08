@@ -2,7 +2,9 @@ import copy
 
 import torch
 import torch.nn as nn
+
 from trt.attention import PluginAttention
+from trt.utils import build_prefix_inputs
 
 FP16 = torch.float16
 
@@ -93,7 +95,7 @@ class PluginPrefixLMWrapper(nn.Module):
         return hidden, new_kvs
 
 @torch.no_grad()
-def run_pi05_preprocessing(
+def run_vlm_preprocessing(
     core,
     images,
     img_masks,
@@ -103,8 +105,6 @@ def run_pi05_preprocessing(
     *,
     dtype=torch.float16,
 ):
-    from trt.utils import build_prefix_inputs
-
     prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
         core,
         images,
@@ -155,7 +155,7 @@ def compact_prefix_inputs(prefix_embs, prefix_pad_masks, position_ids):
     return compact_embs, compact_pad_masks, compact_attention_mask, compact_position_ids
 
 
-def compile_pi05_lm_trt_with_plugin(
+def compile_lm_trt_with_plugin(
     core,
     prefix_embs,
     *,
@@ -165,11 +165,6 @@ def compile_pi05_lm_trt_with_plugin(
     settings,
     compile_trt_module,
 ):
-    from trt.plugin_utils import load_plugin, register_plugin_op
-
-    load_plugin()
-    register_plugin_op()
-
     max_seq_len = prefix_embs.shape[1]
 
     plugin_language = make_pi05_plugin_language(

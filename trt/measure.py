@@ -15,15 +15,16 @@ def sample_actions_with_full_trt(
     compact_prefix=False,
 ):
     core = policy.model
-    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch)
+    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
+
+    image_embs = [visual_runner(image) for image in images]
 
     prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
         core,
-        images,
+        image_embs,
         img_masks,
         tokens,
         masks,
-        visual_runner=visual_runner,
     )
 
     if compact_prefix:

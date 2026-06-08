@@ -20,14 +20,13 @@ from trt.data import make_batch
 from trt.vision import PI05VisualEmbed
 from trt.language import (
     compact_prefix_inputs,
-    compile_pi05_lm_trt_with_plugin,
+    compile_lm_trt_with_plugin,
     pi05_plugin_lm_smoke_check,
     run_pi05_plugin_language,
-    run_pi05_preprocessing,
 )
 from trt.attention import PluginAttention, ViTPluginAttention
 from trt.plugin_utils import (
-    load_edge_vit_attention_plugin,
+    load_plugin,
     patch_vision_attention,  
     restore_attention,
     infer_siglip_seq_len,
@@ -125,81 +124,70 @@ def main() -> int:
     batch = make_batch(policy, MODEL_ID, device, fill_missing=True)
     core = policy.model.to(device).eval()
 
-    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch)
+    # images here are raw pixels
+    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
+    pixel_values = images[0]
+
+    load_plugin()
 
     # -------------------------
     # Vision engine
     # -------------------------
     print("compiling vision")
     
-    load_edge_vit_attention_plugin()
-
     vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
     batch_size, seq_len = infer_siglip_seq_len(vision_model, images[0])
+    eager_model = PI05VisualEmbed(core).eval().to(device=device)
 
     patched = patch_vision_attention(
         vision_model,
         batch_size=batch_size,
         seq_len=seq_len,
-        name="PI05 SigLIP",
+        name="SigLIP",
     )
-    trt_visual = compile_trt_module(
-        PI05VisualEmbed(core).eval().to(device),
+    trt_vision_model = compile_trt_module(
+        eager_model,
         (images[0],),
         TRT_SETTINGS,
     )
 
     restore_attention(patched)
-
+    
+    compare_vision(core, images, trt_vision_model)
+    
     # -------------------------
     # Prefix preprocessing
     # -------------------------
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = run_pi05_preprocessing(
+
+    # image embeddings are patch tokens after the vision tower
+    trt_image_embs = [trt_vision_model(image) for image in images]
+
+    eager_image_embs = [
+        core.paligemma_with_expert.embed_image(image)
+        for image in images
+    ]
+
+    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
         core,
-        images,
+        trt_image_embs,
         img_masks,
         tokens,
         masks,
-        trt_vision=trt_visual,
-        dtype=torch.float16,
     )
-
-    debug_prefix_eager_contract(
-        prefix_embs,
-        prefix_pad_masks,
-        prefix_attention_mask,
-        prefix_position_ids,
-        name="compile prefix",
-    )
-
-    # -------------------------
-    # Metrics
-    # -------------------------
-    print("metrics")
-    compare_vision(core, images, trt_visual)
+    prefix_embs = prefix_embs.to(torch.float16)
 
     eager_prefix_embs, eager_prefix_pad_masks, eager_prefix_attention_mask, eager_prefix_position_ids = build_prefix_inputs(
         core,
-        images,
+        eager_image_embs,
         img_masks,
         tokens,
         masks,
-        visual_runner=None,
     )
 
-    print("compact language sanity")
     compact_prefix_embs, compact_prefix_pad_masks, compact_prefix_attention_mask, compact_prefix_position_ids = compact_prefix_inputs(
         prefix_embs,
         prefix_pad_masks,
         prefix_position_ids,
-    )
-
-    debug_prefix_eager_contract(
-        compact_prefix_embs,
-        compact_prefix_pad_masks,
-        compact_prefix_attention_mask,
-        compact_prefix_position_ids,
-        name="compact compile prefix",
     )
 
     compact_eager_prefix_embs, compact_eager_prefix_pad_masks, compact_eager_prefix_attention_mask, compact_eager_prefix_position_ids = compact_prefix_inputs(
@@ -208,21 +196,13 @@ def main() -> int:
         eager_prefix_position_ids,
     )
 
-    debug_prefix_eager_contract(
-        compact_eager_prefix_embs,
-        compact_eager_prefix_pad_masks,
-        compact_eager_prefix_attention_mask,
-        compact_eager_prefix_position_ids,
-        name="compact eager compare prefix",
-    )
-
     # -------------------------
     # Language/context engine
     # -------------------------
-    print("compiling compact language")
+    print("compiling language")
     language_attention_cls = PluginAttention
 
-    compact_trt_language, compact_language_max_seq_len = compile_pi05_lm_trt_with_plugin(
+    compact_trt_language, compact_language_max_seq_len = compile_lm_trt_with_plugin(
         core,
         compact_prefix_embs,
         device=device,
@@ -277,8 +257,17 @@ def main() -> int:
         device,
     )
 
-    eager_actions = sample_actions_eager(policy, batch, noise, num_steps)
+    eager_actions = sample_actions_eager(policy, batch, noise, num_steps, device)
     
+    compare_language(
+        core.paligemma_with_expert.paligemma.model.language_model,
+        compact_prefix_runner,
+        compact_eager_prefix_embs,
+        compact_eager_prefix_attention_mask,
+        compact_eager_prefix_position_ids,
+        compact_eager_prefix_pad_masks,
+    )
+
     # -------------------------
     # Action engine
     # -------------------------
@@ -303,35 +292,6 @@ def main() -> int:
     # Metrics
     # -------------------------
     
-    print("metrics")
-    compare_vision(core, images, trt_visual)
-
-    eager_prefix_embs, eager_prefix_pad_masks, eager_prefix_attention_mask, eager_prefix_position_ids = build_prefix_inputs(
-        core,
-        images,
-        img_masks,
-        tokens,
-        masks,
-        visual_runner=None,
-    )
-
-    debug_prefix_eager_contract(
-        eager_prefix_embs,
-        eager_prefix_pad_masks,
-        eager_prefix_attention_mask,
-        eager_prefix_position_ids,
-        name="eager compare prefix",
-    )
-
-    compare_language(
-        core.paligemma_with_expert.paligemma.model.language_model,
-        compact_prefix_runner,
-        compact_eager_prefix_embs,
-        compact_eager_prefix_attention_mask,
-        compact_eager_prefix_position_ids,
-        compact_eager_prefix_pad_masks,
-    )
-    
     print("direct action step metrics")
     timestep = torch.ones(tokens.shape[0], dtype=torch.float32, device=device)
     compare_action_step(
@@ -350,7 +310,7 @@ def main() -> int:
     compare_full_vla_to_eager_actions(
         policy,
         batch,
-        trt_visual,
+        trt_vision_model,
         compact_prefix_runner,
         trt_action,
         eager_actions,
