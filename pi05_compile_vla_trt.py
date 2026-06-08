@@ -15,16 +15,22 @@ from trt.measure import (
     compare_vision,
 )
 from trt.diffusion import PI05StaticKVDiffusionStep
-from trt.utils import load_policy, build_prefix_inputs, sample_actions_eager, prepare_policy_inputs, make_suffix_position_and_mask
+from trt.utils import (
+    load_policy, 
+    build_prefix_inputs,
+    compact_prefix_inputs,
+    sample_actions_eager, 
+    prepare_policy_inputs, 
+    make_suffix_position_and_mask
+)
 from trt.data import make_batch
 from trt.vision import PI05VisualEmbed
 from trt.language import (
-    compact_prefix_inputs,
     compile_lm_trt_with_plugin,
     pi05_plugin_lm_smoke_check,
-    run_pi05_plugin_language,
+    run_prefix_plugin_language,
+    run_prefix_language_eager
 )
-from trt.attention import PluginAttention, ViTPluginAttention
 from trt.plugin_utils import (
     load_plugin,
     patch_vision_attention,  
@@ -113,69 +119,78 @@ def debug_prefix_eager_contract(prefix_embs, prefix_pad_masks, attention_mask, p
     print(f"[{name}] mask == full valid prefix mask:", is_full_valid_prefix)
 
 def main() -> int:
-    # We disabled TF32 so eager and TRT comparisons use stricter, more reproducible math while debugging accuracy.
+    # -------------------------
+    # Runtime setup
+    # -------------------------
+    # Disable TF32 so eager and TRT comparisons use stricter, more reproducible math.
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.set_float32_matmul_precision("highest")
 
+    # Put every model and tensor on CUDA when available.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Load the pretrained PI0.5 policy.
     policy = load_policy(PI05Policy, MODEL_ID, device, False).to(device).eval()
+    # Build one representative batch for compilation and metric checks.
     batch = make_batch(policy, MODEL_ID, device, fill_missing=True)
+    # The core model owns the vision, language, and action modules used below.
     core = policy.model.to(device).eval()
 
-    # images here are raw pixels
+    # Prepare the four raw policy inputs: image pixels, image masks, language tokens, and token masks.
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
+    # Keep the first image stream as the representative compile input for the vision engine.
     pixel_values = images[0]
 
+    # Load the custom TensorRT plugin library before compiling plugin-backed modules.
     load_plugin()
 
     # -------------------------
     # Vision engine
     # -------------------------
     print("compiling vision")
-    
+
+    # The PI0.5 image encoder is the SigLIP vision model inside PaliGemma.
     vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, images[0])
+    # Infer the image-token sequence length so the patched attention plugin has the right shape.
+    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    # Wrap eager image embedding as a clean image -> patch-token module for TensorRT export.
     eager_model = PI05VisualEmbed(core).eval().to(device=device)
 
+    # Temporarily replace SigLIP attention with the TensorRT plugin-friendly attention path.
     patched = patch_vision_attention(
         vision_model,
         batch_size=batch_size,
         seq_len=seq_len,
         name="SigLIP",
     )
+    # Compile the vision/image-embedding module using one raw image tensor as the sample input.
     trt_vision_model = compile_trt_module(
         eager_model,
-        (images[0],),
+        (pixel_values,),
         TRT_SETTINGS,
     )
 
+    # Restore the original eager attention modules after TensorRT export is complete.
     restore_attention(patched)
-    
+
+    # Compare TRT image patch embeddings against eager image patch embeddings for each image stream.
     compare_vision(core, images, trt_vision_model)
-    
-    # -------------------------
-    # Prefix preprocessing
-    # -------------------------
 
-    # image embeddings are patch tokens after the vision tower
-    trt_image_embs = [trt_vision_model(image) for image in images]
+    # -------------------------
+    # Language/context engine
+    # -------------------------
+    print("compiling language")
 
+    # -------------------------
+    # Original eager prefix creation
+    # -------------------------
+    # Run the original eager vision tower to get image patch-token embeddings.
     eager_image_embs = [
         core.paligemma_with_expert.embed_image(image)
         for image in images
     ]
-
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
-        core,
-        trt_image_embs,
-        img_masks,
-        tokens,
-        masks,
-    )
-    prefix_embs = prefix_embs.to(torch.float16)
-
+    # Combine eager image tokens with language-token embeddings and build masks/positions.
     eager_prefix_embs, eager_prefix_pad_masks, eager_prefix_attention_mask, eager_prefix_position_ids = build_prefix_inputs(
         core,
         eager_image_embs,
@@ -184,104 +199,125 @@ def main() -> int:
         masks,
     )
 
-    compact_prefix_embs, compact_prefix_pad_masks, compact_prefix_attention_mask, compact_prefix_position_ids = compact_prefix_inputs(
-        prefix_embs,
-        prefix_pad_masks,
-        prefix_position_ids,
-    )
-
+    # Remove padded prefix slots so the eager reference uses the same dense sequence as TRT.
     compact_eager_prefix_embs, compact_eager_prefix_pad_masks, compact_eager_prefix_attention_mask, compact_eager_prefix_position_ids = compact_prefix_inputs(
         eager_prefix_embs,
         eager_prefix_pad_masks,
         eager_prefix_position_ids,
     )
 
-    # -------------------------
-    # Language/context engine
-    # -------------------------
-    print("compiling language")
-    language_attention_cls = PluginAttention
-
-    compact_trt_language, compact_language_max_seq_len = compile_lm_trt_with_plugin(
-        core,
-        compact_prefix_embs,
-        device=device,
-        position_ids=compact_prefix_position_ids,
-        attention_cls=language_attention_cls,
-        settings=TRT_SETTINGS,
-        compile_trt_module=compile_trt_module,
+    # Run the original language model over the compact eager prefix to produce reference hidden/KV tensors.
+    eager_hidden, eager_prefix_k, eager_prefix_v = run_prefix_language_eager(
+        core.paligemma_with_expert.paligemma.model.language_model,
+        compact_eager_prefix_embs,
+        compact_eager_prefix_attention_mask,
+        compact_eager_prefix_position_ids,
     )
 
+    # -------------------------
+    # TRT prefix creation
+    # -------------------------
+    # Run the same raw images through the compiled vision module to get TRT image patch-token embeddings.
+    trt_image_embs = [trt_vision_model(image) for image in images]
+
+    # Combine TRT image tokens with eager language embeddings and build the same prefix metadata.
+    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
+        core,
+        trt_image_embs,
+        img_masks,
+        tokens,
+        masks,
+    )
+    # The plugin language model runs in fp16.
+    prefix_embs = prefix_embs.to(torch.float16)
+
+    # Remove padded prefix slots before compiling/running the TRT language prefill engine.
+    compact_trt_prefix_embs, compact_trt_prefix_pad_masks, compact_trt_prefix_attention_mask, compact_trt_prefix_position_ids = compact_prefix_inputs(
+        prefix_embs,
+        prefix_pad_masks,
+        prefix_position_ids,
+    )
+
+    # Compile the PaliGemma language stack with plugin attention for compact prefix prefill.
+    trt_language_model, trt_max_seq_len = compile_lm_trt_with_plugin(
+        core,
+        compact_trt_prefix_embs,
+        device=device,
+        position_ids=compact_trt_prefix_position_ids,
+        settings=TRT_SETTINGS
+    )
+
+    # Run the compiled language model to produce TRT hidden states and the prefix KV cache.
+    trt_hidden, trt_prefix_k, trt_prefix_v = run_prefix_plugin_language(
+        trt_language_model,
+        core,
+        compact_trt_prefix_embs,
+        max_seq_len=trt_max_seq_len,
+        device=device,
+        prefix_pad_masks=compact_trt_prefix_pad_masks,
+        return_hidden=True
+    )
+
+    # Smoke-check the plugin language output with logits and KV-cache comparisons.
     pi05_plugin_lm_smoke_check(
         core,
-        compact_trt_language,
-        compact_prefix_embs,
-        max_seq_len=compact_language_max_seq_len,
+        trt_language_model,
+        compact_trt_prefix_embs,
+        max_seq_len=trt_max_seq_len,
         device=device,
-        attention_mask=compact_prefix_attention_mask,
-        position_ids=compact_prefix_position_ids,
-        prefix_pad_masks=compact_prefix_pad_masks,
+        attention_mask=compact_trt_prefix_attention_mask,
+        position_ids=compact_trt_prefix_position_ids,
+        prefix_pad_masks=compact_trt_prefix_pad_masks,
         max_logit_tokens=16,
     )
 
-    compact_prefix_k, compact_prefix_v = run_pi05_plugin_language(
-        compact_trt_language,
-        core,
-        compact_prefix_embs,
-        max_seq_len=compact_language_max_seq_len,
-        device=device,
-        prefix_pad_masks=compact_prefix_pad_masks,
+    # Compare eager and TRT language hidden states plus prefix K/V caches.
+    compare_language(
+        eager_hidden,
+        eager_prefix_k,
+        eager_prefix_v,
+        trt_hidden,
+        trt_prefix_k,
+        trt_prefix_v,
+        compact_trt_prefix_pad_masks,
     )
-
-    def compact_prefix_runner(prefix_embs, attention_mask=None, position_ids=None, return_hidden=False):
-        return run_pi05_plugin_language(
-            compact_trt_language,
-            core,
-            prefix_embs,
-            max_seq_len=compact_language_max_seq_len,
-            device=device,
-            attention_mask=attention_mask,
-            return_hidden=return_hidden,
-        )
 
     # -------------------------
     # Eager baseline before action compile/offload
     # -------------------------
+    # Use the policy's configured number of denoising steps for the action rollout.
     num_steps = core.config.num_inference_steps
+    # Seed the diffusion noise so eager and TRT rollouts start from the same sample.
     torch.manual_seed(SEED)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(SEED)
 
+    # Sample the initial noisy action chunk in the model's full internal action dimension.
     noise = core.sample_noise(
         (tokens.shape[0], core.config.chunk_size, core.config.max_action_dim),
         device,
     )
 
+    # Run the full eager policy once as the reference final action output.
     eager_actions = sample_actions_eager(policy, batch, noise, num_steps, device)
-    
-    compare_language(
-        core.paligemma_with_expert.paligemma.model.language_model,
-        compact_prefix_runner,
-        compact_eager_prefix_embs,
-        compact_eager_prefix_attention_mask,
-        compact_eager_prefix_position_ids,
-        compact_eager_prefix_pad_masks,
-    )
 
     # -------------------------
     # Action engine
     # -------------------------
     print("compiling action")
+    # The action module consumes prefix KV cache, noisy actions, and timestep to predict denoising velocity.
     action_module = PI05StaticKVDiffusionStep(core).eval().to(device)
 
+    # Build representative action-step inputs that match the compact prefix KV length.
     sample_inputs = make_compile_inputs(
         core,
         action_module,
         batch_size=tokens.shape[0],
-        prefix_len=compact_prefix_pad_masks.shape[1],
+        prefix_len=compact_trt_prefix_pad_masks.shape[1],
         device=device,
     )
 
+    # Compile the static one-step denoising module.
     trt_action = compile_trt_module(
         action_module,
         sample_inputs,
@@ -291,27 +327,29 @@ def main() -> int:
     # -------------------------
     # Metrics
     # -------------------------
-    
     print("direct action step metrics")
+    # Compare a single denoising step with identical prefix KV, noise, and timestep.
     timestep = torch.ones(tokens.shape[0], dtype=torch.float32, device=device)
     compare_action_step(
         core,
         action_module,
         trt_action,
-        compact_prefix_pad_masks,
-        compact_prefix_k,
-        compact_prefix_v,
+        compact_trt_prefix_pad_masks,
+        trt_prefix_k,
+        trt_prefix_v,
         noise,
         timestep,
         device=device,
     )
 
     print("full action metrics")
+    # Roll the whole TRT pipeline through every denoising step and compare final actions to eager.
     compare_full_vla_to_eager_actions(
         policy,
         batch,
+        trt_prefix_k,
+        trt_prefix_v,
         trt_vision_model,
-        compact_prefix_runner,
         trt_action,
         eager_actions,
         noise,
@@ -320,6 +358,7 @@ def main() -> int:
         compact_prefix=True,
     )
 
+    # Signal successful script completion.
     return 0
 
 if __name__ == "__main__":

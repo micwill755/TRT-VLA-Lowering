@@ -8,21 +8,28 @@ from lerobot.utils.constants import OBS_STATE
 
 from trt.compile import compile_trt_module
 from trt.diffusion import GrootStaticDiffusionStep
-from trt.utils import load_policy, prepare_policy_inputs_groot
+from trt.utils import (
+    load_policy, 
+    build_prefix_inputs,
+    compact_prefix_inputs,
+    sample_actions_eager, 
+    prepare_policy_inputs_groot, 
+    make_suffix_position_and_mask
+)
 from trt.data import make_batch
 from trt.vision import GROOTVisualEmbed
 from trt.language import (
-    compact_prefix_inputs,
-    compile_pi05_lm_trt_with_plugin,
+    compile_lm_trt_with_plugin,
     pi05_plugin_lm_smoke_check,
-    run_pi05_plugin_language,
-    run_pi05_preprocessing,
+    run_prefix_plugin_language,
+    run_prefix_language_eager
 )
 from trt.measure import (
     compare_action_step,
     compare_full_vla_to_eager_actions,
     compare_language,
     compare_vision,
+    tensor_error_metrics,
 )
 from trt.attention import ViTPluginAttention
 from trt.plugin_utils import (
@@ -32,91 +39,6 @@ from trt.plugin_utils import (
     infer_siglip_seq_len,
 )
 
-@torch.no_grad()
-def compare_groot_language(core, language_runner, input_ids, attention_mask, vit_embs):
-    eager = GROOTLanguageEmbed(core).eval().to(vit_embs.device)(
-        input_ids,
-        attention_mask,
-        vit_embs,
-    )
-    trt = language_runner(input_ids, attention_mask, vit_embs)
-    tensor_error_metrics("language/context", trt, eager)
-    return eager, trt
-
-
-@torch.no_grad()
-def sample_actions_with_full_groot_trt(
-    policy,
-    batch,
-    visual_runner,
-    language_runner,
-    action_runner,
-    noise,
-    device,
-):
-    core = policy._groot_model
-    groot_inputs = filter_groot_inputs(batch)
-    backbone_inputs, action_inputs = core.prepare_input(groot_inputs)
-
-    pixel_values = backbone_inputs["eagle_pixel_values"].to(device)
-    input_ids = backbone_inputs["eagle_input_ids"].to(device)
-    attention_mask = backbone_inputs["eagle_attention_mask"].to(device)
-    state = action_inputs["state"].to(device)
-    embodiment_id = action_inputs["embodiment_id"].to(device)
-
-    vit_embs = visual_runner(pixel_values)
-    vl_embs = language_runner(input_ids, attention_mask, vit_embs)
-
-    return sample_actions_with_runner(
-        policy,
-        action_runner,
-        vl_embs,
-        state,
-        embodiment_id,
-        noise,
-    )
-
-
-@torch.no_grad()
-def compare_full_groot_to_eager_actions(
-    policy,
-    batch,
-    visual_runner,
-    language_runner,
-    action_runner,
-    eager_actions,
-    noise,
-    device,
-):
-    trt_actions = sample_actions_with_full_groot_trt(
-        policy,
-        batch,
-        visual_runner,
-        language_runner,
-        action_runner,
-        noise=noise.clone(),
-        device=device,
-    )
-
-    action_dim = policy.config.output_features["action"].shape[0]
-    eager_actions = eager_actions[:, :, :action_dim]
-    trt_actions = trt_actions[:, :, :action_dim]
-
-    diff = (eager_actions.float() - trt_actions.float()).abs()
-    ade = compute_action_chunk_ade(trt_actions, eager_actions)
-
-    print("action xyz ADE:", ade)
-    print("action xyz minADE:", ade)
-    print("Eager actions:", eager_actions.shape, eager_actions.dtype)
-    print("TRT actions:", trt_actions.shape, trt_actions.dtype)
-    print("max diff:", diff.max().item())
-    print("mean diff:", diff.mean().item())
-
-MODEL_ID = "nvidia/GR00T-N1.5-3B"
-DATASET_ID = "lerobot/libero"
-FUTURE_STEPS = 5
-SEED = 42
-
 TRT_SETTINGS = {
     "disable_tf32": True,
     "use_explicit_typing": True,
@@ -124,8 +46,18 @@ TRT_SETTINGS = {
     "truncate_double": True,
     "min_block_size": 1,
     "use_python_runtime": True,
+    "immutable_weights": True,
     "decompose_attention": True,
+    "require_full_compilation": True,
 }
+
+ACTION_TRT_SETTINGS = {
+    **TRT_SETTINGS,
+    "offload_module_to_cpu": True,
+}
+
+MODEL_ID = "nvidia/GR00T-N1.5-3B"
+SEED = 42
 
 def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
     batch_size = vl_embs.shape[0]
@@ -157,172 +89,126 @@ def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
     )
 
 @torch.no_grad()
-def sample_actions_eager(policy, vl_embs, state, embodiment_id, noise):
-    action_head = policy._groot_model.action_head
-    num_steps = action_head.num_inference_timesteps
-    dt = 1.0 / num_steps
+def build_groot_context_inputs(core, vit_embs, input_ids, attention_mask):
+    eagle = core.backbone.eagle_model
 
-    actions = noise.clone()
+    input_embs = eagle.language_model.get_input_embeddings()(input_ids)
 
-    for step in range(num_steps):
-        t_cont = step / float(num_steps)
-        t_discretized = int(t_cont * action_head.num_timestep_buckets)
+    bsz, seq_len, hidden = input_embs.shape
+    flat_embs = input_embs.reshape(bsz * seq_len, hidden)
+    flat_ids = input_ids.reshape(bsz * seq_len)
 
-        timestep = torch.full(
-            (actions.shape[0],),
-            t_discretized,
-            device=actions.device,
-            dtype=torch.long,
-        )
+    image_token_index = getattr(eagle, "image_token_index", eagle.config.image_token_index)
+    selected = flat_ids == image_token_index
 
-        action_features = action_head.action_encoder(
-            actions,
-            timestep,
-            embodiment_id,
-        )
+    flat_embs[selected] = vit_embs.reshape(-1, hidden).to(flat_embs.dtype)[: selected.sum()]
+    input_embs = flat_embs.reshape(bsz, seq_len, hidden)
 
-        if action_head.config.add_pos_embed:
-            pos_ids = torch.arange(
-                action_features.shape[1],
-                dtype=torch.long,
-                device=actions.device,
-            )
-            pos_embs = action_head.position_embedding(pos_ids).unsqueeze(0)
-            action_features = action_features + pos_embs
-
-        state_features = action_head.state_encoder(state, embodiment_id)
-        future_tokens = action_head.future_tokens.weight.unsqueeze(0).expand(
-            vl_embs.shape[0],
-            -1,
-            -1,
-        )
-
-        sa_embs = torch.cat(
-            (state_features, future_tokens, action_features),
-            dim=1,
-        )
-
-        model_output = action_head.model(
-            hidden_states=sa_embs,
-            encoder_hidden_states=vl_embs,
-            timestep=timestep,
-        )
-
-        pred = action_head.action_decoder(model_output, embodiment_id)
-        pred_velocity = pred[:, -action_head.action_horizon :]
-        actions = actions + dt * pred_velocity
-
-    return actions
-
-
-@torch.no_grad()
-def sample_actions_with_runner(policy, action_runner, vl_embs, state, embodiment_id, noise):
-    action_head = policy._groot_model.action_head
-    num_steps = action_head.num_inference_timesteps
-    dt = 1.0 / num_steps
-
-    actions = noise.clone()
-
-    runner_dtype = vl_embs.dtype
-    state = state.to(dtype=runner_dtype)
-    actions = actions.to(dtype=runner_dtype)
-
-    for step in range(num_steps):
-        t_cont = step / float(num_steps)
-        t_discretized = int(t_cont * action_head.num_timestep_buckets)
-
-        timestep = torch.full(
-            (actions.shape[0],),
-            t_discretized,
-            device=actions.device,
-            dtype=torch.long,
-        )
-
-        pred_velocity = action_runner(
-            actions,
-            timestep,
-            vl_embs,
-            state,
-            embodiment_id,
-        ).float()
-
-        actions = actions + dt * pred_velocity.to(actions.dtype)
-
-    return actions
-
-
-def compute_action_chunk_ade(pred, target):
-    pred_xyz = pred[..., :3].float()
-    target_xyz = target[..., :3].float()
-    step_l2 = torch.linalg.vector_norm(pred_xyz - target_xyz, dim=-1)
-    return step_l2.mean().item()
-
-
-@torch.no_grad()
-def compare_to_eager(policy, action_runner, vl_embs, state, embodiment_id, seed=SEED):
-    action_head = policy._groot_model.action_head
-    device = vl_embs.device
-
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
-
-    noise = torch.randn(
-        vl_embs.shape[0],
-        action_head.config.action_horizon,
-        action_head.config.action_dim,
-        device=device,
-        dtype=vl_embs.dtype,
+    out = eagle.language_model(
+        inputs_embeds=input_embs,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+        return_dict=True,
     )
 
-    eager_actions = sample_actions_eager(
-        policy,
-        vl_embs,
-        state,
-        embodiment_id,
-        noise,
+    context_embs = out.hidden_states[core.backbone.select_layer]
+    context_embs = core.backbone.eagle_linear(context_embs)
+
+    # Match action_head.process_backbone_output().
+    vlln_weight = getattr(core.action_head.vlln, "weight", None)
+    if vlln_weight is not None:
+        context_embs = context_embs.to(device=vlln_weight.device, dtype=vlln_weight.dtype)
+    context_embs = core.action_head.vlln(context_embs)
+    context_embs = core.action_head.vl_self_attention(context_embs)
+
+    context_pad_masks = attention_mask.to(dtype=torch.bool, device=context_embs.device)
+    context_attention_mask = attention_mask
+    context_position_ids = torch.cumsum(context_pad_masks, dim=1) - 1
+
+    return context_embs, context_pad_masks, context_attention_mask, context_position_ids
+
+def make_groot_context_masks(context_embs, attention_mask):
+    context_pad_masks = attention_mask.to(device=context_embs.device, dtype=torch.bool)
+    context_position_ids = torch.cumsum(context_pad_masks, dim=1) - 1
+
+    return compact_prefix_inputs(
+        context_embs,
+        context_pad_masks,
+        context_position_ids,
     )
 
-    runner_actions = sample_actions_with_runner(
-        policy,
-        action_runner,
-        vl_embs,
-        state,
-        embodiment_id,
-        noise,
+class GROOTContextEmbed(nn.Module):
+    def __init__(self, core, input_ids):
+        super().__init__()
+        self.eagle = core.backbone.eagle_model
+        self.eagle_linear = core.backbone.eagle_linear
+        self.select_layer = core.backbone.select_layer
+        self.vlln = core.action_head.vlln
+        self.vl_self_attention = core.action_head.vl_self_attention
+
+        image_token_index = getattr(
+            self.eagle,
+            "image_token_index",
+            self.eagle.config.image_token_index,
+        )
+        image_token_indices = (input_ids.reshape(-1) == image_token_index).nonzero(as_tuple=False).flatten()
+        self.register_buffer("image_token_indices", image_token_indices.to(torch.long), persistent=False)
+
+    def forward(self, input_ids, attention_mask, vit_embs):
+        input_embs = self.eagle.language_model.get_input_embeddings()(input_ids)
+
+        bsz, seq_len, hidden = input_embs.shape
+        flat_embs = input_embs.reshape(bsz * seq_len, hidden)
+        vit_flat = vit_embs.reshape(-1, hidden).to(device=flat_embs.device, dtype=flat_embs.dtype)
+        vit_flat = vit_flat[: self.image_token_indices.shape[0]]
+        flat_embs = flat_embs.index_copy(0, self.image_token_indices, vit_flat)
+        input_embs = flat_embs.reshape(bsz, seq_len, hidden)
+
+        out = self.eagle.language_model(
+            inputs_embeds=input_embs,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+        context_embs = out.hidden_states[self.select_layer]
+        context_embs = self.eagle_linear(context_embs)
+
+        vlln_weight = getattr(self.vlln, "weight", None)
+        if vlln_weight is not None:
+            context_embs = context_embs.to(device=vlln_weight.device, dtype=vlln_weight.dtype)
+        context_embs = self.vlln(context_embs)
+        context_embs = self.vl_self_attention(context_embs)
+        return context_embs
+        
+def compile_groot_context_trt(core, input_ids, attention_mask, vit_embs, device, settings):
+    context_model = GROOTContextEmbed(core, input_ids).eval().to(device=device, dtype=torch.float16)
+
+    trt_context_model = compile_trt_module(
+        context_model,
+        (input_ids, attention_mask, vit_embs),
+        settings,
     )
 
-    action_dim = policy.config.output_features["action"].shape[0]
-    eager_actions = eager_actions[:, :, :action_dim]
-    runner_actions = runner_actions[:, :, :action_dim]
-
-    diff = (eager_actions.float() - runner_actions.float()).abs()
-    ade = compute_action_chunk_ade(runner_actions, eager_actions)
-
-    print("action xyz ADE:", ade)
-    print("action xyz minADE:", ade)
-    print("Eager actions:", eager_actions.shape, eager_actions.dtype)
-    print("Runner actions:", runner_actions.shape, runner_actions.dtype)
-    print("max diff:", diff.max().item())
-    print("mean diff:", diff.mean().item())
-
+    return trt_context_model, input_ids.shape[1]
 
 @torch.no_grad()
-def prepare_policy_inputs(policy, batch):
-    groot = policy._groot_model
-    action_head = groot.action_head
+def run_groot_context_trt(trt_context_model, input_ids, attention_mask, vit_embs):
+    return trt_context_model(input_ids, attention_mask, vit_embs)
 
-    groot_inputs = filter_groot_inputs(batch)
-    backbone_inputs, action_inputs = groot.prepare_input(groot_inputs)
+@torch.no_grad()
+def groot_context_smoke_check(eager_context_embs, trt_context_embs, attention_mask):
+    compact_eager, _, _, _ = make_groot_context_masks(eager_context_embs, attention_mask)
+    compact_trt, _, _, _ = make_groot_context_masks(trt_context_embs, attention_mask)
 
-    backbone_outputs = groot.backbone(backbone_inputs)
-    backbone_outputs = action_head.process_backbone_output(backbone_outputs)
+    tensor_error_metrics("groot context smoke", compact_trt, compact_eager)
 
-    vl_embs = backbone_outputs.backbone_features
-    state = action_inputs.state
-    embodiment_id = action_inputs.embodiment_id
+@torch.no_grad()
+def compare_groot_context(eager_context_embs, trt_context_embs, attention_mask):
+    compact_eager, _, _, _ = make_groot_context_masks(eager_context_embs, attention_mask)
+    compact_trt, _, _, _ = make_groot_context_masks(trt_context_embs, attention_mask)
 
-    return vl_embs, state, embodiment_id
+    tensor_error_metrics("groot context", compact_trt, compact_eager)
 
 def main() -> int:
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -336,6 +222,11 @@ def main() -> int:
     core = policy._groot_model.to(device).eval()
 
     backbone_inputs, action_inputs = prepare_policy_inputs_groot(policy, batch, device)
+    input_ids = backbone_inputs["eagle_input_ids"].to(device)
+    attention_mask = backbone_inputs["eagle_attention_mask"].to(device)
+    state = action_inputs["state"].to(device)
+    embodiment_id = action_inputs["embodiment_id"].to(device)
+
     # images here are raw pixels
     images = [backbone_inputs["eagle_pixel_values"].to(device=device, dtype=torch.float16)]
     pixel_values = images[0]
@@ -374,32 +265,61 @@ def main() -> int:
     # -------------------------
     print("compiling language")
         
-    # image embeddings are the image patch tokens after vision tower forward
-    image_embs = []
-    for image in images:
-        if trt_vision_model is None:
-            image_embs.append(core.backbone.eagle_model.extract_feature(image))
-        else:
-            image_embs.append(trt_vision_model(image))
+    # -------------------------
+    # Original eager context creation
+    # -------------------------
+    eager_image_embs = core.backbone.eagle_model.extract_feature(pixel_values)
 
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
+    eager_context_embs, eager_context_pad_masks, _, eager_context_position_ids = build_groot_context_inputs(
         core,
-        image_embs,
-        img_masks,
-        tokens,
-        masks,
-        trt_vision=trt_vision_model
+        eager_image_embs,
+        input_ids,
+        attention_mask,
     )
 
-    trt_language = compile_trt_module(
-        GROOTLanguageEmbed(core).eval().to(device),
-        (input_ids, attention_mask, vit_embs),
+    compact_eager_context_embs, compact_eager_context_pad_masks, _, _ = compact_prefix_inputs(
+        eager_context_embs,
+        eager_context_pad_masks,
+        eager_context_position_ids,
+    )
+
+    # -------------------------
+    # TensorRT context creation
+    # -------------------------
+    trt_image_embs = trt_vision_model(pixel_values)
+
+    # compile TRT context
+    trt_context_model, trt_context_max_seq_len = compile_groot_context_trt(
+        core,
+        input_ids,
+        attention_mask,
+        trt_image_embs,
+        device,
         TRT_SETTINGS,
     )
 
-    vl_embs = trt_language(input_ids, attention_mask, vit_embs)
-    state = action_inputs["state"].to(device=device)
-    embodiment_id = action_inputs["embodiment_id"].to(device=device)
+    # run TRT context
+    trt_context_embs = run_groot_context_trt(
+        trt_context_model,
+        input_ids,
+        attention_mask,
+        trt_image_embs,
+    )
+
+    # smoke
+    groot_context_smoke_check(
+        eager_context_embs,
+        trt_context_embs,
+        attention_mask,
+    )
+
+    # compare language/context
+    compare_groot_context(
+        eager_context_embs,
+        trt_context_embs,
+        attention_mask,
+    )
+
 
     '''# -------------------------
     # Action engine

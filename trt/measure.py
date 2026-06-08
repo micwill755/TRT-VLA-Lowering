@@ -1,67 +1,6 @@
 import torch
 from lerobot.utils.constants import ACTION
-from trt.utils import prepare_policy_inputs, make_runner_inputs, build_prefix_inputs
-
-@torch.no_grad()
-def sample_actions_with_full_trt(
-    policy,
-    batch,
-    visual_runner,
-    prefix_runner,
-    action_runner,
-    noise,
-    num_steps,
-    device,
-    compact_prefix=False,
-):
-    core = policy.model
-    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
-
-    image_embs = [visual_runner(image) for image in images]
-
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
-        core,
-        image_embs,
-        img_masks,
-        tokens,
-        masks,
-    )
-
-    if compact_prefix:
-        from trt.language import compact_prefix_inputs
-
-        prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = compact_prefix_inputs(
-            prefix_embs,
-            prefix_pad_masks,
-            prefix_position_ids,
-        )
-
-    prefix_k, prefix_v = prefix_runner(
-        prefix_embs,
-        prefix_attention_mask,
-        prefix_position_ids,
-    )
-
-    batch_size = tokens.shape[0]
-    dt = -1.0 / num_steps
-    x_t = noise.clone()
-
-    for step in range(num_steps):
-        timestep = torch.full(
-            (batch_size,),
-            1.0 + step * dt,
-            dtype=torch.float32,
-            device=x_t.device,
-        )
-
-        v_t = action_runner(
-            *make_runner_inputs(core, prefix_pad_masks, prefix_k, prefix_v, x_t, timestep, device)
-        ).float()
-
-        x_t = x_t + dt * v_t
-
-    return x_t
-
+from trt.utils import prepare_policy_inputs, make_runner_inputs, build_prefix_inputs, compact_prefix_inputs
 
 def _first_bad_index(mask, shape):
     flat_idx = int(mask.flatten().nonzero(as_tuple=False)[0].item())
@@ -125,8 +64,9 @@ def compute_action_chunk_minade(pred, target):
 def compare_full_vla_to_eager_actions(
     policy,
     batch,
+    prefix_k, 
+    prefix_v,
     visual_runner,
-    prefix_runner,
     action_runner,
     eager_actions,
     noise,
@@ -134,18 +74,46 @@ def compare_full_vla_to_eager_actions(
     device,
     compact_prefix=False,
 ):
-    trt_actions = sample_actions_with_full_trt(
-        policy,
-        batch,
-        visual_runner,
-        prefix_runner,
-        action_runner,
-        noise=noise.clone(),
-        num_steps=num_steps,
-        device=device,
-        compact_prefix=compact_prefix,
+    core = policy.model
+    images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
+
+    image_embs = [visual_runner(image) for image in images]
+
+    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
+        core,
+        image_embs,
+        img_masks,
+        tokens,
+        masks,
     )
 
+    if compact_prefix:
+        prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = compact_prefix_inputs(
+            prefix_embs,
+            prefix_pad_masks,
+            prefix_position_ids,
+        )
+
+    batch_size = tokens.shape[0]
+    dt = -1.0 / num_steps
+    x_t = noise.clone()
+
+    for step in range(num_steps):
+        timestep = torch.full(
+            (batch_size,),
+            1.0 + step * dt,
+            dtype=torch.float32,
+            device=x_t.device,
+        )
+
+        v_t = action_runner(
+            *make_runner_inputs(core, prefix_pad_masks, prefix_k, prefix_v, x_t, timestep, device)
+        ).float()
+
+        x_t = x_t + dt * v_t
+
+    trt_actions = x_t
+    
     action_dim = policy.config.output_features[ACTION].shape[0]
     eager_actions = eager_actions[:, :, :action_dim]
     trt_actions = trt_actions[:, :, :action_dim]
@@ -173,20 +141,6 @@ def compare_action_step(core, action_module, action_runner, prefix_pad_masks, pr
     print("action step xyz minADE:", compute_action_chunk_minade(trt, eager))
 
 @torch.no_grad()
-def run_prefix_language_eager(language_model, prefix_embs, attention_mask, position_ids):
-    out = language_model(
-        inputs_embeds=prefix_embs,
-        attention_mask=attention_mask,
-        position_ids=position_ids,
-        past_key_values=None,
-        use_cache=True,
-    )
-    cache = out.past_key_values
-    prefix_k = torch.stack([layer.keys for layer in cache.layers], dim=0)
-    prefix_v = torch.stack([layer.values for layer in cache.layers], dim=0)
-    return out.last_hidden_state, prefix_k, prefix_v
-
-@torch.no_grad()
 def compare_vision(core, images, visual_runner, eager_runner=None):
     for i, img in enumerate(images):
         eager = eager_runner(img) if eager_runner is not None else core.paligemma_with_expert.embed_image(img)
@@ -194,20 +148,7 @@ def compare_vision(core, images, visual_runner, eager_runner=None):
         tensor_error_metrics(f"vision[{i}]", trt, eager)
 
 @torch.no_grad()
-def compare_language(language_model, prefix_runner, prefix_embs, attention_mask, position_ids, prefix_pad_masks=None):
-    eager_hidden, eager_k, eager_v = run_prefix_language_eager(
-        language_model,
-        prefix_embs,
-        attention_mask,
-        position_ids,
-    )
-    trt_hidden, trt_k, trt_v = prefix_runner(
-        prefix_embs,
-        attention_mask,
-        position_ids,
-        return_hidden=True,
-    )
-
+def compare_language(eager_hidden, eager_k, eager_v, trt_hidden, trt_k, trt_v, prefix_pad_masks=None):
     tensor_error_metrics("language hidden", trt_hidden, eager_hidden)
     tensor_error_metrics("language prefix_k", trt_k, eager_k)
     tensor_error_metrics("language prefix_v", trt_v, eager_v)

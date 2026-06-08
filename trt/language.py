@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from trt.attention import PluginAttention
 from trt.utils import build_prefix_inputs
+from trt.compile import compile_trt_module
 
 FP16 = torch.float16
 
@@ -105,13 +106,17 @@ def run_vlm_preprocessing(
     *,
     dtype=torch.float16,
 ):
+    image_embs = [
+        trt_vision(image) if trt_vision is not None else core.paligemma_with_expert.embed_image(image)
+        for image in images
+    ]
+
     prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
         core,
-        images,
+        image_embs,
         img_masks,
         tokens,
         masks,
-        visual_runner=trt_vision,
     )
 
     return (
@@ -121,49 +126,13 @@ def run_vlm_preprocessing(
         prefix_position_ids,
     )
 
-def compact_prefix_inputs(prefix_embs, prefix_pad_masks, position_ids):
-    valid = prefix_pad_masks.to(device=prefix_embs.device, dtype=torch.bool)
-    valid_counts = valid.sum(dim=1)
-    if not torch.equal(valid_counts, valid_counts[:1].expand_as(valid_counts)):
-        raise ValueError(
-            "compact_prefix_inputs requires equal valid token counts across the batch"
-        )
-
-    compact_len = int(valid_counts[0].item())
-    compact_embs = torch.stack(
-        [prefix_embs[b, valid[b], :] for b in range(prefix_embs.shape[0])],
-        dim=0,
-    )
-    compact_position_ids = torch.stack(
-        [position_ids[b, valid[b]] for b in range(position_ids.shape[0])],
-        dim=0,
-    )
-    compact_pad_masks = torch.ones(
-        prefix_embs.shape[0],
-        compact_len,
-        device=prefix_pad_masks.device,
-        dtype=torch.bool,
-    )
-    compact_attention_mask = torch.zeros(
-        prefix_embs.shape[0],
-        1,
-        compact_len,
-        compact_len,
-        device=prefix_embs.device,
-        dtype=torch.float32,
-    )
-    return compact_embs, compact_pad_masks, compact_attention_mask, compact_position_ids
-
-
 def compile_lm_trt_with_plugin(
     core,
     prefix_embs,
     *,
     device,
     position_ids=None,
-    attention_cls=PluginAttention,
-    settings,
-    compile_trt_module,
+    settings
 ):
     max_seq_len = prefix_embs.shape[1]
 
@@ -172,7 +141,7 @@ def compile_lm_trt_with_plugin(
         max_seq_len=max_seq_len,
         device=device,
         position_ids=position_ids,
-        attention_cls=attention_cls,
+        attention_cls=PluginAttention,
     )
 
     kv_caches = make_pi05_language_kv_caches(
@@ -197,8 +166,22 @@ def compile_lm_trt_with_plugin(
 
     return trt_language, max_seq_len
 
+@torch.no_grad()
+def run_prefix_language_eager(language_model, prefix_embs, attention_mask, position_ids):
+    out = language_model(
+        inputs_embeds=prefix_embs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=None,
+        use_cache=True,
+    )
+    cache = out.past_key_values
+    prefix_k = torch.stack([layer.keys for layer in cache.layers], dim=0)
+    prefix_v = torch.stack([layer.values for layer in cache.layers], dim=0)
+    return out.last_hidden_state, prefix_k, prefix_v
 
-def run_pi05_plugin_language(
+@torch.no_grad()
+def run_prefix_plugin_language(
     trt_language,
     core,
     prefix_embs,
@@ -334,7 +317,7 @@ def pi05_plugin_lm_smoke_check(
     )
     eager_hidden = _as_tensor(eager_out.last_hidden_state)
 
-    trt_hidden, trt_k, trt_v = run_pi05_plugin_language(
+    trt_hidden, trt_k, trt_v = run_prefix_plugin_language(
         trt_language,
         core,
         prefix_embs,
