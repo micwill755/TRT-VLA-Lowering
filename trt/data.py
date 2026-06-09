@@ -1,20 +1,20 @@
 import torch
+
+from PIL import Image
+
+from collections.abc import Callable
+from typing import Any
+
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.utils.constants import OBS_STATE
 
+from trt import helper
+
 IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
 DEFAULT_DATASET_ID = "lerobot/libero"
 
-from lerobot.processor import ProcessorStepRegistry, RelativeActionsProcessorStep
-
-def register_lerobot_processor_aliases():
-    if "relative_actions_processor" not in ProcessorStepRegistry._registry:
-        ProcessorStepRegistry._registry["relative_actions_processor"] = RelativeActionsProcessorStep
-
 def make_batch(policy, model_id, device, fill_missing=False, dataset_id=DEFAULT_DATASET_ID, episode_index=0, frame_index=0):
-    register_lerobot_processor_aliases()
-
     preprocess, _ = make_pre_post_processors(
         policy.config,
         model_id,
@@ -44,3 +44,91 @@ def make_batch(policy, model_id, device, fill_missing=False, dataset_id=DEFAULT_
                 frame[key] = torch.zeros(feature.shape, dtype=torch.float32)
 
     return preprocess(frame)
+
+def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
+    """
+    Convert a LeRobot image tensor into a PIL image.
+
+    GROOT's Eagle processor expects chat message image entries like:
+        {"type": "image", "image": <PIL.Image.Image>}
+    rather than raw CHW torch tensors.
+    """
+    img = img.detach().cpu()
+
+    if img.dtype.is_floating_point:
+        img = (img.clamp(0, 1) * 255).to(torch.uint8)
+
+    # LeRobot images are usually CHW.
+    if img.ndim == 3 and img.shape[0] in (1, 3):
+        img = img.permute(1, 2, 0)
+
+    return Image.fromarray(img.numpy())
+
+def load_test_data(
+    dataset_id: str = DEFAULT_DATASET_ID,
+    *,
+    episode_index: int = 0,
+    frame_index: int = 0,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    dataset = LeRobotDataset(dataset_id, episodes=[episode_index])
+    frame = dataset[frame_index]
+
+    images = {
+        key: frame[key] for key in IMAGE_KEYS if key in frame
+    }
+
+    data = {
+        "images": images,
+        "state": frame[OBS_STATE],
+        "task": frame.get("task", "") or "Perform the task.",
+    }
+
+    image_content = [
+        {"type": "image", "image": _tensor_image_to_pil(img)}
+        for _, img in sorted(images.items())
+    ]
+
+    messages = [
+        {
+            "role": "user",
+            "content": image_content
+            + [{"type": "text", "text": str([data["task"]])}],
+        }
+    ]
+
+    return data, messages
+
+# prepare model inputs will be different per model using processor
+def prepare_model_inputs(
+    processor,
+    vision_info_fn: Callable,
+    chat_args: dict[str, Any],
+    processor_args: dict[str, Any],
+    data: dict[str, Any],
+    messages: list[dict[str, Any]],
+    device: str | torch.device = "cuda",
+) -> dict[str, Any]:
+    text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        **chat_args,
+    )
+
+    image_inputs, video_inputs = vision_info_fn(messages)
+
+    tokenized_data = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        return_tensors="pt",
+        padding=True,
+        **processor_args,
+    )
+
+    model_inputs = {
+        "tokenized_data": tokenized_data,
+        "state": data["state"],
+        "task": data["task"],
+    }
+
+    return helper.to_device(model_inputs, device)

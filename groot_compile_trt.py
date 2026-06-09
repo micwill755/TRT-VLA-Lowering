@@ -1,6 +1,11 @@
 import torch
+import copy
+
+from transformers import AutoProcessor
 
 from lerobot.policies.groot import GrootPolicy
+from lerobot.policies.groot.groot_n1 import DEFAULT_TOKENIZER_ASSETS_REPO
+from lerobot.utils.constants import HF_LEROBOT_HOME
 
 from trt.action_rollout import ActionRolloutContext, GROOTActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module
@@ -10,7 +15,14 @@ from trt.utils import (
     compact_prefix_inputs,
     prepare_policy_inputs_groot,
 )
-from trt.data import make_batch
+from trt.helper import (
+    get_processor
+)
+from trt.data import (
+    load_test_data,
+    prepare_model_inputs,
+    make_batch
+)
 from trt.packing import (
     MultimodalPromptProcessor,
     PackedLanguageInputs,
@@ -191,27 +203,52 @@ def compare_groot_context_token_types(core, eager_context_embs, trt_context_embs
         )
 
 def main() -> int:
-    # -------------------------
-    # Runtime setup
-    # -------------------------
-    # Disable TF32 so eager and TRT comparisons use stricter, more reproducible math.
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
-
     # Put every model and tensor on CUDA when available.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the pretrained GROOT policy.
-    policy = load_policy(GrootPolicy, MODEL_ID, device, True).to(device).eval()
+    policy = load_policy(GrootPolicy, MODEL_ID, device).to(device).eval()
+    # The core model owns the vision, language/context, and action modules used below.
+    model = policy._groot_model.to(device).eval()
+
+    data, messages = load_test_data(
+        dataset_id="lerobot/libero",
+        episode_index=0,
+        frame_index=0,
+    )
+
+    # create processor and get tokenizer ----
+    cache_dir = HF_LEROBOT_HOME / DEFAULT_TOKENIZER_ASSETS_REPO
+    processor = get_processor(str(cache_dir), 
+        {
+            'trust_remote_code': True, 
+            'fix_mistral_regex': False
+        })
+    # ------
+    
+    model_inputs = prepare_model_inputs(
+        processor,
+        processor.process_vision_info,
+        {"add_generation_prompt": True},
+        {
+            "images_kwargs": {
+                "min_dynamic_tiles": 1,
+                "max_dynamic_tiles": 1,
+                "use_thumbnail": False,
+            },
+        },
+        data,
+        messages,
+        device,
+    )
+    tokenized_data = model_inputs['tokenized_data']
+    input_ids = tokenized_data['input_ids']
+
     # Build one representative batch for compilation and metric checks.
     batch = make_batch(policy, None, device, fill_missing=False)
-    # The core model owns the vision, language/context, and action modules used below.
-    core = policy._groot_model.to(device).eval()
 
     # Prepare the raw backbone inputs and action inputs used by GROOT.
     backbone_inputs, action_inputs = prepare_policy_inputs_groot(policy, batch, device)
-    input_ids = backbone_inputs["eagle_input_ids"].to(device)
     attention_mask = backbone_inputs["eagle_attention_mask"].to(device)
     state = action_inputs["state"].to(device)
     embodiment_id = action_inputs["embodiment_id"].to(device)
@@ -229,12 +266,12 @@ def main() -> int:
     print("compiling vision")
 
     # Wrap the original eager image encoder before patching attention; this is the true vision reference.
-    eager_model = GROOTVisualEmbed(core).eval().to(device=device, dtype=torch.float16)
+    eager_model = GROOTVisualEmbed(model).eval().to(device=device, dtype=torch.float16)
     with torch.no_grad():
         eager_image_embs = eager_model(pixel_values)
 
     # inner SigLIP transformer to infer batch size and seq_len
-    vision_model = core.backbone.eagle_model.vision_model.vision_model
+    vision_model = model.backbone.eagle_model.vision_model.vision_model
     batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
     
     # Temporarily swap eager SigLIP attention for the plugin-friendly implementation.
@@ -256,7 +293,7 @@ def main() -> int:
     restore_attention(patched)
 
     # Compare TRT against restored original eager and keep the tensor for context compilation.
-    compare_vision(core, images, trt_vision_model, eager_model)
+    compare_vision(model, images, trt_vision_model, eager_model)
     with torch.no_grad():
         trt_image_embs = trt_vision_model(pixel_values)
     tensor_error_metrics("groot TRT vs original vision embeddings", trt_image_embs, eager_image_embs)
@@ -270,7 +307,7 @@ def main() -> int:
     # Original eager context creation
     # -------------------------
     eager_context_embs, _, _, _ = build_groot_context_inputs(
-        core,
+        model,
         eager_image_embs,
         input_ids,
         attention_mask,
@@ -282,7 +319,7 @@ def main() -> int:
 
     # Build the actual LM input embeddings for the TRT vision path.
     trt_language_inputs = build_groot_language_inputs(
-        core,
+        model,
         trt_image_embs,
         input_ids,
         attention_mask,
@@ -290,7 +327,7 @@ def main() -> int:
 
     # Build the same LM input embeddings with eager vision so we can isolate LM-plugin drift.
     eager_language_inputs = build_groot_language_inputs(
-        core,
+        model,
         eager_image_embs,
         input_ids,
         attention_mask,
@@ -298,7 +335,7 @@ def main() -> int:
 
     # Compile the Eagle LM with PluginAttention.
     trt_language_model, trt_language_max_seq_len = compile_groot_lm_trt_with_plugin(
-        core,
+        model,
         trt_language_inputs.inputs_embeds,
         device=device,
         position_ids=None,
@@ -308,7 +345,7 @@ def main() -> int:
     # Run plugin LM/context with eager vision embeddings.
     trt_context_from_eager_vision = run_groot_plugin_language(
         trt_language_model,
-        core,
+        model,
         eager_language_inputs.inputs_embeds,
         max_seq_len=trt_language_max_seq_len,
         device=device,
@@ -322,7 +359,7 @@ def main() -> int:
     )
 
     compare_groot_context_token_types(
-        core,
+        model,
         eager_context_embs,
         trt_context_from_eager_vision,
         input_ids,
@@ -333,7 +370,7 @@ def main() -> int:
     # Run plugin LM/context with TRT vision embeddings.
     trt_context_embs = run_groot_plugin_language(
         trt_language_model,
-        core,
+        model,
         trt_language_inputs.inputs_embeds,
         max_seq_len=trt_language_max_seq_len,
         device=device,
@@ -347,7 +384,7 @@ def main() -> int:
     )
 
     compare_groot_context_token_types(
-        core,
+        model,
         eager_context_embs,
         trt_context_embs,
         input_ids,
@@ -364,7 +401,7 @@ def main() -> int:
     full_trt_action_context = trt_context_embs.to(torch.float16)
 
     # The action module consumes context embeddings, noisy actions, timestep, robot state, and embodiment id.
-    action_module = GrootStaticDiffusionStep(core.action_head).eval().to(
+    action_module = GrootStaticDiffusionStep(model.action_head).eval().to(
         device=device,
         dtype=torch.float16,
     )
@@ -377,8 +414,8 @@ def main() -> int:
     # Sample the initial noisy action chunk in GROOT's action horizon/dimension.
     noise = torch.randn(
         eager_action_context.shape[0],
-        core.action_head.config.action_horizon,
-        core.action_head.config.action_dim,
+        model.action_head.config.action_horizon,
+        model.action_head.config.action_dim,
         device=device,
         dtype=eager_action_context.dtype,
     )
@@ -394,7 +431,7 @@ def main() -> int:
     eager_actions = sample_actions_raw(
         action_module,
         eager_action_rollout_context,
-        GROOTActionAdapter(core.action_head),
+        GROOTActionAdapter(model.action_head),
     )
 
     # -------------------------
@@ -440,7 +477,7 @@ def main() -> int:
     print("full action metrics")
     # Roll the whole TRT path: TRT vision, plugin LM/context, and TRT action engine.
     compare_full_groot_to_eager_actions(
-        core,
+        model,
         trt_action,
         full_trt_action_context,
         state,

@@ -1,7 +1,11 @@
 import torch
+import torch.nn as nn
+
+from typing import Any
 
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
+
 from trt.packing import (
     MultimodalPromptProcessor,
     PackedLanguageInputs,
@@ -10,14 +14,14 @@ from trt.packing import (
     compact_packed_language_inputs,
 )
 
-def disable_flash_attention(module):
+def force_hf_attention(module, attn):
     for m in module.modules():
         cfg = getattr(m, "config", None)
         if cfg is not None:
             if hasattr(cfg, "_attn_implementation"):
-                cfg._attn_implementation = "eager"
+                cfg._attn_implementation = attn
             if hasattr(cfg, "attn_implementation"):
-                cfg.attn_implementation = "eager"
+                cfg.attn_implementation = attn
 
     cfg = getattr(module, "config", None)
     if cfg is not None:
@@ -25,17 +29,24 @@ def disable_flash_attention(module):
             sub_cfg = getattr(cfg, name, None)
             if sub_cfg is not None:
                 if hasattr(sub_cfg, "_attn_implementation"):
-                    sub_cfg._attn_implementation = "eager"
+                    sub_cfg._attn_implementation = attn
                 if hasattr(sub_cfg, "attn_implementation"):
-                    sub_cfg.attn_implementation = "eager"
+                    sub_cfg.attn_implementation = attn
 
 # hugging face utils ----
 
-def load_policy(policy_cls, model_id, device, disable_flash_attn=True):
+def load_policy(policy_cls, model_id, device):
     policy = policy_cls.from_pretrained(model_id, device=device)
-    if disable_flash_attn:
-        disable_flash_attention(policy)
+    force_hf_attention(policy, "eager")
     return policy
+
+def _prepare_vision_module(
+    visual_model: nn.Module, 
+    model_inputs: dict[str, Any],
+    dtype: Any,
+    device: str
+) -> tuple[nn.Module, torch.Tensor, torch.Tensor]:
+    pass
 
 # hugging face utils ----
 

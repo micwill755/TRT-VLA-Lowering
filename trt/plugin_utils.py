@@ -67,10 +67,6 @@ import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
 from trt import plugin_converter as _plugin_converter  # noqa: F401
 
 def load_plugin():
-    return load_edge_vit_attention_plugin()
-
-
-def load_edge_vit_attention_plugin():
     plugin_so = os.environ.get("EDGE_LLM_PLUGIN_SO") or os.environ.get("EDGELLM_TRT_PLUGIN_SO")
     if not plugin_so:
         raise RuntimeError("Set EDGE_LLM_PLUGIN_SO to libNvInfer_edgellm_plugin.so before running this script")
@@ -79,11 +75,9 @@ def load_edge_vit_attention_plugin():
     trt.init_libnvinfer_plugins(None, "")
     return plugin_so
 
-
 def restore_attention(patched):
     for layer, original_attn in patched:
         layer.self_attn = original_attn
-
 
 def patch_vision_attention(
     vision_model,
