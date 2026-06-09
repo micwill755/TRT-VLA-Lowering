@@ -25,6 +25,7 @@ class PluginAttention(nn.Module):
         config: Any,
         layer_idx: int,
         rope_cache: torch.Tensor,
+        enable_bidirectional_prefill: int = 1,
     ):
         """
         Initialize PluginAttention.
@@ -58,6 +59,7 @@ class PluginAttention(nn.Module):
         self.attn_hidden_size = self.num_heads * self.head_dim
         self.hidden_size = config.hidden_size
         self.layer_idx = layer_idx
+        self.enable_bidirectional_prefill = int(enable_bidirectional_prefill)
         self.register_buffer("rope_cache", rope_cache)
 
     def forward(
@@ -127,7 +129,7 @@ class PluginAttention(nn.Module):
             self.num_heads,
             self.num_key_value_heads,
             self.head_dim,
-            1,
+            self.enable_bidirectional_prefill,
         )
 
         # Use attn_hidden_size for reshape (may differ from hidden_size in Qwen3)

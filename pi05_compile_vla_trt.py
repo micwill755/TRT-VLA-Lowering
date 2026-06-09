@@ -17,13 +17,13 @@ from trt.measure import (
 from trt.diffusion import PI05StaticKVDiffusionStep
 from trt.utils import (
     load_policy, 
-    build_prefix_inputs,
-    compact_prefix_inputs,
+    build_packed_prefix_inputs,
     sample_actions_eager, 
     prepare_policy_inputs, 
     make_suffix_position_and_mask
 )
 from trt.data import make_batch
+from trt.packing import compact_packed_language_inputs
 from trt.vision import PI05VisualEmbed
 from trt.language import (
     compile_lm_trt_with_plugin,
@@ -43,7 +43,6 @@ TRT_SETTINGS = {
     "use_explicit_typing": True,
     "use_fp32_acc": True,
     "truncate_double": True,
-    "min_block_size": 1,
     "use_python_runtime": True,
     "immutable_weights": True,
     "decompose_attention": True,
@@ -80,43 +79,6 @@ def make_compile_inputs(core, action_step, batch_size, prefix_len, device):
 
     position_ids, attention_mask = make_suffix_position_and_mask(core, prefix_pad_masks, x_t, device)
     return x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask
-
-def debug_prefix_eager_contract(prefix_embs, prefix_pad_masks, attention_mask, position_ids, name="prefix"):
-    # attention_mask is 0 for allowed positions and large negative for blocked positions.
-    allowed = attention_mask == 0
-    if allowed.ndim != 4:
-        raise ValueError(f"expected 4D attention_mask, got {allowed.shape}")
-
-    bsz, _, q_len, kv_len = allowed.shape
-    causal = torch.tril(
-        torch.ones(q_len, kv_len, dtype=torch.bool, device=allowed.device)
-    )[None, None, :, :]
-
-    valid = prefix_pad_masks.to(torch.bool)
-    valid_2d = valid[:, None, :, None] & valid[:, None, None, :]
-
-    allowed_valid = allowed & valid_2d
-    allowed_above_diag = allowed_valid & ~causal
-    blocked_valid = valid_2d & ~allowed
-
-    print(f"[{name}] prefix_embs:", tuple(prefix_embs.shape), prefix_embs.dtype)
-    print(f"[{name}] prefix_pad_masks:", tuple(prefix_pad_masks.shape))
-    print(f"[{name}] attention_mask:", tuple(attention_mask.shape), attention_mask.dtype)
-    print(f"[{name}] position_ids:", tuple(position_ids.shape), position_ids.dtype)
-
-    print(f"[{name}] valid tokens per batch:", valid.sum(dim=1).detach().cpu().tolist())
-    print(f"[{name}] total seq len:", prefix_embs.shape[1])
-    print(f"[{name}] position min/max:", int(position_ids.min()), int(position_ids.max()))
-
-    print(f"[{name}] allowed valid entries:", int(allowed_valid.sum()))
-    print(f"[{name}] allowed above diagonal:", int(allowed_above_diag.sum()))
-    print(f"[{name}] blocked valid entries:", int(blocked_valid.sum()))
-
-    is_plain_causal = torch.equal(allowed_valid, valid_2d & causal)
-    is_full_valid_prefix = torch.equal(allowed_valid, valid_2d)
-
-    print(f"[{name}] mask == causal valid mask:", is_plain_causal)
-    print(f"[{name}] mask == full valid prefix mask:", is_full_valid_prefix)
 
 def main() -> int:
     # -------------------------
@@ -191,7 +153,7 @@ def main() -> int:
         for image in images
     ]
     # Combine eager image tokens with language-token embeddings and build masks/positions.
-    eager_prefix_embs, eager_prefix_pad_masks, eager_prefix_attention_mask, eager_prefix_position_ids = build_prefix_inputs(
+    eager_prefix = build_packed_prefix_inputs(
         core,
         eager_image_embs,
         img_masks,
@@ -200,11 +162,13 @@ def main() -> int:
     )
 
     # Remove padded prefix slots so the eager reference uses the same dense sequence as TRT.
-    compact_eager_prefix_embs, compact_eager_prefix_pad_masks, compact_eager_prefix_attention_mask, compact_eager_prefix_position_ids = compact_prefix_inputs(
-        eager_prefix_embs,
-        eager_prefix_pad_masks,
-        eager_prefix_position_ids,
-    )
+    compact_eager_prefix = compact_packed_language_inputs(eager_prefix)
+    (
+        compact_eager_prefix_embs,
+        compact_eager_prefix_pad_masks,
+        compact_eager_prefix_attention_mask,
+        compact_eager_prefix_position_ids,
+    ) = compact_eager_prefix.as_tuple()
 
     # Run the original language model over the compact eager prefix to produce reference hidden/KV tensors.
     eager_hidden, eager_prefix_k, eager_prefix_v = run_prefix_language_eager(
@@ -221,7 +185,7 @@ def main() -> int:
     trt_image_embs = [trt_vision_model(image) for image in images]
 
     # Combine TRT image tokens with eager language embeddings and build the same prefix metadata.
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
+    prefix = build_packed_prefix_inputs(
         core,
         trt_image_embs,
         img_masks,
@@ -229,14 +193,16 @@ def main() -> int:
         masks,
     )
     # The plugin language model runs in fp16.
-    prefix_embs = prefix_embs.to(torch.float16)
+    prefix = prefix.with_inputs_embeds(prefix.inputs_embeds.to(torch.float16))
 
     # Remove padded prefix slots before compiling/running the TRT language prefill engine.
-    compact_trt_prefix_embs, compact_trt_prefix_pad_masks, compact_trt_prefix_attention_mask, compact_trt_prefix_position_ids = compact_prefix_inputs(
-        prefix_embs,
-        prefix_pad_masks,
-        prefix_position_ids,
-    )
+    compact_trt_prefix = compact_packed_language_inputs(prefix)
+    (
+        compact_trt_prefix_embs,
+        compact_trt_prefix_pad_masks,
+        compact_trt_prefix_attention_mask,
+        compact_trt_prefix_position_ids,
+    ) = compact_trt_prefix.as_tuple()
 
     # Compile the PaliGemma language stack with plugin attention for compact prefix prefill.
     trt_language_model, trt_max_seq_len = compile_lm_trt_with_plugin(
@@ -344,7 +310,7 @@ def main() -> int:
 
     print("full action metrics")
     # Roll the whole TRT pipeline through every denoising step and compare final actions to eager.
-    compare_full_vla_to_eager_actions(
+    trt_actions = compare_full_vla_to_eager_actions(
         policy,
         batch,
         trt_prefix_k,

@@ -60,6 +60,136 @@ def compute_action_chunk_ade(pred, target):
 def compute_action_chunk_minade(pred, target):
     return compute_action_chunk_ade(pred, target)
 
+
+@torch.no_grad()
+def compare_action_rollout_to_eager(eager_actions, trt_actions, *, action_dim=None, name=None):
+    if action_dim is not None:
+        eager_actions = eager_actions[:, :, :action_dim]
+        trt_actions = trt_actions[:, :, :action_dim]
+
+    eager_actions = eager_actions.float()
+    trt_actions = trt_actions.float()
+    diff = (eager_actions - trt_actions).abs()
+
+    if name is not None:
+        print(name)
+
+    print("action xyz ADE:", compute_action_chunk_ade(trt_actions, eager_actions))
+    print("action xyz minADE:", compute_action_chunk_minade(trt_actions, eager_actions))
+    print("Eager actions:", eager_actions.shape, eager_actions.dtype)
+    print("TRT actions:", trt_actions.shape, trt_actions.dtype)
+    print("max diff:", diff.max().item())
+    print("mean diff:", diff.mean().item())
+
+@torch.no_grad()
+def sample_groot_actions(action_runner, action_head, vl_embs, state, embodiment_id, noise, device):
+    batch_size = vl_embs.shape[0]
+    dtype = vl_embs.dtype
+
+    vl_embs = vl_embs.to(device=device, dtype=dtype)
+    actions = noise.clone().to(device=device, dtype=dtype)
+    state = state.to(device=device, dtype=dtype)
+    embodiment_id = embodiment_id.to(device=device)
+
+    num_steps = action_head.num_inference_timesteps
+    dt = 1.0 / num_steps
+
+    for t in range(num_steps):
+        t_cont = t / float(num_steps)
+        t_discretized = int(t_cont * action_head.num_timestep_buckets)
+
+        timestep = torch.full(
+            (batch_size,),
+            t_discretized,
+            device=device,
+            dtype=torch.long,
+        )
+
+        pred_velocity = action_runner(
+            actions,
+            timestep,
+            vl_embs,
+            state,
+            embodiment_id,
+        )
+        if isinstance(pred_velocity, (tuple, list)):
+            pred_velocity = pred_velocity[0]
+
+        actions = actions + dt * pred_velocity
+
+    return actions
+
+
+@torch.no_grad()
+def compare_groot_action_step(action_module, trt_action, vl_embs, state, embodiment_id, noise, device):
+    dtype = vl_embs.dtype
+    batch_size = vl_embs.shape[0]
+
+    vl_embs = vl_embs.to(device=device, dtype=dtype)
+    actions = noise.clone().to(device=device, dtype=dtype)
+    state = state.to(device=device, dtype=dtype)
+    embodiment_id = embodiment_id.to(device=device)
+
+    timestep = torch.zeros(
+        batch_size,
+        device=device,
+        dtype=torch.long,
+    )
+
+    eager = action_module(
+        actions,
+        timestep,
+        vl_embs,
+        state,
+        embodiment_id,
+    )
+
+    trt = trt_action(
+        actions,
+        timestep,
+        vl_embs,
+        state,
+        embodiment_id,
+    )
+    if isinstance(trt, (tuple, list)):
+        trt = trt[0]
+
+    tensor_error_metrics("action step output", trt, eager)
+    print("action step xyz ADE:", compute_action_chunk_ade(trt, eager))
+    print("action step xyz minADE:", compute_action_chunk_minade(trt, eager))
+
+
+@torch.no_grad()
+def compare_full_groot_to_eager_actions(
+    core,
+    action_runner,
+    context_embs,
+    state,
+    embodiment_id,
+    eager_actions,
+    noise,
+    device,
+    *,
+    name=None,
+    action_dim=None,
+):
+    trt_actions = sample_groot_actions(
+        action_runner,
+        core.action_head,
+        context_embs,
+        state,
+        embodiment_id,
+        noise,
+        device,
+    )
+    compare_action_rollout_to_eager(
+        eager_actions,
+        trt_actions,
+        action_dim=action_dim,
+        name=name,
+    )
+    return trt_actions
+
 @torch.no_grad()    
 def compare_full_vla_to_eager_actions(
     policy,
@@ -113,21 +243,12 @@ def compare_full_vla_to_eager_actions(
         x_t = x_t + dt * v_t
 
     trt_actions = x_t
-    
-    action_dim = policy.config.output_features[ACTION].shape[0]
-    eager_actions = eager_actions[:, :, :action_dim]
-    trt_actions = trt_actions[:, :, :action_dim]
-
-    diff = (eager_actions.float() - trt_actions.float()).abs()
-    ade = compute_action_chunk_ade(trt_actions, eager_actions)
-    minade = compute_action_chunk_minade(trt_actions, eager_actions)
-
-    print("action xyz ADE:", ade)
-    print("action xyz minADE:", minade)
-    print("Eager actions:", eager_actions.shape, eager_actions.dtype)
-    print("TRT actions:", trt_actions.shape, trt_actions.dtype)
-    print("max diff:", diff.max().item())
-    print("mean diff:", diff.mean().item())
+    compare_action_rollout_to_eager(
+        eager_actions,
+        trt_actions,
+        action_dim=policy.config.output_features[ACTION].shape[0],
+    )
+    return trt_actions
 
 @torch.no_grad()
 def compare_action_step(core, action_module, action_runner, prefix_pad_masks, prefix_k, prefix_v, x_t, timestep, device):

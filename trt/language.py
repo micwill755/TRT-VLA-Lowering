@@ -95,6 +95,47 @@ class PluginPrefixLMWrapper(nn.Module):
 
         return hidden, new_kvs
 
+
+class GROOTPluginContextWrapper(nn.Module):
+    def __init__(self, decoder, eagle_linear, vlln, vl_self_attention):
+        super().__init__()
+        self.decoder = decoder
+        self.eagle_linear = eagle_linear
+        self.vlln = vlln
+        self.vl_self_attention = vl_self_attention
+
+    def forward(self, inputs_embeds, kv_caches, ctx_len):
+        hidden = _as_tensor(inputs_embeds)
+        seq_len = inputs_embeds.shape[1]
+
+        for i, layer in enumerate(self.decoder.layers):
+            residual = hidden
+            hidden = _as_tensor(layer.input_layernorm(hidden))
+            hidden, _ = layer.self_attn(
+                hidden_states=hidden,
+                past_key_value=kv_caches[i],
+                ctx_len=ctx_len,
+            )
+            hidden = _as_tensor(hidden)
+            hidden = residual + hidden
+
+            residual = hidden
+            hidden = _as_tensor(layer.post_attention_layernorm(hidden))
+            hidden = _as_tensor(layer.mlp(hidden))
+            hidden = residual + hidden
+
+        hidden = _as_tensor(self.decoder.norm(hidden))
+
+        context_embs = self.eagle_linear(hidden)
+
+        vlln_weight = getattr(self.vlln, "weight", None)
+        if vlln_weight is not None:
+            context_embs = context_embs.to(dtype=vlln_weight.dtype)
+
+        context_embs = self.vlln(context_embs)
+        context_embs = self.vl_self_attention(context_embs)
+        return context_embs
+
 @torch.no_grad()
 def run_vlm_preprocessing(
     core,
@@ -125,6 +166,46 @@ def run_vlm_preprocessing(
         prefix_attention_mask,
         prefix_position_ids,
     )
+
+def compile_groot_lm_trt_with_plugin(
+    core,
+    input_embs,
+    *,
+    device,
+    position_ids=None,
+    settings,
+):
+    max_seq_len = input_embs.shape[1]
+
+    plugin_language = make_groot_plugin_language(
+        core,
+        max_seq_len=max_seq_len,
+        device=device,
+        position_ids=position_ids,
+        attention_cls=PluginAttention,
+    )
+
+    kv_caches = make_groot_language_kv_caches(
+        core,
+        batch_size=input_embs.shape[0],
+        max_seq_len=max_seq_len,
+        device=device,
+    )
+
+    ctx_len = torch.full(
+        (input_embs.shape[0],),
+        max_seq_len,
+        device=device,
+        dtype=torch.int32,
+    )
+
+    trt_language = compile_trt_module(
+        plugin_language,
+        (input_embs.to(torch.float16), kv_caches, ctx_len),
+        settings,
+    )
+
+    return trt_language, max_seq_len
 
 def compile_lm_trt_with_plugin(
     core,
@@ -218,6 +299,127 @@ def run_prefix_plugin_language(
         return prefix_k, prefix_v
     return out
 
+
+@torch.no_grad()
+def run_groot_plugin_language(
+    trt_language,
+    core,
+    input_embs,
+    *,
+    max_seq_len,
+    device,
+):
+    input_embs = input_embs.to(device=device, dtype=torch.float16)
+
+    kv_caches = make_groot_language_kv_caches(
+        core,
+        batch_size=input_embs.shape[0],
+        max_seq_len=max_seq_len,
+        device=device,
+    )
+
+    ctx_len = torch.full(
+        (input_embs.shape[0],),
+        input_embs.shape[1],
+        device=device,
+        dtype=torch.int32,
+    )
+
+    return trt_language(input_embs, kv_caches, ctx_len)
+
+def _groot_decoder(language_model):
+    # Eagle uses HF CausalLM wrappers like Qwen2ForCausalLM/Qwen3ForCausalLM.
+    return getattr(language_model, "model", language_model)
+
+
+def make_groot_language_kv_caches(core, batch_size, max_seq_len, device):
+    language_model = core.backbone.eagle_model.language_model
+    decoder = _groot_decoder(language_model)
+    cfg = language_model.config
+
+    head_dim = getattr(
+        cfg,
+        "head_dim",
+        cfg.hidden_size // cfg.num_attention_heads,
+    )
+
+    return [
+        torch.zeros(
+            batch_size,
+            2,
+            cfg.num_key_value_heads,
+            max_seq_len,
+            head_dim,
+            device=device,
+            dtype=torch.float16,
+        )
+        for _ in range(len(decoder.layers))
+    ]
+
+def make_groot_plugin_language(
+    core,
+    max_seq_len,
+    device,
+    position_ids=None,
+    attention_cls=PluginAttention,
+):
+    eagle = core.backbone.eagle_model
+
+    language_model = copy.deepcopy(eagle.language_model).to(
+        device=device,
+        dtype=torch.float16,
+    ).eval()
+
+    decoder = _groot_decoder(language_model)
+
+    if position_ids is None:
+        position_ids = torch.arange(max_seq_len, device=device).view(1, max_seq_len)
+
+    position_ids = position_ids.to(device=device)[:, :max_seq_len]
+
+    cfg = language_model.config
+    head_dim = getattr(
+        cfg,
+        "head_dim",
+        cfg.hidden_size // cfg.num_attention_heads,
+    )
+
+    with torch.no_grad():
+        dummy = torch.ones(
+            position_ids.shape[0],
+            max_seq_len,
+            cfg.hidden_size,
+            device=device,
+            dtype=torch.float16,
+        )
+        cos, sin = decoder.rotary_emb(dummy, position_ids)
+
+        h2 = head_dim // 2
+        rope_cache = torch.cat(
+            [
+                cos[:, :max_seq_len, :h2].float(),
+                sin[:, :max_seq_len, :h2].float(),
+            ],
+            dim=-1,
+        )
+
+    print("groot rope_cache shape/dtype:", rope_cache.shape, rope_cache.dtype)
+    print("groot head_dim:", head_dim)
+
+    _install_plugin_attention(
+        decoder,
+        cfg,
+        rope_cache,
+        attention_cls=attention_cls,
+        enable_bidirectional_prefill=0,
+    )
+
+    return GROOTPluginContextWrapper(
+        decoder,
+        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
+        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
+        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
+    ).eval()
 
 def _smoke_first_bad_index(mask, shape):
     flat_idx = int(mask.flatten().nonzero(as_tuple=False)[0].item())
@@ -377,6 +579,7 @@ def _install_plugin_attention(
     config,
     rope_cache: torch.Tensor,
     attention_cls=PluginAttention,
+    enable_bidirectional_prefill: int = 1,
 ) -> None:
     for i, layer in enumerate(lm.layers):
         layer.self_attn = attention_cls(
@@ -384,6 +587,7 @@ def _install_plugin_attention(
             config,
             layer_idx=i,
             rope_cache=rope_cache,
+            enable_bidirectional_prefill=enable_bidirectional_prefill,
         ).eval()
 
 def make_pi05_plugin_language(
