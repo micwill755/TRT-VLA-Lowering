@@ -2,6 +2,7 @@ import torch
 
 from lerobot.policies.groot import GrootPolicy
 
+from trt.action_rollout import ActionRolloutContext, GROOTActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module
 from trt.diffusion import GrootStaticDiffusionStep
 from trt.utils import (
@@ -10,7 +11,12 @@ from trt.utils import (
     prepare_policy_inputs_groot,
 )
 from trt.data import make_batch
-from trt.packing import PackedLanguageInputs, pack_placeholder_replace
+from trt.packing import (
+    MultimodalPromptProcessor,
+    PackedLanguageInputs,
+    PromptPackingSpec,
+    PromptTensorInputs,
+)
 from trt.vision import GROOTVisualEmbed
 from trt.language import (
     compile_groot_lm_trt_with_plugin,
@@ -20,7 +26,6 @@ from trt.measure import (
     compare_full_groot_to_eager_actions,
     compare_groot_action_step,
     compare_vision,
-    sample_groot_actions,
     tensor_error_metrics,
 )
 from trt.plugin_utils import (
@@ -86,15 +91,21 @@ def build_groot_language_inputs(core, vit_embs, input_ids, attention_mask=None) 
         "image_token_index",
         eagle.config.image_token_index,
     )
-    if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
 
-    return pack_placeholder_replace(
-        input_ids=input_ids,
-        token_embed_fn=eagle.language_model.get_input_embeddings(),
-        image_embs=vit_embs,
-        image_token_id=image_token_index,
-        attention_mask=attention_mask,
+    processor = MultimodalPromptProcessor(
+        PromptPackingSpec(
+            style="chat_template_placeholder",
+            token_embed_fn=eagle.language_model.get_input_embeddings(),
+            image_token_id=image_token_index,
+        )
+    )
+
+    return processor(
+        PromptTensorInputs(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            image_embs=vit_embs,
+        )
     )
 
 @torch.no_grad()
@@ -142,14 +153,6 @@ def make_groot_context_masks(context_embs, attention_mask):
     )
 
 @torch.no_grad()
-def context_relative_mean_percent(eager_context_embs, trt_context_embs, attention_mask):
-    compact_eager, _, _, _ = make_groot_context_masks(eager_context_embs, attention_mask)
-    compact_trt, _, _, _ = make_groot_context_masks(trt_context_embs, attention_mask)
-
-    diff = (compact_trt.float() - compact_eager.float()).abs()
-    return (diff.mean() / compact_eager.float().abs().mean().clamp_min(1e-8) * 100).item()
-
-@torch.no_grad()
 def compare_groot_context(eager_context_embs, trt_context_embs, attention_mask, name="groot context"):
 
     compact_eager, _, _, _ = make_groot_context_masks(eager_context_embs, attention_mask)
@@ -186,15 +189,6 @@ def compare_groot_context_token_types(core, eager_context_embs, trt_context_embs
             _select_context_rows(trt_context_embs, text_tokens),
             _select_context_rows(eager_context_embs, text_tokens),
         )
-
-@torch.no_grad()
-def build_groot_language_input_embs(core, vit_embs, input_ids, attention_mask=None):
-    return build_groot_language_inputs(
-        core,
-        vit_embs,
-        input_ids,
-        attention_mask,
-    ).inputs_embeds
 
 def main() -> int:
     # -------------------------
@@ -389,15 +383,18 @@ def main() -> int:
         dtype=eager_action_context.dtype,
     )
 
-    # Run the full eager GROOT action rollout once as the reference final action output.
-    eager_actions = sample_groot_actions(
+    # Run the eager action module through the shared raw-tensor rollout loop.
+    eager_action_rollout_context = ActionRolloutContext(
+        noise=noise,
+        device=device,
+        context_embs=eager_action_context,
+        state=state,
+        embodiment_id=embodiment_id,
+    )
+    eager_actions = sample_actions_raw(
         action_module,
-        core.action_head,
-        eager_action_context,
-        state,
-        embodiment_id,
-        noise,
-        device,
+        eager_action_rollout_context,
+        GROOTActionAdapter(core.action_head),
     )
 
     # -------------------------
@@ -441,21 +438,8 @@ def main() -> int:
     )
 
     print("full action metrics")
-    # Roll the TRT action engine with plugin LM context from eager vision to isolate action-engine drift.
-    trt_actions_eager_vision_context = compare_full_groot_to_eager_actions(
-        core,
-        trt_action,
-        action_compile_context,
-        state,
-        embodiment_id,
-        eager_actions,
-        noise,
-        device=device,
-        name="full action metrics with eager-vision context",
-    )
-
     # Roll the whole TRT path: TRT vision, plugin LM/context, and TRT action engine.
-    trt_actions = compare_full_groot_to_eager_actions(
+    compare_full_groot_to_eager_actions(
         core,
         trt_action,
         full_trt_action_context,

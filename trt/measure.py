@@ -1,5 +1,11 @@
 import torch
 from lerobot.utils.constants import ACTION
+from trt.action_rollout import (
+    ActionRolloutContext,
+    GROOTActionAdapter,
+    PI05ActionAdapter,
+    sample_actions_raw,
+)
 from trt.utils import prepare_policy_inputs, make_runner_inputs, build_prefix_inputs, compact_prefix_inputs
 
 def _first_bad_index(mask, shape):
@@ -82,43 +88,23 @@ def compare_action_rollout_to_eager(eager_actions, trt_actions, *, action_dim=No
     print("mean diff:", diff.mean().item())
 
 @torch.no_grad()
-def sample_groot_actions(action_runner, action_head, vl_embs, state, embodiment_id, noise, device):
-    batch_size = vl_embs.shape[0]
-    dtype = vl_embs.dtype
-
-    vl_embs = vl_embs.to(device=device, dtype=dtype)
-    actions = noise.clone().to(device=device, dtype=dtype)
-    state = state.to(device=device, dtype=dtype)
-    embodiment_id = embodiment_id.to(device=device)
-
-    num_steps = action_head.num_inference_timesteps
-    dt = 1.0 / num_steps
-
-    for t in range(num_steps):
-        t_cont = t / float(num_steps)
-        t_discretized = int(t_cont * action_head.num_timestep_buckets)
-
-        timestep = torch.full(
-            (batch_size,),
-            t_discretized,
-            device=device,
-            dtype=torch.long,
-        )
-
-        pred_velocity = action_runner(
-            actions,
-            timestep,
-            vl_embs,
-            state,
-            embodiment_id,
-        )
-        if isinstance(pred_velocity, (tuple, list)):
-            pred_velocity = pred_velocity[0]
-
-        actions = actions + dt * pred_velocity
-
-    return actions
-
+def compare_actions_raw(
+    action_runner,
+    eager_actions,
+    context: ActionRolloutContext,
+    adapter,
+    *,
+    action_dim=None,
+    name=None,
+):
+    trt_actions = sample_actions_raw(action_runner, context, adapter)
+    compare_action_rollout_to_eager(
+        eager_actions,
+        trt_actions,
+        action_dim=action_dim,
+        name=name,
+    )
+    return trt_actions
 
 @torch.no_grad()
 def compare_groot_action_step(action_module, trt_action, vl_embs, state, embodiment_id, noise, device):
@@ -173,22 +159,21 @@ def compare_full_groot_to_eager_actions(
     name=None,
     action_dim=None,
 ):
-    trt_actions = sample_groot_actions(
-        action_runner,
-        core.action_head,
-        context_embs,
-        state,
-        embodiment_id,
-        noise,
-        device,
+    context = ActionRolloutContext(
+        noise=noise,
+        device=device,
+        context_embs=context_embs,
+        state=state,
+        embodiment_id=embodiment_id,
     )
-    compare_action_rollout_to_eager(
+    return compare_actions_raw(
+        action_runner,
         eager_actions,
-        trt_actions,
+        context,
+        GROOTActionAdapter(core.action_head),
         action_dim=action_dim,
         name=name,
     )
-    return trt_actions
 
 @torch.no_grad()    
 def compare_full_vla_to_eager_actions(
@@ -224,31 +209,20 @@ def compare_full_vla_to_eager_actions(
             prefix_position_ids,
         )
 
-    batch_size = tokens.shape[0]
-    dt = -1.0 / num_steps
-    x_t = noise.clone()
-
-    for step in range(num_steps):
-        timestep = torch.full(
-            (batch_size,),
-            1.0 + step * dt,
-            dtype=torch.float32,
-            device=x_t.device,
-        )
-
-        v_t = action_runner(
-            *make_runner_inputs(core, prefix_pad_masks, prefix_k, prefix_v, x_t, timestep, device)
-        ).float()
-
-        x_t = x_t + dt * v_t
-
-    trt_actions = x_t
-    compare_action_rollout_to_eager(
+    context = ActionRolloutContext(
+        noise=noise,
+        device=device,
+        prefix_k=prefix_k,
+        prefix_v=prefix_v,
+        prefix_pad_mask=prefix_pad_masks,
+    )
+    return compare_actions_raw(
+        action_runner,
         eager_actions,
-        trt_actions,
+        context,
+        PI05ActionAdapter(core, num_steps),
         action_dim=policy.config.output_features[ACTION].shape[0],
     )
-    return trt_actions
 
 @torch.no_grad()
 def compare_action_step(core, action_module, action_runner, prefix_pad_masks, prefix_k, prefix_v, x_t, timestep, device):

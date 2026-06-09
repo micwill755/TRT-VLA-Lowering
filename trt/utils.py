@@ -3,9 +3,11 @@ import torch
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
 from trt.packing import (
+    MultimodalPromptProcessor,
     PackedLanguageInputs,
+    PromptPackingSpec,
+    PromptTensorInputs,
     compact_packed_language_inputs,
-    pack_concat_prefix,
 )
 
 def disable_flash_attention(module):
@@ -59,14 +61,21 @@ def prepare_policy_inputs(policy, batch, device):
 
 @torch.no_grad()
 def build_packed_prefix_inputs(core, image_embs, img_masks, tokens, masks) -> PackedLanguageInputs:
-    text_embs = core.paligemma_with_expert.embed_language_tokens(tokens)
-    return pack_concat_prefix(
-        image_embs=image_embs,
-        image_masks=img_masks,
-        text_embs=text_embs,
-        text_mask=masks,
-        make_att_2d_masks=make_att_2d_masks,
-        prepare_attention_mask_4d=core._prepare_attention_masks_4d,
+    processor = MultimodalPromptProcessor(
+        PromptPackingSpec(
+            style="concat_prefix",
+            make_att_2d_masks=make_att_2d_masks,
+            prepare_attention_mask_4d=core._prepare_attention_masks_4d,
+        )
+    )
+
+    return processor(
+        PromptTensorInputs(
+            image_embs=image_embs,
+            image_masks=img_masks,
+            text_embs=core.paligemma_with_expert.embed_language_tokens(tokens),
+            text_mask=masks,
+        )
     )
 
 @torch.no_grad()
