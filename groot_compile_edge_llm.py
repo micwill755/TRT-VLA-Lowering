@@ -1,5 +1,11 @@
 import torch
 import copy
+import json
+import pathlib
+
+from typing import Any
+
+import torch_tensorrt
 
 from transformers import AutoProcessor
 
@@ -49,19 +55,15 @@ from trt.plugin_utils import (
     infer_siglip_seq_len,
 )
 
-import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
-print(edge_plugins.__file__)
-print(hasattr(torch.ops.trt, "vit_attention_plugin"))
-
 TRT_SETTINGS = {
     "disable_tf32": True,
     "use_explicit_typing": True,
     "use_fp32_acc": True,
     "truncate_double": True,
-    "use_python_runtime": True,
+    #"use_python_runtime": True,
     "immutable_weights": True,
     "decompose_attention": True,
-    #"require_full_compilation": True,
+    "require_full_compilation": True,
 }
 
 ACTION_TRT_SETTINGS = {
@@ -217,6 +219,92 @@ def compare_groot_context_token_types(core, eager_context_embs, trt_context_embs
             _select_context_rows(eager_context_embs, text_tokens),
         )
 
+def save_groot_visual_engine_for_edge_llm(
+    model,
+    pixel_values,
+    engine_dir,
+    *,
+    device="cuda",
+    dtype=torch.float16,
+    model_type="groot_vision",
+):
+    engine_dir = pathlib.Path(engine_dir)
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    engine_path = engine_dir / "visual.engine"
+    config_path = engine_dir / "config.json"
+
+    pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
+    visual = GROOTVisualEmbed(model).eval().to(device=device, dtype=dtype)
+
+    vision_model = model.backbone.eagle_model.vision_model.vision_model
+
+    with torch.no_grad():
+        eager_output = visual(pixel_values)
+
+    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+
+    patched = []
+    patched = patch_vision_attention(
+        vision_model,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        name="SigLIP",
+    )
+
+    exported = torch.export.export(
+        visual,
+        args=(pixel_values,),
+        strict=False,
+    )
+
+    input_spec = torch_tensorrt.Input.from_tensor(pixel_values)
+
+    engine_bytes = torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(
+        exported,
+        inputs=(input_spec,),
+        disable_tf32=True,
+        use_explicit_typing=True,
+        use_fp32_acc=True,
+        truncate_double=True,
+        immutable_weights=True,
+        decompose_attention=True,
+        require_full_compilation=True,
+    )
+    
+    if patched:
+        restore_attention(patched)
+
+    engine_path.write_bytes(engine_bytes)
+
+    def tensor_meta(t):
+        return {
+            "shape": list(t.shape),
+            "dtype": str(t.dtype),
+        }
+
+    output_meta = (
+        [tensor_meta(t) for t in eager_output]
+        if isinstance(eager_output, (tuple, list))
+        else [tensor_meta(eager_output)]
+    )
+
+    config = {
+        "model_type": model_type,
+        "component": "vision",
+        "engine_file": "visual.engine",
+        "precision": "FP16",
+        "input_names": ["pixel_values"],
+        "inputs": {
+            "pixel_values": tensor_meta(pixel_values),
+        },
+        "outputs": output_meta,
+        "siglip_batch_size": batch_size,
+        "siglip_seq_len": seq_len,
+    }
+
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+    return engine_path
+
 def main() -> int:
     # Put every model and tensor on CUDA when available.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -293,229 +381,16 @@ def main() -> int:
     # -------------------------
     print("compiling vision")
 
-    # Wrap the original eager image encoder before patching attention; this is the true vision reference.
-    eager_model = GROOTVisualEmbed(model).eval().to(device=device, dtype=torch.float16)
-    with torch.no_grad():
-        eager_image_embs = eager_model(pixel_values)
-
-    # inner SigLIP transformer to infer batch size and seq_len
-    vision_model = model.backbone.eagle_model.vision_model.vision_model
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
-    
-    # Temporarily swap eager SigLIP attention for the plugin-friendly implementation.
-    patched = patch_vision_attention(
-        vision_model,
-        batch_size=batch_size,
-        seq_len=seq_len,
-        name="SigLIP"
-    )
-
-    # The plugin op has a dummy eager implementation, so this patched module is only meaningful for TRT export.
-    # Compile the patched vision path.
-    trt_vision_model = compile_trt_module(
-        eager_model,
-        (pixel_values,),
-        TRT_SETTINGS,
-    )
-
-    restore_attention(patched)
-
-    # Compare TRT against restored original eager and keep the tensor for context compilation.
-    compare_vision(model, images, trt_vision_model, eager_model)
-    with torch.no_grad():
-        trt_image_embs = trt_vision_model(pixel_values)
-    tensor_error_metrics("groot TRT vs original vision embeddings", trt_image_embs, eager_image_embs)
-
-    # -------------------------
-    # Language/context engine
-    # -------------------------
-    print("compiling language")
-        
-    # -------------------------
-    # Original eager context creation
-    # -------------------------
-    eager_context_embs, _, _, _ = build_groot_context_inputs(
+    engine_dir = "/tmp/groot_edge_llm/visual"
+    save_groot_visual_engine_for_edge_llm(
         model,
-        eager_image_embs,
-        input_ids,
-        attention_mask,
-    )
-
-    # -------------------------
-    # TensorRT/plugin language context creation
-    # -------------------------
-
-    # Build the actual LM input embeddings for the TRT vision path.
-    trt_language_inputs = build_groot_language_inputs(
-        model,
-        trt_image_embs,
-        input_ids,
-        attention_mask,
-    )
-
-    # Build the same LM input embeddings with eager vision so we can isolate LM-plugin drift.
-    eager_language_inputs = build_groot_language_inputs(
-        model,
-        eager_image_embs,
-        input_ids,
-        attention_mask,
-    )
-
-    # Compile the Eagle LM with PluginAttention.
-    trt_language_model, trt_language_max_seq_len = compile_groot_lm_trt_with_plugin(
-        model,
-        trt_language_inputs.inputs_embeds,
-        device=device,
-        position_ids=None,
-        settings=TRT_SETTINGS,
-    )
-
-    # Run plugin LM/context with eager vision embeddings.
-    trt_context_from_eager_vision = run_groot_plugin_language(
-        trt_language_model,
-        model,
-        eager_language_inputs.inputs_embeds,
-        max_seq_len=trt_language_max_seq_len,
-        device=device,
-    )
-
-    compare_groot_context(
-        eager_context_embs,
-        trt_context_from_eager_vision,
-        attention_mask,
-        name="groot plugin context with eager vision",
-    )
-
-    compare_groot_context_token_types(
-        model,
-        eager_context_embs,
-        trt_context_from_eager_vision,
-        input_ids,
-        attention_mask,
-        name="groot plugin context with eager vision",
-    )
-
-    # Run plugin LM/context with TRT vision embeddings.
-    trt_context_embs = run_groot_plugin_language(
-        trt_language_model,
-        model,
-        trt_language_inputs.inputs_embeds,
-        max_seq_len=trt_language_max_seq_len,
-        device=device,
-    )
-
-    compare_groot_context(
-        eager_context_embs,
-        trt_context_embs,
-        attention_mask,
-        name="groot plugin context full TRT",
-    )
-
-    compare_groot_context_token_types(
-        model,
-        eager_context_embs,
-        trt_context_embs,
-        input_ids,
-        attention_mask,
-        name="groot plugin context full TRT",
-    )
-
-    # -------------------------
-    # Eager baseline before action compile/offload
-    # -------------------------
-    # Keep the three action contexts explicit so the metric blocks show exactly what drift is isolated.
-    eager_action_context = eager_context_embs.to(torch.float16)
-    action_compile_context = trt_context_from_eager_vision.to(torch.float16)
-    full_trt_action_context = trt_context_embs.to(torch.float16)
-
-    # The action module consumes context embeddings, noisy actions, timestep, robot state, and embodiment id.
-    action_module = GrootStaticDiffusionStep(model.action_head).eval().to(
+        pixel_values,
+        engine_dir,
         device=device,
         dtype=torch.float16,
-    )
-
-    # Seed the diffusion noise so eager and TRT rollouts start from the same sample.
-    torch.manual_seed(SEED)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(SEED)
-
-    # Sample the initial noisy action chunk in GROOT's action horizon/dimension.
-    noise = torch.randn(
-        eager_action_context.shape[0],
-        model.action_head.config.action_horizon,
-        model.action_head.config.action_dim,
-        device=device,
-        dtype=eager_action_context.dtype,
-    )
-
-    # Run the eager action module through the shared raw-tensor rollout loop.
-    eager_action_rollout_context = ActionRolloutContext(
-        noise=noise,
-        device=device,
-        context_embs=eager_action_context,
-        state=state,
-        embodiment_id=embodiment_id,
-    )
-    eager_actions = sample_actions_raw(
-        action_module,
-        eager_action_rollout_context,
-        GROOTActionAdapter(model.action_head),
-    )
-
-    # -------------------------
-    # Action engine
-    # -------------------------
-    print("compiling action")
-
-    # Build representative action-step inputs using the plugin LM context with eager vision.
-    sample_inputs = make_compile_inputs(
-        action_module,
-        action_compile_context,
-        state.to(dtype=torch.float16),
-        embodiment_id,
-        device,
-    )
-
-    # Compile the static one-step denoising module.
-    trt_action = compile_trt_module(
-        action_module,
-        sample_inputs,
-        ACTION_TRT_SETTINGS,
-    )
-
-    # ACTION_TRT_SETTINGS may offload the source eager module to CPU during compile.
-    # Move it back before using it as the eager reference for action metrics.
-    action_module = action_module.to(device=device, dtype=torch.float16).eval()
-
-    # -------------------------
-    # Metrics
-    # -------------------------
-    print("direct action step metrics")
-    # Compare a single denoising step with identical context, state, noise, and timestep.
-    compare_groot_action_step(
-        action_module,
-        trt_action,
-        action_compile_context,
-        state,
-        embodiment_id,
-        noise,
-        device,
-    )
-
-    print("full action metrics")
-    # Roll the whole TRT path: TRT vision, plugin LM/context, and TRT action engine.
-    compare_full_groot_to_eager_actions(
-        model,
-        trt_action,
-        full_trt_action_context,
-        state,
-        embodiment_id,
-        eager_actions,
-        noise,
-        device=device,
-        name="full action metrics with full TRT context",
-    )
-
+        model_type="groot_vision",
+    )    
+    
     return 0
 
 if __name__ == "__main__":

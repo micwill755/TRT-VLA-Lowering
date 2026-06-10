@@ -4,6 +4,8 @@ from typing import Tuple
 import tensorrt as trt
 import torch
 
+import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
+
 def _register_plugin_op_impl() -> None:
     """
     Internal implementation to register the tensorrt_edge_llm::xqa_attn custom op for PyTorch.
@@ -49,6 +51,32 @@ def _register_plugin_op_impl() -> None:
         updated_kv = torch.empty_like(kv)
         return attn_out, updated_kv
 
+    @torch.library.custom_op("trt::vit_attention_plugin", mutates_args=())
+    def vit_attention_plugin(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen_carrier: torch.Tensor,
+        num_heads: int,
+        head_size: int,
+    ) -> torch.Tensor:
+        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
+        return torch.zeros_like(q)
+
+    @torch.library.register_fake("trt::vit_attention_plugin")
+    def _vit_attention_plugin_fake(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen_carrier: torch.Tensor,
+        num_heads: int,
+        head_size: int,
+    ) -> torch.Tensor:
+        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
+        return torch.empty_like(q)
+
 def register_plugin_op() -> None:
     """
     Register the tensorrt_edge_llm::xqa_attn custom op for PyTorch.
@@ -59,12 +87,12 @@ def register_plugin_op() -> None:
         torch.ops.tensorrt_edge_llm, "xqa_attn"
     ):
         return
+    
+    '''if hasattr(torch.ops, "trt") and hasattr(
+        torch.ops.trt, "vit_attention_plugin"
+    ):
+        return'''
     _register_plugin_op_impl()
-
-register_plugin_op()
-
-import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
-from trt import plugin_converter as _plugin_converter  # noqa: F401
 
 def load_plugin():
     plugin_so = os.environ.get("EDGE_LLM_PLUGIN_SO") or os.environ.get("EDGELLM_TRT_PLUGIN_SO")

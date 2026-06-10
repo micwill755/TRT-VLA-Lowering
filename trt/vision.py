@@ -1,5 +1,6 @@
 import copy
 
+from typing import Any
 import torch
 import torch.nn as nn
 
@@ -34,3 +35,14 @@ class SmolVLAVisualEmbed(nn.Module):
 
     def forward(self, image):
         return self.vlm_with_expert.embed_image(image)
+
+def save_vision_engine(
+    visual_model: nn.Module,
+    model_inputs: dict[str, Any],
+    path: str,
+    device: str = "cuda",
+    offload_module_to_cpu: bool = False,
+) -> bool:
+    pass
+
+    

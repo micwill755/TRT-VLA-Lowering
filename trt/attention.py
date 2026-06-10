@@ -4,8 +4,6 @@ from typing import Any, Optional, Tuple
 import tensorrt as trt
 import torch
 import torch.nn as nn
-from trt.plugin_utils import register_plugin_op
-register_plugin_op()
 
 class PluginAttention(nn.Module):
     """
