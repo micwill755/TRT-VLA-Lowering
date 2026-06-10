@@ -21,7 +21,8 @@ from trt.helper import (
 from trt.data import (
     load_test_data,
     prepare_model_inputs,
-    make_batch
+    make_batch,
+    pack_state
 )
 from trt.packing import (
     MultimodalPromptProcessor,
@@ -65,6 +66,15 @@ ACTION_TRT_SETTINGS = {
 
 MODEL_ID = "nvidia/GR00T-N1.5-3B"
 SEED = 42
+
+GROOT_EMBODIMENT_MAPPING = {
+    "new_embodiment": 31,
+    "oxe_droid": 17,
+    "agibot_genie1": 26,
+    "gr1": 24,
+    "so100": 2,
+    "unitree_g1": 3,
+}
 
 def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
     batch_size = vl_embs.shape[0]
@@ -241,20 +251,31 @@ def main() -> int:
         messages,
         device,
     )
+
     tokenized_data = model_inputs['tokenized_data']
     input_ids = tokenized_data['input_ids']
 
-    # Build one representative batch for compilation and metric checks.
-    batch = make_batch(policy, None, device, fill_missing=False)
+    # groot specifc inputs that we create
+    attention_mask = tokenized_data['attention_mask']
+    state, state_mask = pack_state(
+        data["state"],
+        max_state_dim=policy.config.max_state_dim,
+        device=device,
+    )
 
-    # Prepare the raw backbone inputs and action inputs used by GROOT.
-    backbone_inputs, action_inputs = prepare_policy_inputs_groot(policy, batch, device)
-    attention_mask = backbone_inputs["eagle_attention_mask"].to(device)
-    state = action_inputs["state"].to(device)
-    embodiment_id = action_inputs["embodiment_id"].to(device)
+    embodiment_tag = getattr(policy.config, "embodiment_tag", "new_embodiment")
+    embodiment_id = torch.full(
+        (state.shape[0],),
+        GROOT_EMBODIMENT_MAPPING.get(embodiment_tag, 0),
+        dtype=torch.long,
+        device=device,
+    )
 
     # Keep the raw image pixels as a one-stream list so this mirrors the PI0.5 script.
-    images = [backbone_inputs["eagle_pixel_values"].to(device=device, dtype=torch.float16)]
+    images = [tokenized_data["pixel_values"].to(
+        device=device,
+        dtype=torch.float16,
+    )]
     pixel_values = images[0]
 
     # Load the custom TensorRT plugin library before compiling plugin-backed modules.

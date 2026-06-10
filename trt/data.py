@@ -14,6 +14,7 @@ from trt import helper
 IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
 DEFAULT_DATASET_ID = "lerobot/libero"
 
+# TODO: deprecate this function
 def make_batch(policy, model_id, device, fill_missing=False, dataset_id=DEFAULT_DATASET_ID, episode_index=0, frame_index=0):
     preprocess, _ = make_pre_post_processors(
         policy.config,
@@ -132,3 +133,44 @@ def prepare_model_inputs(
     }
 
     return helper.to_device(model_inputs, device)
+
+def pack_state(
+    state: torch.Tensor,
+    max_state_dim: int,
+    device: str | torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    state = torch.as_tensor(state, dtype=torch.float32, device=device)
+
+    # Dataset gives (D,), GROOT wants batched state.
+    if state.ndim == 1:
+        state = state.unsqueeze(0)
+
+    # GROOT action head wants (B, 1, max_state_dim).
+    if state.ndim == 2:
+        state = state.unsqueeze(1)
+
+    bsz, _, state_dim = state.shape
+    used_dim = min(state_dim, max_state_dim)
+
+    if state_dim > max_state_dim:
+        state = state[:, :, :max_state_dim]
+    elif state_dim < max_state_dim:
+        pad = torch.zeros(
+            bsz,
+            1,
+            max_state_dim - state_dim,
+            dtype=state.dtype,
+            device=device,
+        )
+        state = torch.cat([state, pad], dim=-1)
+
+    state_mask = torch.zeros(
+        bsz,
+        1,
+        max_state_dim,
+        dtype=torch.bool,
+        device=device,
+    )
+    state_mask[:, :, :used_dim] = True
+
+    return state, state_mask
