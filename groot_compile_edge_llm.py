@@ -6,6 +6,7 @@ import torch
 import copy
 import json
 import logging
+import time
 
 from typing import Any
 
@@ -128,7 +129,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--debug", action="store_true", help="Enable extra debug logging/checks.")
     parser.add_argument("--no-accuracy-check", action="store_true", help="Skip eager-vs-TRT accuracy checks.")
-
+    parser.add_argument("--skip-export", action="store_true", help="Skip Edge engine export.")
+    parser.add_argument("--skip-pytorch", action="store_true", help="Skip eager PyTorch action rollout.")
+    parser.add_argument("--skip-edge", action="store_true", help="Skip Edge/TRT action rollout.")
+    parser.add_argument("--num-iterations", type=int, default=12, help="Total timing iterations including warmup.")
+    parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations to exclude from summary.")
+    
     return parser.parse_args()
 
 def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
@@ -393,6 +399,73 @@ def save_groot_lm_engine_for_edge_llm(
         },
     )
 
+def save_groot_action_diffusion_engine_for_edge_llm(
+    core,
+    context_embs,
+    state,
+    embodiment_id,
+    engine_dir,
+    *,
+    device,
+    dtype=torch.float16,
+    model_type="groot_action_diffusion",
+):
+    action_module = GrootStaticDiffusionStep(core.action_head).eval().to(
+        device=device,
+        dtype=dtype,
+    )
+
+    context_embs = context_embs.to(device=device, dtype=dtype).contiguous()
+    state = state.to(device=device, dtype=dtype).contiguous()
+    embodiment_id = embodiment_id.to(device=device).contiguous()
+
+    sample_inputs = make_compile_inputs(
+        action_module,
+        context_embs,
+        state,
+        embodiment_id,
+        device,
+    )
+
+    sample_inputs = tuple(
+        x.contiguous() if isinstance(x, torch.Tensor) else x
+        for x in sample_inputs
+    )
+
+    with torch.no_grad():
+        eager_output = action_module(*sample_inputs)
+
+    cfg = core.action_head.config
+
+    return save_trt_engine_module(
+        action_module,
+        sample_inputs,
+        engine_dir,
+        engine_file="diffusion.engine",
+        model_type=model_type,
+        component="diffusion",
+        input_names=[
+            "actions",
+            "timestep",
+            "context_embs",
+            "state",
+            "embodiment_id",
+        ],
+        output_names=["pred_velocity"],
+        example_output=eager_output,
+        extra_config={
+            "engine_role": "single_action_denoising_step",
+            "action_horizon": int(cfg.action_horizon),
+            "action_dim": int(cfg.action_dim),
+            "num_inference_timesteps": int(core.action_head.num_inference_timesteps),
+            "num_timestep_buckets": int(core.action_head.num_timestep_buckets),
+            "context_seq_len": int(context_embs.shape[1]),
+            "context_hidden_size": int(context_embs.shape[2]),
+            "state_horizon": int(state.shape[1]),
+            "state_dim": int(state.shape[2]),
+        },
+    )
+
 def compile_trt_with_plugin(
     model: nn.Module,
     policy: Any,
@@ -482,136 +555,342 @@ def compile_trt_with_plugin(
         dtype=torch.float16,
         model_type="groot_language",
     )
-    return trt_vision, trt_lm, None, None
+    
+    # -------------------------
+    # Action/diffusion engine
+    # -------------------------
+    print("compiling action diffusion")
+
+    with torch.no_grad():
+        context_embs, _, _, _ = build_groot_context_inputs(
+            model,
+            eager_image_embs,
+            input_ids,
+            attention_mask,
+        )
+
+    action_engine_dir = "/tmp/groot_edge_llm/action"
+    trt_diffusion = save_groot_action_diffusion_engine_for_edge_llm(
+        model,
+        context_embs,
+        state,
+        embodiment_id,
+        action_engine_dir,
+        device=device,
+        dtype=torch.float16,
+        model_type="groot_action_diffusion",
+    )
+
+    plugin_info = {
+        "vision_engine_dir": "/tmp/groot_edge_llm/visual",
+        "language_engine_dir": language_engine_dir,
+        "action_engine_dir": action_engine_dir,
+        "vision_engine": str(trt_vision),
+        "language_engine": str(trt_lm),
+        "diffusion_engine": str(trt_diffusion),
+        "language_seq_len": int(language_inputs.inputs_embeds.shape[1]),
+        "context_seq_len": int(context_embs.shape[1]),
+        "context_hidden_size": int(context_embs.shape[2]),
+        "state_shape": list(state.shape),
+        "embodiment_id": embodiment_id.detach().cpu().tolist(),
+    }
+
+    return trt_vision, trt_lm, trt_diffusion, plugin_info
+
+def compute_action_parity_metrics(pred_actions: torch.Tensor, target_actions: torch.Tensor) -> dict[str, float]:
+    pred = pred_actions.float()
+    target = target_actions.float()
+
+    diff = pred - target
+    abs_diff = diff.abs()
+
+    step_l2 = torch.linalg.vector_norm(diff, dim=-1)
+
+    return {
+        "action_ade": float(step_l2.mean().item()),
+        "action_fde": float(step_l2[..., -1].mean().item()),
+        "mean_abs": float(abs_diff.mean().item()),
+        "max_abs": float(abs_diff.max().item()),
+    }
+
+@torch.no_grad()
+def run_inference_pytorch_groot(
+    model,
+    policy,
+    model_inputs: dict,
+    *,
+    seed: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict, float]:
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    tokenized_data = model_inputs["tokenized_data"]
+    input_ids = tokenized_data["input_ids"]
+    attention_mask = tokenized_data["attention_mask"]
+    pixel_values = tokenized_data["pixel_values"].to(device=device, dtype=torch.float16)
+
+    state, _ = pack_state(
+        model_inputs["state"],
+        max_state_dim=policy.config.max_state_dim,
+        device=device,
+    )
+
+    embodiment_tag = getattr(policy.config, "embodiment_tag", "new_embodiment")
+    embodiment_id = torch.full(
+        (state.shape[0],),
+        GROOT_EMBODIMENT_MAPPING.get(embodiment_tag, 0),
+        dtype=torch.long,
+        device=device,
+    )
+
+    start_time = time.perf_counter()
+
+    with torch.autocast("cuda", dtype=torch.float16):
+        image_embs = GROOTVisualFixedInput(
+            model,
+            pixel_values,
+        ).eval().to(device=device, dtype=torch.float16)(pixel_values)
+
+        context_embs, _, _, _ = build_groot_context_inputs(
+            model,
+            image_embs,
+            input_ids,
+            attention_mask,
+        )
+
+        context_embs = context_embs.to(dtype=torch.float16)
+
+        noise = torch.randn(
+            context_embs.shape[0],
+            model.action_head.config.action_horizon,
+            model.action_head.config.action_dim,
+            device=device,
+            dtype=context_embs.dtype,
+        )
+
+        action_module = GrootStaticDiffusionStep(model.action_head).eval().to(
+            device=device,
+            dtype=torch.float16,
+        )
+
+        context = ActionRolloutContext(
+            noise=noise,
+            device=device,
+            context_embs=context_embs,
+            state=state,
+            embodiment_id=embodiment_id,
+        )
+
+        actions = sample_actions_raw(
+            action_module,
+            context,
+            GROOTActionAdapter(model.action_head),
+        )
+
+    elapsed = time.perf_counter() - start_time
+
+    extra = {
+        "noise": noise,
+        "context_embs": context_embs,
+        "state": state,
+        "embodiment_id": embodiment_id,
+    }
+
+    return actions, extra, elapsed
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+
+def _std(values: list[float]) -> float:
+    if len(values) == 0:
+        return 0.0
+    mean = _mean(values)
+    variance = sum((x - mean) ** 2 for x in values) / len(values)
+    return variance ** 0.5
+
+
+def _print_timing(name: str, times_ms: list[float]) -> None:
+    if len(times_ms) == 0:
+        return
+    print(
+        f"  {name:<22} min={min(times_ms):7.1f}  avg={_mean(times_ms):7.1f}  "
+        f"max={max(times_ms):7.1f}  std={_std(times_ms):6.1f}  (ms)"
+    )
+
+
+def _print_action_metrics(name: str, values: list[float]) -> None:
+    if len(values) == 0:
+        return
+    print(
+        f"  {name:<22} min={min(values):9.6f}  avg={_mean(values):9.6f}  "
+        f"max={max(values):9.6f}  std={_std(values):9.6f}"
+    )
+
+def make_groot_create_inputs_fn(processor, data, messages, device):
+    def create_inputs():
+        return prepare_model_inputs(
+            processor,
+            processor.process_vision_info,
+            {"add_generation_prompt": True},
+            {"images_kwargs": {"min_dynamic_tiles": 1, "max_dynamic_tiles": 1, "use_thumbnail": False}},
+            data,
+            messages,
+            device,
+        )
+    return create_inputs
 
 def main() -> int:
     args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    if args.plugin_so:
+        os.environ["EDGELLM_TRT_PLUGIN_SO"] = args.plugin_so
+
     data, messages = load_test_data(
-        dataset_id="lerobot/libero",
-        episode_index=0,
-        frame_index=0,
+        dataset_id=args.dataset_id,
+        episode_index=args.episode_index,
+        frame_index=args.frame_index,
     )
 
-    '''gt_xyz = data["ego_future_xyz"]
-
-    print(
-        f"clip_id={args.clip_id}  num_traj_samples={args.num_traj_samples}  "
-        f"iters={args.num_iterations}  warmup={args.warmup}  "
-        f"skip_pytorch={args.skip_pytorch}  skip_trt={args.skip_trt}"
-    )'''
-
-    # create processor and get tokenizer ----
     cache_dir = HF_LEROBOT_HOME / DEFAULT_TOKENIZER_ASSETS_REPO
-    processor = get_processor(str(cache_dir), 
+    processor = get_processor(
+        str(cache_dir),
         {
-            'trust_remote_code': True, 
-            'fix_mistral_regex': False
-        })
-    # ------
-    
-    model_inputs = prepare_model_inputs(
-        processor,
-        processor.process_vision_info,
-        {"add_generation_prompt": True},
-        {
-            "images_kwargs": {
-                "min_dynamic_tiles": 1,
-                "max_dynamic_tiles": 1,
-                "use_thumbnail": False,
-            },
+            "trust_remote_code": True,
+            "fix_mistral_regex": False,
         },
+    )
+
+    policy = load_policy(GrootPolicy, args.model_id, device).to(device).eval()
+    model = policy._groot_model.to(device).eval()
+
+    create_inputs_fn = make_groot_create_inputs_fn(
+        processor,
         data,
         messages,
         device,
     )
 
-    # ── load VLA policy ────────────────────────────
-    policy = load_policy(GrootPolicy, MODEL_ID, device).to(device).eval()
-    # The core model owns the vision, language/context, and action modules used below.
-    model = policy._groot_model.to(device).eval()
+    compile_inputs = create_inputs_fn()
 
-    # ── Compile TRT engines once (iter -1) ────────────────────────────
-    trt_vision = trt_lm = trt_diffusion = plugin_info = None
-    #if not args.skip_trt:
-    trt_vision, trt_lm, trt_diffusion, plugin_info = compile_trt_with_plugin(
-        model,
-        policy,
-        device,
-        model_inputs,
-        seed=args.seed,
-        max_generation_length=args.max_generation_length,
-        num_traj_samples=args.num_traj_samples,
+    print(
+        f"dataset={args.dataset_id}  episode={args.episode_index}  frame={args.frame_index}  "
+        f"num_traj_samples={args.num_traj_samples}  iters={args.num_iterations}  warmup={args.warmup}"
     )
 
+    trt_vision = trt_lm = trt_diffusion = plugin_info = None
+
+    if not args.skip_export:
+        trt_vision, trt_lm, trt_diffusion, plugin_info = compile_trt_with_plugin(
+            model,
+            policy,
+            device,
+            compile_inputs,
+            seed=args.seed,
+            max_generation_length=args.max_generation_length,
+            num_traj_samples=args.num_traj_samples,
+            max_seq_len=args.max_seq_len,
+            debug=args.debug,
+            accuracy_check=not args.no_accuracy_check,
+        )
+
     pt_times: list[float] = []
-    pt_ades: list[float] = []
-    trt_times: list[float] = []
-    trt_ades: list[float] = []
-    pt_coc = trt_coc = "(skipped)"
+    edge_times: list[float] = []
+    action_ades: list[float] = []
+    action_mean_abs: list[float] = []
 
-    '''for i in range(args.num_iterations):
-        print(f"\n=== iter {i} (clip={args.clip_id}) ===", flush=True)
+    for i in range(args.num_iterations):
+        print(f"\n=== iter {i} ===", flush=True)
 
-        # ── PyTorch FP16 baseline ────────────────────────────────────
+        eager_actions = None
+
         if not args.skip_pytorch:
-            torch.cuda.synchronize(); t = time.perf_counter()
-            pred_xyz_pt, _, extra_pt, _ = run_inference_pytorch(
-                model,
-                create_inputs_fn,
-                seed=args.seed,
-                num_traj_samples=args.num_traj_samples,
-                max_generation_length=args.max_generation_length,
-            )
-            torch.cuda.synchronize(); pt_elapsed = 1000 * (time.perf_counter() - t)
-            pt_metrics = compute_trajectory_metrics(pred_xyz_pt, gt_xyz)
-            pt_coc = str(extra_pt["cot"][0][0, 0])
-            pt_times.append(pt_elapsed)
-            pt_ades.append(pt_metrics["min_ade"])
-            print(f"  PyTorch    : {pt_elapsed:7.1f} ms   minADE={pt_metrics['min_ade']:.4f} m")
+            model_inputs = create_inputs_fn()
 
-        # ── TRT Plugin FP16 ──────────────────────────────────────────
-        if not args.skip_trt:
-            torch.cuda.synchronize(); t = time.perf_counter()
-            pred_xyz_trt, _, extra_trt, _ = run_inference_trt_plugin(
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+            eager_actions, eager_extra, pt_elapsed_sec = run_inference_pytorch_groot(
                 model,
-                create_inputs_fn,
-                trt_vision=trt_vision,
-                trt_lm=trt_lm,
-                trt_diffusion=trt_diffusion,
-                plugin_info=plugin_info,
+                policy,
+                model_inputs,
                 seed=args.seed,
-                num_traj_samples=args.num_traj_samples,
-                max_generation_length=args.max_generation_length,
+                device=device,
             )
-            torch.cuda.synchronize(); trt_elapsed = 1000 * (time.perf_counter() - t)
-            trt_metrics = compute_trajectory_metrics(pred_xyz_trt, gt_xyz)
-            trt_coc = str(extra_trt["cot"][0][0, 0])
-            trt_times.append(trt_elapsed)
-            trt_ades.append(trt_metrics["min_ade"])
-            print(f"  TRT Plugin : {trt_elapsed:7.1f} ms   minADE={trt_metrics['min_ade']:.4f} m")
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+            pt_elapsed_ms = 1000 * pt_elapsed_sec
+            pt_times.append(pt_elapsed_ms)
+
+            print(f"  PyTorch GR00T : {pt_elapsed_ms:7.1f} ms")
+
+        if not args.skip_edge:
+            print("  Edge GR00T    : skipped until serialized engine runner is wired")
+
+            # Later this block becomes:
+            #
+            # model_inputs = create_inputs_fn()
+            #
+            # if device.type == "cuda":
+            #     torch.cuda.synchronize()
+            #
+            # edge_actions, edge_extra, edge_elapsed_sec = run_inference_edge_groot(
+            #     model,
+            #     policy,
+            #     model_inputs,
+            #     trt_vision=trt_vision,
+            #     trt_lm=trt_lm,
+            #     trt_diffusion=trt_diffusion,
+            #     plugin_info=plugin_info,
+            #     seed=args.seed,
+            #     device=device,
+            # )
+            #
+            # if device.type == "cuda":
+            #     torch.cuda.synchronize()
+            #
+            # edge_elapsed_ms = 1000 * edge_elapsed_sec
+            # edge_times.append(edge_elapsed_ms)
+            #
+            # print(f"  Edge GR00T    : {edge_elapsed_ms:7.1f} ms")
+            #
+            # if eager_actions is not None:
+            #     metrics = compute_action_parity_metrics(edge_actions, eager_actions)
+            #     action_ades.append(metrics["action_ade"])
+            #     action_mean_abs.append(metrics["mean_abs"])
+            #     print(
+            #         f"  action ADE={metrics['action_ade']:.6f}  "
+            #         f"mean_abs={metrics['mean_abs']:.6f}  "
+            #         f"max_abs={metrics['max_abs']:.6f}"
+            #     )
 
     print("\n" + "=" * 78)
-    print(f"Summary  (warmup={args.warmup} / {args.num_iterations}, hot iters {args.warmup}–{args.num_iterations - 1})")
+    print(f"Summary  (warmup={args.warmup} / {args.num_iterations})")
     print("=" * 78)
+
     if pt_times:
-        _print_timing("PyTorch FP16",   pt_times[args.warmup :])
-        _print_minade("PyTorch FP16",   pt_ades[args.warmup :])
-    if trt_times:
-        _print_timing("TRT Plugin FP16", trt_times[args.warmup :])
-        _print_minade("TRT Plugin FP16", trt_ades[args.warmup :])
+        _print_timing("PyTorch GR00T", pt_times[args.warmup:])
 
-    if pt_times and trt_times:
-        pt_avg = float(np.mean(pt_times[args.warmup :]))
-        trt_avg = float(np.mean(trt_times[args.warmup :]))
-        speedup = pt_avg / trt_avg if trt_avg > 0 else float("nan")
-        print(f"\n  Speedup (TRT vs PyTorch): {speedup:5.2f}x   ({pt_avg:.1f} → {trt_avg:.1f} ms)")
+    if edge_times:
+        _print_timing("Edge GR00T", edge_times[args.warmup:])
 
-    print("\nCoC outputs (last iter):")
-    print(f"  PyTorch    : {pt_coc[:100]}...")
-    print(f"  TRT Plugin : {trt_coc[:100]}...")
+    if action_ades:
+        _print_action_metrics("Action ADE", action_ades[args.warmup:])
+        _print_action_metrics("Action mean abs", action_mean_abs[args.warmup:])
 
-    return 0'''
+    if pt_times and edge_times:
+        pt_avg = _mean(pt_times[args.warmup:])
+        edge_avg = _mean(edge_times[args.warmup:])
+        speedup = pt_avg / edge_avg if edge_avg > 0 else float("nan")
+        print(f"\n  Speedup: {speedup:5.2f}x   ({pt_avg:.1f} -> {edge_avg:.1f} ms)")
+
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
