@@ -57,8 +57,7 @@ from trt.utils import (
     make_suffix_position_and_mask,
     prepare_policy_inputs,
 )
-from trt.vision import PI05VisualEmbed
-
+from trt.vision import VisualFixedInput
 
 TRT_SETTINGS = {
     "disable_tf32": True,
@@ -236,7 +235,15 @@ def save_pi05_visual_engine_for_edge_llm(
     model_type: str = "pi05_vision",
 ):
     pixel_values = pixel_values.to(device=device).contiguous()
-    visual = PI05VisualEmbed(core).eval().to(device=device)
+    visual = VisualFixedInput(
+        vision_model=core.paligemma_with_expert.paligemma.model.vision_tower,
+        projector=core.paligemma_with_expert.paligemma.model.multi_modal_projector,
+        sample_pixel_values=pixel_values,
+        select_layer=-1,
+        pixel_shuffle=False,
+        force_float32_input=True,
+        cast_output_to_input_dtype=True,
+    )
     vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
 
     with torch.no_grad():
@@ -414,14 +421,13 @@ def compile_trt_with_plugin(
     seed: int,
     max_seq_len: int | None = None,
     debug: bool = False,
-    accuracy_check: bool = True,
-    plugin_so: str | None = None,
+    accuracy_check: bool = True
 ) -> tuple[nn.Module, nn.Module, nn.Module, dict]:
     del debug
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
     pixel_values = images[0].to(device=device).contiguous()
 
-    load_plugins_for_trt(plugin_so)
+    load_plugins_for_trt()
 
     plugin_settings = {
         **TRT_SETTINGS,
@@ -584,14 +590,13 @@ def save_edge_engines_for_edge_llm(
     batch: dict[str, Any],
     *,
     max_seq_len: int | None = None,
-    engine_root: str | pathlib.Path = "/tmp/pi05_edge_llm",
-    plugin_so: str | None = None,
+    engine_root: str | pathlib.Path = "/tmp/pi05_edge_llm"
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, dict]:
     engine_root = pathlib.Path(engine_root)
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
     pixel_values = images[0].to(device=device).contiguous()
 
-    load_plugins_for_trt(plugin_so)
+    load_plugins_for_trt()
 
     print("exporting PI0.5 vision.engine")
     vision_engine_dir = engine_root / "visual"
@@ -813,7 +818,6 @@ def _load_tensor_bin(path: pathlib.Path, shape: list[int], dtype: str, device: t
     tensor = torch.frombuffer(raw, dtype=_torch_dtype_from_string(dtype)).clone()
     return tensor.reshape(tuple(shape)).to(device=device)
 
-
 def run_inference_edge_pi05(*args, **kwargs):
     del args, kwargs
     raise NotImplementedError(
@@ -822,7 +826,6 @@ def run_inference_edge_pi05(*args, **kwargs):
         "(x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask), "
         "while the current C++ smoke runner is GR00T-specific."
     )
-
 
 def main() -> int:
     args = parse_args()
@@ -854,8 +857,7 @@ def main() -> int:
             seed=args.seed,
             max_seq_len=args.max_seq_len,
             debug=args.debug,
-            accuracy_check=not args.no_accuracy_check,
-            plugin_so=args.plugin_so,
+            accuracy_check=not args.no_accuracy_check
         )
 
     if not args.skip_engine:
@@ -868,8 +870,7 @@ def main() -> int:
                 device,
                 compile_inputs,
                 max_seq_len=args.max_seq_len,
-                engine_root=args.engine_dir,
-                plugin_so=args.plugin_so,
+                engine_root=args.engine_dir
             )
 
     if not args.skip_edge:

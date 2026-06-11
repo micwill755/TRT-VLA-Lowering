@@ -57,69 +57,38 @@ class PixelOnlyWrapper(nn.Module):
     def forward(self, args):
         return self.wrapped(**args)
 
-class PI05VisualFixedInput(nn.Module):
-    """
-    Export-stable PI0.5/PaliGemma visual wrapper.
-
-    PI0.5 embed_image calls PaliGemma get_image_features, which runs the
-    vision_tower, takes the vision last_hidden_state, projects it with
-    multi_modal_projector, and returns that projected image-token sequence.
-    This wrapper spells out that path directly so the compile boundary is
-    explicit: pixels -> selected vision features -> projector -> visual embeds.
-
-    select_layer defaults to -1, matching PI0.5/PaliGemma's normal
-    last_hidden_state path. Non--1 values are supported for experiments and
-    require output_hidden_states=True, mirroring the GR00T fixed wrapper shape.
-    pixel_shuffle is kept as an opt-in escape hatch for wrapper symmetry, but
-    current PI0.5/PaliGemma does not use pixel shuffle.
-    """
-
+class VisualFixedInput(nn.Module):
     def __init__(
         self,
-        select_layer: int = -1,
-        vision_model: nn.Module | None = None,
-        v_args: dict[str, Any] | None = None,
-        mlp1: nn.Module | None = None,
-        pixel_shuffle: bool = False,
-        pixel_values: torch.Tensor | None = None,
         *,
-        core: nn.Module | None = None,
-        projector: nn.Module | None = None,
+        vision_model: nn.Module,
+        projector: nn.Module,
+        sample_pixel_values: torch.Tensor,
+        select_layer: int = -1,
+        pixel_shuffle: bool = False,
         downsample_ratio: float = 0.5,
+        force_float32_input: bool = False,
+        cast_output_to_input_dtype: bool = False,
+        vision_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__()
 
-        if core is not None:
-            paligemma_model = core.paligemma_with_expert.paligemma.model
-            if vision_model is None:
-                vision_model = paligemma_model.vision_tower
-            if projector is None and mlp1 is None:
-                projector = paligemma_model.multi_modal_projector
-
-        if vision_model is None:
-            raise ValueError("PI05VisualFixedInput requires vision_model or core")
-
-        projector = projector if projector is not None else mlp1
-        if projector is None:
-            raise ValueError("PI05VisualFixedInput requires projector/mlp1 or core")
-
-        v_args = dict(v_args or {})
-        if pixel_values is None and "pixel_values" in v_args:
-            pixel_values = v_args["pixel_values"]
-        if pixel_values is None:
-            raise ValueError("PI05VisualFixedInput requires sample pixel_values")
-
-        self.pixel_shuffle = bool(pixel_shuffle)
         self.vision_model = vision_model
+        self.projector = projector
         self.select_layer = int(select_layer)
-        self.mlp1 = projector
+        self.pixel_shuffle = bool(pixel_shuffle)
         self.downsample_ratio = float(downsample_ratio)
-        self.vision_kwargs = {k: v for k, v in v_args.items() if k != "pixel_values"}
+        self.force_float32_input = bool(force_float32_input)
+        self.cast_output_to_input_dtype = bool(cast_output_to_input_dtype)
+        self.vision_kwargs = dict(vision_kwargs or {})
 
         with torch.no_grad():
-            vit_embeds = self._select_vision_features(
-                self._run_vision(pixel_values.to(torch.float32))
-            )
+            sample = sample_pixel_values
+            if self.force_float32_input and sample.dtype != torch.float32:
+                # TODO, look into method for removing forced fp32 conversion.
+                sample = sample.to(torch.float32)
+
+            vit_embeds = self._select_vision_features(self._run_vision(sample))
 
             self.seq_len = int(vit_embeds.shape[1])
             self.hidden_size = int(vit_embeds.shape[2])
@@ -128,14 +97,9 @@ class PI05VisualFixedInput(nn.Module):
                 self._init_pixel_shuffle_shape()
                 vit_embeds = self._apply_pixel_shuffle(vit_embeds)
 
-            projected = self.mlp1(vit_embeds)
+            projected = self.projector(vit_embeds)
             self.output_seq_len = int(projected.shape[1])
             self.output_hidden_size = int(projected.shape[2])
-
-
-    @classmethod
-    def from_core(cls, core, pixel_values: torch.Tensor, *, select_layer: int = -1):
-        return cls(core=core, pixel_values=pixel_values, select_layer=select_layer)
 
     def _run_vision(self, pixel_values: torch.Tensor):
         kwargs = dict(self.vision_kwargs)
@@ -165,168 +129,30 @@ class PI05VisualFixedInput(nn.Module):
 
     def _apply_pixel_shuffle(self, x):
         n = x.shape[0]
+
         x = x.reshape(n, self.grid_w, self.out_h, self.hidden_after_first_view)
         x = x.permute(0, 2, 1, 3).contiguous()
+
         x = x.reshape(n, self.out_h, self.out_w, self.shuffle_hidden)
         x = x.permute(0, 2, 1, 3).contiguous()
+
         return x.reshape(n, -1, self.shuffle_hidden)
 
     def forward(self, pixel_values):
         out_dtype = pixel_values.dtype
-        if pixel_values.dtype != torch.float32:
+        
+        if self.force_float32_input and pixel_values.dtype != torch.float32:
+            # TODO, look into method for removing forced fp32 conversion.
             pixel_values = pixel_values.to(torch.float32)
 
         vit_embeds = self._select_vision_features(self._run_vision(pixel_values))
+
         if self.pixel_shuffle:
             vit_embeds = self._apply_pixel_shuffle(vit_embeds)
 
-        features = self.mlp1(vit_embeds)
-        if features.dtype != out_dtype:
+        features = self.projector(vit_embeds)
+
+        if self.cast_output_to_input_dtype and features.dtype != out_dtype:
             features = features.to(out_dtype)
+
         return features
-
-class GROOTVisualFixedInput(nn.Module):
-    """
-    Export-stable GR00T visual wrapper.
-
-    This spells out the same visual embedding path as extract_feature using
-    fixed metadata inferred from a representative image: selected vision layer,
-    optional pixel shuffle dimensions, and the final mlp1 projection. The output
-    is still GR00T visual embeddings; the difference is that the shape-sensitive
-    work is explicit and static for TensorRT export.
-
-    The problematic part is not the SigLIP vision tower itself. It is the
-    post-vision pixel-shuffle path in extract_feature:
-
-        h = w = int(vit_embeds.shape[1] ** 0.5)
-        vit_embeds = vit_embeds.reshape(batch, h, w, -1)
-        pixel_shuffle uses int(h * scale), int(c / scale), and int(c / scale**2)
-        vit_embeds = vit_embeds.reshape(batch, -1, hidden)
-        vit_embeds = mlp1(vit_embeds)
-
-    This wrapper precomputes grid/output/hidden sizes from sample_pixel_values so
-    the exported graph sees fixed reshape -> permute -> reshape -> mlp1 ops,
-    instead of Python int/sqrt/float scale math derived from symbolic shapes.
-    """
-    def __init__(self, groot, sample_pixel_values: torch.Tensor):
-        super().__init__()
-
-        self.eagle_model = groot.backbone.eagle_model
-        self.vision_model = self.eagle_model.vision_model
-        self.mlp1 = self.eagle_model.mlp1
-
-        # select layer is the output (hidden states) we want to pass to the mlp
-        # e.g. if select_layer = -4, then the fourth-from-last vision layer output is what gets passed to mlp1.
-        '''
-            pixel_values
-
-            -> vision_model
-            -> choose hidden state via select_layer
-            -> optional pixel_shuffle (turns spatial resolution down and channels up
-            e.g downsample_ratio = 0.5 on [2, 16, 16, hidden] -> [2, 8, 8, hidden * 4] -> [2, 64, hidden * 4]
-            -> mlp1
-            -> visual embeddings for GROOT
-
-        '''
-        self.select_layer = int(getattr(self.eagle_model, "select_layer", -1))
-        self.use_pixel_shuffle = bool(getattr(self.eagle_model, "use_pixel_shuffle", False))
-        self.downsample_ratio = float(getattr(self.eagle_model, "downsample_ratio", 0.5))
-
-        with torch.no_grad():
-            # Run one sample through the vision model to infer the static vision feature
-            # shape used by this wrapper: sequence length and hidden size before mlp1.
-            # If select_layer != -1, we need all hidden states so we can pick that layer;
-            # otherwise last_hidden_state is enough.
-
-            '''
-            output_hidden_states=self.select_layer != -1
-            means:
-
-            select_layer == -1   -> output_hidden_states=False
-                                    returns only last_hidden_state
-
-            select_layer != -1   -> output_hidden_states=True
-                                    returns all hidden_states
-                                    then we choose hidden_states[select_layer]
-
-            '''
-            out = self.vision_model(
-                pixel_values=sample_pixel_values,
-                output_hidden_states=self.select_layer != -1,
-                return_dict=True,
-            )
-
-            if self.select_layer == -1:
-                vit_embeds = out.last_hidden_state if hasattr(out, "last_hidden_state") else out
-            else:
-                vit_embeds = out.hidden_states[self.select_layer]
-
-        self.seq_len = int(vit_embeds.shape[1])
-        self.hidden_size = int(vit_embeds.shape[2])
-
-        if self.use_pixel_shuffle:
-            side = int(self.seq_len ** 0.5)
-            if side * side != self.seq_len:
-                raise ValueError(f"Expected square vision sequence, got seq_len={self.seq_len}")
-
-            self.grid_w = side
-            self.grid_h = side
-            self.out_w = int(self.grid_w * self.downsample_ratio)
-            self.out_h = int(self.grid_h * self.downsample_ratio)
-            self.hidden_after_first_view = int(self.hidden_size / self.downsample_ratio)
-            self.shuffle_hidden = int(
-                self.hidden_size / (self.downsample_ratio * self.downsample_ratio)
-            )
-
-    def _pixel_shuffle_fixed(self, x):
-        n = x.shape[0]
-
-        x = x.reshape(
-            n,
-            self.grid_w,
-            self.out_h,
-            self.hidden_after_first_view,
-        )
-        x = x.permute(0, 2, 1, 3).contiguous()
-
-        x = x.reshape(
-            n,
-            self.out_h,
-            self.out_w,
-            self.shuffle_hidden,
-        )
-        x = x.permute(0, 2, 1, 3).contiguous()
-
-        return x
-
-    def forward(self, pixel_values):
-        if self.select_layer == -1:
-            out = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=False,
-                return_dict=True,
-            )
-            vit_embeds = out.last_hidden_state if hasattr(out, "last_hidden_state") else out
-        else:
-            out = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            vit_embeds = out.hidden_states[self.select_layer]
-
-        if self.use_pixel_shuffle:
-            vit_embeds = vit_embeds.reshape(
-                vit_embeds.shape[0],
-                self.grid_w,
-                self.grid_h,
-                self.hidden_size,
-            )
-            vit_embeds = self._pixel_shuffle_fixed(vit_embeds)
-            vit_embeds = vit_embeds.reshape(
-                vit_embeds.shape[0],
-                -1,
-                vit_embeds.shape[-1],
-            )
-
-        return self.mlp1(vit_embeds)

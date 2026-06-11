@@ -51,7 +51,7 @@ from trt.packing import (
     PromptTensorInputs,
 )
 from trt.vision import (
-    GROOTVisualFixedInput, 
+    VisualFixedInput, 
     PixelOnlyWrapper
 )
 
@@ -120,7 +120,6 @@ GROOT_EMBODIMENT_MAPPING = {
 }
 
 logger = logging.getLogger(__name__)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export GR00T TensorRT engines for TensorRT-Edge-LLM")
@@ -280,6 +279,23 @@ def make_groot_context_masks(context_embs, attention_mask):
         context_position_ids,
     )
 
+def make_groot_visual_fixed_input(
+    model: nn.Module,
+    sample_pixel_values: torch.Tensor,
+    *,
+    device,
+    dtype=torch.float16,
+) -> VisualFixedInput:
+    eagle = model.backbone.eagle_model
+    return VisualFixedInput(
+        vision_model=eagle.vision_model,
+        projector=eagle.mlp1,
+        sample_pixel_values=sample_pixel_values,
+        select_layer=eagle.select_layer,
+        pixel_shuffle=eagle.use_pixel_shuffle,
+        downsample_ratio=eagle.downsample_ratio,
+    ).eval().to(device=device, dtype=dtype)
+
 def save_groot_visual_engine_for_edge_llm(
     model,
     pixel_values,
@@ -288,13 +304,17 @@ def save_groot_visual_engine_for_edge_llm(
     device="cuda",
     dtype=torch.float16,
     model_type="groot_vision",
+    visual: nn.Module | None = None,
 ):
     pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
 
-    visual = GROOTVisualFixedInput(
-        model,
-        pixel_values,
-    ).eval().to(device=device, dtype=dtype)
+    if visual is None:
+        visual = make_groot_visual_fixed_input(
+            model,
+            pixel_values,
+            device=device,
+            dtype=dtype,
+        )
 
     vision_model = model.backbone.eagle_model.vision_model.vision_model
 
@@ -524,6 +544,13 @@ def save_edge_engines_for_edge_llm(
     # -------------------------
     print("compiling vision")
 
+    visual = make_groot_visual_fixed_input(
+        model,
+        pixel_values,
+        device=device,
+        dtype=torch.float16,
+    )
+
     engine_dir = str(pathlib.Path(engine_root) / "visual")
     trt_vision = save_groot_visual_engine_for_edge_llm(
         model,
@@ -532,6 +559,7 @@ def save_edge_engines_for_edge_llm(
         device=device,
         dtype=torch.float16,
         model_type="groot_vision",
+        visual=visual,
     )
 
     # -------------------------
@@ -540,10 +568,7 @@ def save_edge_engines_for_edge_llm(
     print("compiling language")
 
     with torch.no_grad():
-        eager_image_embs = GROOTVisualFixedInput(
-            model,
-            pixel_values,
-        ).eval().to(device=device, dtype=torch.float16)(pixel_values)
+        eager_image_embs = visual(pixel_values)
 
     language_inputs = build_groot_language_inputs(
         model,
@@ -664,10 +689,12 @@ def compile_trt_with_plugin(
     # -------------------------
     print("compiling vision")
 
-    visual = GROOTVisualFixedInput(
+    visual = make_groot_visual_fixed_input(
         model,
         pixel_values,
-    ).eval().to(device=device, dtype=torch.float16)
+        device=device,
+        dtype=torch.float16,
+    )
 
     with torch.no_grad():
         eager_image_embs = visual(pixel_values)
@@ -822,10 +849,12 @@ def run_inference_pytorch_groot(
     start_time = time.perf_counter()
 
     with torch.autocast("cuda", dtype=torch.float16):
-        image_embs = GROOTVisualFixedInput(
+        image_embs = make_groot_visual_fixed_input(
             model,
             pixel_values,
-        ).eval().to(device=device, dtype=torch.float16)(pixel_values)
+            device=device,
+            dtype=torch.float16,
+        )(pixel_values)
 
         context_embs, _, _, _ = build_groot_context_inputs(
             model,
@@ -1022,7 +1051,6 @@ def _run_groot_runtime_stage(runtime_bin: str, engine_root: pathlib.Path, fixtur
         env=env,
     )
 
-
 def _make_embodiment_id(policy, state: torch.Tensor, device: torch.device) -> torch.Tensor:
     """
     Build the per-sample robot/embodiment index consumed by GROOT's action head.
@@ -1040,6 +1068,7 @@ def _make_embodiment_id(policy, state: torch.Tensor, device: torch.device) -> to
         dtype=torch.long,
         device=device,
     )
+
 
 @torch.no_grad()
 def _print_groot_stage_parity(
@@ -1062,10 +1091,12 @@ def _print_groot_stage_parity(
     print("  staged parity:")
 
     with torch.autocast("cuda", dtype=torch.float16):
-        eager_visual_embeds = GROOTVisualFixedInput(
+        eager_visual_embeds = make_groot_visual_fixed_input(
             model,
             pixel_values,
-        ).eval().to(device=device, dtype=torch.float16)(pixel_values)
+            device=device,
+            dtype=torch.float16,
+        )(pixel_values)
     tensor_error_metrics("    visual_embeds", visual_embeds, eager_visual_embeds)
 
     eager_context_embs = build_groot_context_from_language_inputs(

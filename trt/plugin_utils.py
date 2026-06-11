@@ -77,9 +77,7 @@ def load_plugin():
     trt.init_libnvinfer_plugins(None, "")
     return plugin_so
 
-def load_plugins_for_trt(plugin_so: str | None) -> None:
-    if plugin_so:
-        os.environ["EDGELLM_TRT_PLUGIN_SO"] = plugin_so
+def load_plugins_for_trt():
     register_plugin_op()
     from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
     load_plugin()
