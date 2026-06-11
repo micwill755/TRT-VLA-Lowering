@@ -77,6 +77,7 @@ from trt.plugin_utils import (
     patch_vision_attention,  
     restore_attention,
     infer_siglip_seq_len,
+    load_plugins_for_trt
 )
 from trt.serialize import (
     SerializedTRTEngine,
@@ -516,9 +517,7 @@ def save_edge_engines_for_edge_llm(
     # groot specifc inputs ------
 
     # Load the custom TensorRT plugin library before compiling plugin-backed modules.
-    register_plugin_op()
-    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
-    load_plugin()
+    load_plugins_for_trt()
 
     # -------------------------
     # Vision engine
@@ -621,26 +620,35 @@ def compile_trt_with_plugin(
     debug: bool = False,
     accuracy_check: bool = True,
 ) -> tuple[nn.Module | None, nn.Module | None, nn.Module | None, dict]:
+    '''
+    tokenized_data
+    input_ids          text token IDs, including image placeholder tokens
+    attention_mask     text mask
+    pixel_values       processed image tensor
+    '''
     tokenized_data = model_inputs["tokenized_data"]
     input_ids = tokenized_data["input_ids"]
     attention_mask = tokenized_data["attention_mask"]
 
+    # GROOT is built to handle multiple embodiments, 
+    # where each robot can expose a different state vector width so 
+    # GROOT uses a fixed max_state_dim.
     state, _ = pack_state(
         model_inputs["state"],
         max_state_dim=policy.config.max_state_dim,
         device=device,
     )
     state = state.to(device=device, dtype=torch.float16).contiguous()
+    # the same model can support different robots but the action head has robot-specific weights.
+    # embodiment_id chooses which embodiment-specific state/action encoder and decoder weights to use
     embodiment_id = _make_embodiment_id(policy, state, device).contiguous()
-
+    # pixelk values [B, C, H, W]
     pixel_values = tokenized_data["pixel_values"].to(
         device=device,
         dtype=torch.float16,
     ).contiguous()
 
-    register_plugin_op()
-    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
-    load_plugin()
+    load_plugins_for_trt()
 
     plugin_settings = {
         **TRT_SETTINGS,
@@ -1016,6 +1024,15 @@ def _run_groot_runtime_stage(runtime_bin: str, engine_root: pathlib.Path, fixtur
 
 
 def _make_embodiment_id(policy, state: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """
+    Build the per-sample robot/embodiment index consumed by GROOT's action head.
+
+    GROOT supports multiple robot embodiments with different state/action layouts.
+    The action head uses this integer ID to select embodiment-specific state
+    encoder, action encoder, and action decoder weights. This script uses one
+    robot per batch, so every batch element gets the same ID, but the tensor must
+    still be shaped (B,) to match the model and TensorRT engine ABI.
+    """
     embodiment_tag = getattr(policy.config, "embodiment_tag", "new_embodiment")
     return torch.full(
         (state.shape[0],),
@@ -1220,6 +1237,7 @@ def main() -> int:
     if args.plugin_so:
         os.environ["EDGELLM_TRT_PLUGIN_SO"] = args.plugin_so
 
+    # load in episode 0, frame 0 using lerobot/libero dataset, frame 0 has 2 cameras (data is 2 still images)
     data, messages = load_test_data(
         dataset_id=args.dataset_id,
         episode_index=args.episode_index,
@@ -1238,6 +1256,8 @@ def main() -> int:
     policy = load_policy(GrootPolicy, args.model_id, device).to(device).eval()
     model = policy._groot_model.to(device).eval()
 
+    # TODO: right now we are using the same episode 0 and frame 0
+    # each iteration should use a different frame
     create_inputs_fn = make_groot_create_inputs_fn(
         processor,
         data,

@@ -77,6 +77,13 @@ def load_plugin():
     trt.init_libnvinfer_plugins(None, "")
     return plugin_so
 
+def load_plugins_for_trt(plugin_so: str | None) -> None:
+    if plugin_so:
+        os.environ["EDGELLM_TRT_PLUGIN_SO"] = plugin_so
+    register_plugin_op()
+    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
+    load_plugin()
+
 def restore_attention(patched):
     for layer, original_attn in patched:
         layer.self_attn = original_attn
@@ -105,7 +112,6 @@ def patch_vision_attention(
 
     print(f"patched {name} attention modules: {len(patched)}")
     return patched
-
 
 @torch.no_grad()
 def infer_siglip_seq_len(vision_model, image):

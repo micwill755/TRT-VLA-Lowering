@@ -372,7 +372,8 @@ def make_groot_plugin_language(
     core,
     max_seq_len,
     device,
-    position_ids=None
+    position_ids=None,
+    attention_cls=PluginAttention,
 ):
     eagle = core.backbone.eagle_model
 
@@ -422,6 +423,7 @@ def make_groot_plugin_language(
         cfg,
         rope_cache,
         enable_bidirectional_prefill=0,
+        attention_cls=attention_cls,
     )
 
     return GROOTPluginContextWrapper(
@@ -587,9 +589,10 @@ def _install_plugin_attention(
     config,
     rope_cache: torch.Tensor,
     enable_bidirectional_prefill: int = 1,
+    attention_cls=PluginAttention,
 ) -> None:
     for i, layer in enumerate(lm.layers):
-        layer.self_attn = PluginAttention(
+        layer.self_attn = attention_cls(
             layer.self_attn,
             config,
             layer_idx=i,

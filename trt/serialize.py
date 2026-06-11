@@ -233,3 +233,42 @@ class SerializedGrootAction:
             "state": state,
             "embodiment_id": embodiment_id,
         })[0]
+
+class SerializedPI05Vision:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def __call__(self, pixel_values):
+        return self.engine({
+            "pixel_values": pixel_values,
+        })[0]
+
+class SerializedPI05Language:
+    def __init__(self, engine):
+        self.engine = engine
+        self.max_seq_len = int(engine.config["max_seq_len"])
+
+    def __call__(self, input_embs, kv_caches, ctx_len):
+        inputs = {
+            "inputs_embeds": input_embs,
+            "ctx_len": ctx_len,
+        }
+
+        for i, kv_cache in enumerate(kv_caches):
+            inputs[f"kv_cache_{i}"] = kv_cache
+
+        return self.engine(inputs)
+
+class SerializedPI05Action:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def __call__(self, x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask):
+        return self.engine({
+            "x_t": x_t,
+            "timestep": timestep,
+            "prefix_k": prefix_k,
+            "prefix_v": prefix_v,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        })[0]
