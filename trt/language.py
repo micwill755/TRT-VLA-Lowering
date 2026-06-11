@@ -1,4 +1,7 @@
 import copy
+import logging
+
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -6,13 +9,65 @@ import torch.nn as nn
 from trt.attention import PluginAttention
 from trt.utils import build_prefix_inputs
 from trt.compile import compile_trt_module
+from trt.plugin_utils import set_plugin_config_from_model
 
 FP16 = torch.float16
+
+logger = logging.getLogger(__name__)
 
 def _as_tensor(x):
     if isinstance(x, (tuple, list)):
         return x[0]
     return x
+
+class GROOTLanguageEngineWrapper(nn.Module):
+    def __init__(self, plugin_language):
+        super().__init__()
+        self.plugin_language = plugin_language
+
+    def forward(self, inputs_embeds, ctx_len, *kv_caches):
+        kv_caches = list(kv_caches)
+        return self.plugin_language(inputs_embeds, kv_caches, ctx_len)
+
+class GROOTPluginContextWrapper(nn.Module):
+    def __init__(self, decoder, eagle_linear, vlln, vl_self_attention):
+        super().__init__()
+        self.decoder = decoder
+        self.eagle_linear = eagle_linear
+        self.vlln = vlln
+        self.vl_self_attention = vl_self_attention
+
+    def forward(self, inputs_embeds, kv_caches, ctx_len):
+        hidden = _as_tensor(inputs_embeds)
+        seq_len = inputs_embeds.shape[1]
+
+        for i, layer in enumerate(self.decoder.layers):
+            residual = hidden
+            hidden = _as_tensor(layer.input_layernorm(hidden))
+            hidden, _ = layer.self_attn(
+                hidden_states=hidden,
+                past_key_value=kv_caches[i],
+                ctx_len=ctx_len,
+            )
+            hidden = _as_tensor(hidden)
+            hidden = residual + hidden
+
+            residual = hidden
+            hidden = _as_tensor(layer.post_attention_layernorm(hidden))
+            hidden = _as_tensor(layer.mlp(hidden))
+            hidden = residual + hidden
+
+        hidden = _as_tensor(self.decoder.norm(hidden))
+
+        context_embs = self.eagle_linear(hidden)
+
+        vlln_weight = getattr(self.vlln, "weight", None)
+        if vlln_weight is not None:
+            context_embs = context_embs.to(dtype=vlln_weight.dtype)
+
+        context_embs = self.vlln(context_embs)
+        context_embs = self.vl_self_attention(context_embs)
+        return context_embs
 
 class PluginPrefixLMWrapper(nn.Module):
     def __init__(
@@ -94,47 +149,6 @@ class PluginPrefixLMWrapper(nn.Module):
             return tuple(outputs)
 
         return hidden, new_kvs
-
-
-class GROOTPluginContextWrapper(nn.Module):
-    def __init__(self, decoder, eagle_linear, vlln, vl_self_attention):
-        super().__init__()
-        self.decoder = decoder
-        self.eagle_linear = eagle_linear
-        self.vlln = vlln
-        self.vl_self_attention = vl_self_attention
-
-    def forward(self, inputs_embeds, kv_caches, ctx_len):
-        hidden = _as_tensor(inputs_embeds)
-        seq_len = inputs_embeds.shape[1]
-
-        for i, layer in enumerate(self.decoder.layers):
-            residual = hidden
-            hidden = _as_tensor(layer.input_layernorm(hidden))
-            hidden, _ = layer.self_attn(
-                hidden_states=hidden,
-                past_key_value=kv_caches[i],
-                ctx_len=ctx_len,
-            )
-            hidden = _as_tensor(hidden)
-            hidden = residual + hidden
-
-            residual = hidden
-            hidden = _as_tensor(layer.post_attention_layernorm(hidden))
-            hidden = _as_tensor(layer.mlp(hidden))
-            hidden = residual + hidden
-
-        hidden = _as_tensor(self.decoder.norm(hidden))
-
-        context_embs = self.eagle_linear(hidden)
-
-        vlln_weight = getattr(self.vlln, "weight", None)
-        if vlln_weight is not None:
-            context_embs = context_embs.to(dtype=vlln_weight.dtype)
-
-        context_embs = self.vlln(context_embs)
-        context_embs = self.vl_self_attention(context_embs)
-        return context_embs
 
 @torch.no_grad()
 def run_vlm_preprocessing(
@@ -299,7 +313,6 @@ def run_prefix_plugin_language(
         return prefix_k, prefix_v
     return out
 
-
 @torch.no_grad()
 def run_groot_plugin_language(
     trt_language,
@@ -331,7 +344,6 @@ def _groot_decoder(language_model):
     # Eagle uses HF CausalLM wrappers like Qwen2ForCausalLM/Qwen3ForCausalLM.
     return getattr(language_model, "model", language_model)
 
-
 def make_groot_language_kv_caches(core, batch_size, max_seq_len, device):
     language_model = core.backbone.eagle_model.language_model
     decoder = _groot_decoder(language_model)
@@ -360,8 +372,7 @@ def make_groot_plugin_language(
     core,
     max_seq_len,
     device,
-    position_ids=None,
-    attention_cls=PluginAttention,
+    position_ids=None
 ):
     eagle = core.backbone.eagle_model
 
@@ -410,7 +421,6 @@ def make_groot_plugin_language(
         decoder,
         cfg,
         rope_cache,
-        attention_cls=attention_cls,
         enable_bidirectional_prefill=0,
     )
 
@@ -428,7 +438,6 @@ def _smoke_first_bad_index(mask, shape):
         coords.append(flat_idx % dim)
         flat_idx //= dim
     return tuple(reversed(coords))
-
 
 def _smoke_tensor_health(name, tensor):
     finite = torch.isfinite(tensor)
@@ -485,7 +494,6 @@ def _select_valid_token_rows(hidden, prefix_pad_masks=None, max_logit_tokens=16)
         desc = f"{desc}; comparing last {max_logit_tokens}"
 
     return rows, desc
-
 
 @torch.no_grad()
 def pi05_plugin_lm_smoke_check(
@@ -578,11 +586,10 @@ def _install_plugin_attention(
     lm: nn.Module,
     config,
     rope_cache: torch.Tensor,
-    attention_cls=PluginAttention,
     enable_bidirectional_prefill: int = 1,
 ) -> None:
     for i, layer in enumerate(lm.layers):
-        layer.self_attn = attention_cls(
+        layer.self_attn = PluginAttention(
             layer.self_attn,
             config,
             layer_idx=i,

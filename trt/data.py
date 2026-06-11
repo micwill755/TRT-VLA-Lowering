@@ -129,7 +129,7 @@ def prepare_model_inputs(
     model_inputs = {
         "tokenized_data": tokenized_data,
         "state": data["state"],
-        "task": data["task"],
+        "task": data["task"]
     }
 
     return helper.to_device(model_inputs, device)

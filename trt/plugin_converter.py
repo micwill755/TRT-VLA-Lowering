@@ -4,7 +4,7 @@ TensorRT converter for Edge-LLM attention plugin ops.
 This module contains the TensorRT converter for the tensorrt_edge_llm::xqa_attn
 custom op. It is kept in a separate file from plugin_utils.py for maintainability.
 """
-
+import torch
 import numpy as np
 import tensorrt as trt
 from trt.plugin_utils import register_plugin_op
@@ -13,11 +13,6 @@ from torch_tensorrt.dynamo.conversion import (
     dynamo_tensorrt_converter,
 )
 from torch_tensorrt.dynamo.conversion.converter_utils import get_trt_tensor
-
-# Ensure the custom op is registered before the converter decorator runs
-register_plugin_op()
-
-import torch  # noqa: E402 (must be after register_plugin_op so the op exists)
 
 def _slice_qkv_for_attention_plugin(
     ctx: ConversionContext,

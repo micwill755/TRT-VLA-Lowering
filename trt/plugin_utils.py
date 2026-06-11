@@ -1,5 +1,6 @@
 import os
-from typing import Tuple
+
+from typing import Tuple,Any
 
 import tensorrt as trt
 import torch
@@ -51,32 +52,6 @@ def _register_plugin_op_impl() -> None:
         updated_kv = torch.empty_like(kv)
         return attn_out, updated_kv
 
-    @torch.library.custom_op("trt::vit_attention_plugin", mutates_args=())
-    def vit_attention_plugin(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen_carrier: torch.Tensor,
-        num_heads: int,
-        head_size: int,
-    ) -> torch.Tensor:
-        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
-        return torch.zeros_like(q)
-
-    @torch.library.register_fake("trt::vit_attention_plugin")
-    def _vit_attention_plugin_fake(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen_carrier: torch.Tensor,
-        num_heads: int,
-        head_size: int,
-    ) -> torch.Tensor:
-        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
-        return torch.empty_like(q)
-
 def register_plugin_op() -> None:
     """
     Register the tensorrt_edge_llm::xqa_attn custom op for PyTorch.
@@ -89,8 +64,7 @@ def register_plugin_op() -> None:
         return
     
     '''if hasattr(torch.ops, "trt") and hasattr(
-        torch.ops.trt, "vit_attention_plugin"
-    ):
+        torch.ops.trt, "vit_attention_plugin"):
         return'''
     _register_plugin_op_impl()
 
@@ -153,3 +127,50 @@ def infer_smolvlm_seq_len(vision_model, image):
         patch_attention_mask=patch_attention_mask,
     )
     return int(hidden_states.shape[0]), int(hidden_states.shape[1])
+
+def set_plugin_config(
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    max_seq_len: int = 2048,
+    max_batch_size: int = 4,
+) -> None:
+    """
+    Set global configuration for the plugin converter.
+
+    Args:
+        num_attention_heads: Number of query attention heads.
+        num_key_value_heads: Number of key/value attention heads (for GQA).
+        head_dim: Dimension of each attention head.
+        max_seq_len: Maximum sequence length for KV cache.
+        max_batch_size: Maximum batch size.
+    """
+    global _PLUGIN_CONFIG
+    _PLUGIN_CONFIG = {
+        "num_attention_heads": num_attention_heads,
+        "num_key_value_heads": num_key_value_heads,
+        "head_dim": head_dim,
+        "max_seq_len": max_seq_len,
+        "max_batch_size": max_batch_size,
+    }
+
+def set_plugin_config_from_model(model_config: Any, max_seq_len: int = 2048) -> None:
+    """
+    Set plugin configuration from a HuggingFace model config.
+
+    Args:
+        model_config: HuggingFace model configuration object.
+        max_seq_len: Maximum sequence length for KV cache.
+    """
+    # Qwen3 has explicit head_dim in config that differs from hidden_size // num_attention_heads
+    if hasattr(model_config, "head_dim") and model_config.head_dim is not None:
+        head_dim = model_config.head_dim
+    else:
+        head_dim = model_config.hidden_size // model_config.num_attention_heads
+
+    set_plugin_config(
+        num_attention_heads=model_config.num_attention_heads,
+        num_key_value_heads=model_config.num_key_value_heads,
+        head_dim=head_dim,
+        max_seq_len=max_seq_len,
+    )

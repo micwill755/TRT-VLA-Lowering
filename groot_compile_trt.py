@@ -49,10 +49,6 @@ from trt.plugin_utils import (
     infer_siglip_seq_len,
 )
 
-import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
-print(edge_plugins.__file__)
-print(hasattr(torch.ops.trt, "vit_attention_plugin"))
-
 TRT_SETTINGS = {
     "disable_tf32": True,
     "use_explicit_typing": True,
@@ -61,7 +57,7 @@ TRT_SETTINGS = {
     "use_python_runtime": True,
     "immutable_weights": True,
     "decompose_attention": True,
-    #"require_full_compilation": True,
+    "require_full_compilation": True,
 }
 
 ACTION_TRT_SETTINGS = {
@@ -286,6 +282,8 @@ def main() -> int:
 
     # Load the custom TensorRT plugin library before compiling plugin-backed modules.
     register_plugin_op()
+    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
+
     load_plugin()
 
     # -------------------------
