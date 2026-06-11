@@ -41,12 +41,12 @@ def tensor_error_metrics(name, trt, eager):
     diff = (trt - eager).abs()
 
     rel_l2 = (trt - eager).norm() / eager.norm().clamp_min(1e-8)
-    rel_mean_pct = diff.mean() / eager.abs().mean().clamp_min(1e-8) * 100
+    relmean_pct = diff.mean() / eager.abs().mean().clamp_min(1e-8) * 100
 
     print(f"{name} mean diff:", diff.mean().item())
     print(f"{name} max diff:", diff.max().item())
     print(f"{name} relative L2:", rel_l2.item())
-    print(f"{name} relative mean %:", rel_mean_pct.item())
+    print(f"{name} relative mean %:", relmean_pct.item())
 
 def _select_hidden_valid(x, valid):
     valid = valid.to(device=x.device, dtype=torch.bool)
@@ -264,3 +264,46 @@ def compare_language(eager_hidden, eager_k, eager_v, trt_hidden, trt_k, trt_v, p
             _select_prefix_kv_valid(trt_v, prefix_pad_masks),
             _select_prefix_kv_valid(eager_v, prefix_pad_masks),
         )
+
+def mean(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+def std(values: list[float]) -> float:
+    if len(values) == 0:
+        return 0.0
+    m = mean(values)
+    variance = sum((x - m) ** 2 for x in values) / len(values)
+    return variance ** 0.5
+
+def print_timing(name: str, times_ms: list[float]) -> None:
+    if len(times_ms) == 0:
+        return
+    print(
+        f"  {name:<22} min={min(times_ms):7.1f}  avg={mean(times_ms):7.1f}  "
+        f"max={max(times_ms):7.1f}  std={std(times_ms):6.1f}  (ms)"
+    )
+
+def print_action_metrics(name: str, values: list[float]) -> None:
+    if len(values) == 0:
+        return
+        
+    print(
+        f"  {name:<22} min={min(values):9.6f}  avg={mean(values):9.6f}  "
+        f"max={max(values):9.6f}  std={std(values):9.6f}"
+    )
+
+def compute_action_parity_metrics(pred_actions: torch.Tensor, target_actions: torch.Tensor) -> dict[str, float]:
+    pred = pred_actions.float()
+    target = target_actions.float()
+
+    diff = pred - target
+    abs_diff = diff.abs()
+
+    step_l2 = torch.linalg.vector_norm(diff, dim=-1)
+
+    return {
+        "action_ade": float(step_l2.mean().item()),
+        "action_fde": float(step_l2[..., -1].mean().item()),
+        "mean_abs": float(abs_diff.mean().item()),
+        "max_abs": float(abs_diff.max().item()),
+    }
