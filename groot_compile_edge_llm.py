@@ -56,10 +56,11 @@ from trt.vision import (
 )
 
 from trt.language import (
-    compile_groot_lm_trt_with_plugin,
-    make_groot_plugin_language,
-    make_groot_language_kv_caches,
-    run_groot_plugin_language,
+    compile_language_trt_with_plugin,
+    GROOTContextProjectionWrapper,
+    GROOTLanguageContextWrapper,
+    language_head_dim,
+    make_plugin_lm_hidden_wrapper,
     FlatKVLanguageEngineWrapper
 )
 from trt.measure import (
@@ -365,19 +366,48 @@ def save_groot_lm_engine_for_edge_llm(
     max_seq_len = int(input_embs.shape[1])
     batch_size = int(input_embs.shape[0])
 
-    plugin_language = make_groot_plugin_language(
-        core,
+    language_model = copy.deepcopy(core.backbone.eagle_model.language_model).to(
+        device=device,
+        dtype=torch.float16,
+    ).eval()
+    decoder = getattr(language_model, "model", language_model)
+    cfg = language_model.config
+    head_dim = language_head_dim(cfg)
+
+    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
+        decoder,
+        cfg,
         max_seq_len=max_seq_len,
         device=device,
-        position_ids=position_ids
+        position_ids=position_ids,
+        enable_bidirectional_prefill=0,
+        return_prefix_kv=False,
+        log_prefix="groot",
     )
 
-    kv_caches = make_groot_language_kv_caches(
-        core,
-        batch_size=batch_size,
-        max_seq_len=max_seq_len,
-        device=device,
+    context = GROOTContextProjectionWrapper(
+        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=dtype).eval(),
+        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=dtype).eval(),
+        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=dtype).eval(),
     )
+
+    plugin_language = GROOTLanguageContextWrapper(
+        hidden_lm_wrapper,
+        context,
+    ).eval()
+
+    kv_caches = [
+        torch.zeros(
+            batch_size,
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            max_seq_len,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        for _ in range(len(decoder.layers))
+    ]
 
     ctx_len = torch.full(
         (batch_size,),
@@ -397,13 +427,6 @@ def save_groot_lm_engine_for_edge_llm(
     input_names = (
         ["inputs_embeds", "ctx_len"]
         + [f"kv_cache_{i}" for i in range(len(kv_caches))]
-    )
-
-    cfg = core.backbone.eagle_model.language_model.config
-    head_dim = getattr(
-        cfg,
-        "head_dim",
-        cfg.hidden_size // cfg.num_attention_heads,
     )
 
     return save_trt_engine_module(
@@ -741,41 +764,68 @@ def compile_trt_with_plugin(
     if max_seq_len is not None:
         language_max_seq_len = int(max_seq_len)
 
-    plugin_language = make_groot_plugin_language(
-        model,
+    language_model = copy.deepcopy(model.backbone.eagle_model.language_model).to(
+        device=device,
+        dtype=torch.float16,
+    ).eval()
+    decoder = getattr(language_model, "model", language_model)
+    cfg = language_model.config
+
+    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
+        decoder,
+        cfg,
         max_seq_len=language_max_seq_len,
         device=device,
         position_ids=None,
+        enable_bidirectional_prefill=0,
+        return_prefix_kv=False,
+        log_prefix="groot",
     )
 
-    kv_caches = make_groot_language_kv_caches(
-        model,
-        batch_size=language_inputs.inputs_embeds.shape[0],
-        max_seq_len=language_max_seq_len,
-        device=device,
+    context = GROOTContextProjectionWrapper(
+        copy.deepcopy(model.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
+        copy.deepcopy(model.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
+        copy.deepcopy(model.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
     )
 
-    ctx_len = torch.full(
-        (language_inputs.inputs_embeds.shape[0],),
-        language_inputs.inputs_embeds.shape[1],
-        device=device,
-        dtype=torch.int32,
-    )
+    plugin_language = GROOTLanguageContextWrapper(
+        hidden_lm_wrapper,
+        context,
+    ).eval()
 
-    trt_lm = compile_trt_module(
+    trt_lm, trt_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
-        (language_inputs.inputs_embeds.to(device=device, dtype=torch.float16), kv_caches, ctx_len),
-        plugin_settings,
+        language_inputs.inputs_embeds,
+        num_layers=len(decoder.layers),
+        num_key_value_heads=int(cfg.num_key_value_heads),
+        head_dim=language_head_dim(cfg),
+        device=device,
+        settings=plugin_settings,
+        max_seq_len=language_max_seq_len,
     )
+    language_max_seq_len = int(trt_max_seq_len)
 
     with torch.no_grad():
-        trt_context_embs = run_groot_plugin_language(
-            trt_lm,
-            model,
-            language_inputs.inputs_embeds,
-            max_seq_len=language_max_seq_len,
+        lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+        kv_caches = [
+            torch.zeros(
+                int(lm_inputs.shape[0]),
+                2,  # key + value
+                int(cfg.num_key_value_heads),
+                language_max_seq_len,
+                language_head_dim(cfg),
+                device=device,
+                dtype=lm_inputs.dtype,
+            )
+            for _ in range(len(decoder.layers))
+        ]
+        ctx_len = torch.full(
+            (lm_inputs.shape[0],),
+            lm_inputs.shape[1],
             device=device,
-        ).to(device=device, dtype=torch.float16)
+            dtype=torch.int32,
+        )
+        trt_context_embs = trt_lm(lm_inputs, kv_caches, ctx_len).to(device=device, dtype=torch.float16)
 
     # -------------------------
     # Action/diffusion engine
@@ -946,13 +996,29 @@ def run_inference_trt_plugin(
         attention_mask,
     )
 
-    context_embs = run_groot_plugin_language(
-        trt_lm,
-        model,
-        language_inputs.inputs_embeds,
-        max_seq_len=int(plugin_info["language_max_seq_len"]),
+    lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+    language_model = model.backbone.eagle_model.language_model
+    decoder = getattr(language_model, "model", language_model)
+    cfg = language_model.config
+    kv_caches = [
+        torch.zeros(
+            int(lm_inputs.shape[0]),
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            int(plugin_info["language_max_seq_len"]),
+            language_head_dim(cfg),
+            device=device,
+            dtype=lm_inputs.dtype,
+        )
+        for _ in range(len(decoder.layers))
+    ]
+    ctx_len = torch.full(
+        (lm_inputs.shape[0],),
+        lm_inputs.shape[1],
         device=device,
-    ).to(device=device, dtype=torch.float16)
+        dtype=torch.int32,
+    )
+    context_embs = trt_lm(lm_inputs, kv_caches, ctx_len).to(device=device, dtype=torch.float16)
 
     noise = torch.randn(
         context_embs.shape[0],

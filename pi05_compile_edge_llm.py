@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import argparse
 import ctypes
 import os
@@ -20,12 +21,11 @@ from trt.data import make_batch
 from trt.diffusion import PI05StaticKVDiffusionStep
 from trt.language import (
     FlatKVLanguageEngineWrapper,
-    compile_lm_trt_with_plugin,
-    make_pi05_language_kv_caches,
-    make_pi05_plugin_language,
+    compile_language_trt_with_plugin,
+    language_head_dim,
+    make_plugin_lm_hidden_wrapper,
     pi05_plugin_lm_smoke_check,
     run_prefix_language_eager,
-    run_prefix_plugin_language,
 )
 from trt.measure import (
     compare_action_step,
@@ -287,19 +287,33 @@ def save_pi05_lm_engine_for_edge_llm(
     max_seq_len = int(prefix_embs.shape[1])
     batch_size = int(prefix_embs.shape[0])
 
-    plugin_language = make_pi05_plugin_language(
-        core,
+    lm = copy.deepcopy(
+        core.paligemma_with_expert.paligemma.model.language_model
+    ).to(device=device, dtype=torch.float16).eval()
+    decoder = getattr(lm, "model", lm)
+    cfg = lm.config
+
+    lm_wrapper = make_plugin_lm_hidden_wrapper(
+        decoder,
+        cfg,
         max_seq_len=max_seq_len,
         device=device,
         position_ids=position_ids,
+        return_prefix_kv=True,
     )
 
-    kv_caches = make_pi05_language_kv_caches(
-        core,
-        batch_size=batch_size,
-        max_seq_len=max_seq_len,
-        device=device,
-    )
+    kv_caches = [
+        torch.zeros(
+            batch_size,
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            max_seq_len,
+            language_head_dim(cfg),
+            device=device,
+            dtype=prefix_embs.dtype,
+        )
+        for _ in range(int(cfg.num_hidden_layers))
+    ]
 
     ctx_len = torch.full(
         (batch_size,),
@@ -308,7 +322,7 @@ def save_pi05_lm_engine_for_edge_llm(
         dtype=torch.int32,
     )
 
-    wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
+    wrapper = FlatKVLanguageEngineWrapper(lm_wrapper).to(device=device).eval()
     sample_inputs = (
         prefix_embs,
         ctx_len.contiguous(),
@@ -322,8 +336,6 @@ def save_pi05_lm_engine_for_edge_llm(
 
     with torch.no_grad():
         example_output = wrapper(*sample_inputs)
-
-    cfg = core.paligemma_with_expert.paligemma.model.language_model.config
 
     return save_trt_engine_module(
         wrapper,
@@ -488,24 +500,53 @@ def compile_trt_with_plugin(
     )
     language_max_seq_len = validate_language_len(trt_prefix, max_seq_len)
 
-    trt_lm, trt_max_seq_len = compile_lm_trt_with_plugin(
-        core,
-        trt_prefix.inputs_embeds,
+    lm = copy.deepcopy(
+        core.paligemma_with_expert.paligemma.model.language_model
+    ).to(device=device, dtype=torch.float16).eval()
+    decoder = getattr(lm, "model", lm)
+    cfg = lm.config
+    plugin_language = make_plugin_lm_hidden_wrapper(
+        decoder,
+        cfg,
+        max_seq_len=language_max_seq_len,
         device=device,
         position_ids=trt_prefix.position_ids,
+        return_prefix_kv=True,
+    )
+    trt_lm, trt_max_seq_len = compile_language_trt_with_plugin(
+        plugin_language,
+        trt_prefix.inputs_embeds,
+        num_layers=int(cfg.num_hidden_layers),
+        num_key_value_heads=int(cfg.num_key_value_heads),
+        head_dim=language_head_dim(cfg),
+        device=device,
         settings=plugin_settings,
     )
     language_max_seq_len = int(trt_max_seq_len)
 
-    trt_hidden, trt_prefix_k, trt_prefix_v = run_prefix_plugin_language(
-        trt_lm,
-        core,
-        trt_prefix.inputs_embeds,
-        max_seq_len=language_max_seq_len,
+    trt_prefix_embs = trt_prefix.inputs_embeds.to(device=device, dtype=torch.float16)
+    trt_kv_caches = [
+        torch.zeros(
+            int(trt_prefix_embs.shape[0]),
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            language_max_seq_len,
+            language_head_dim(cfg),
+            device=device,
+            dtype=trt_prefix_embs.dtype,
+        )
+        for _ in range(int(cfg.num_hidden_layers))
+    ]
+    trt_ctx_len = torch.full(
+        (trt_prefix_embs.shape[0],),
+        trt_prefix_embs.shape[1],
         device=device,
-        attention_mask=trt_prefix.attention_mask,
-        prefix_pad_masks=trt_prefix.pad_mask,
-        return_hidden=True,
+        dtype=torch.int32,
+    )
+    trt_hidden, trt_prefix_k, trt_prefix_v = trt_lm(
+        trt_prefix_embs,
+        trt_kv_caches,
+        trt_ctx_len,
     )
 
     if accuracy_check:
@@ -745,16 +786,27 @@ def run_inference_trt_plugin(
         inputs_dtype=torch.float16,
     )
 
-    _, prefix_k, prefix_v = run_prefix_plugin_language(
-        trt_lm,
-        core,
-        prefix.inputs_embeds,
-        max_seq_len=int(plugin_info["language_max_seq_len"]),
+    prefix_embs = prefix.inputs_embeds.to(device=device, dtype=torch.float16)
+    cfg = core.paligemma_with_expert.paligemma.model.language_model.config
+    kv_caches = [
+        torch.zeros(
+            int(prefix_embs.shape[0]),
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            int(plugin_info["language_max_seq_len"]),
+            language_head_dim(cfg),
+            device=device,
+            dtype=prefix_embs.dtype,
+        )
+        for _ in range(int(cfg.num_hidden_layers))
+    ]
+    ctx_len = torch.full(
+        (prefix_embs.shape[0],),
+        prefix_embs.shape[1],
         device=device,
-        attention_mask=prefix.attention_mask,
-        prefix_pad_masks=prefix.pad_mask,
-        return_hidden=True,
+        dtype=torch.int32,
     )
+    _, prefix_k, prefix_v = trt_lm(prefix_embs, kv_caches, ctx_len)
 
     noise = make_pi05_noise(core, tokens.shape[0], device)
     actions = sample_actions_raw(

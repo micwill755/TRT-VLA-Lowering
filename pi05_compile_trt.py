@@ -1,4 +1,6 @@
 # Test/pi05_compile_vla_trt.py
+import copy
+
 import tensorrt as trt
 import torch
 import torch.nn as nn
@@ -24,9 +26,10 @@ from trt.data import make_batch
 from trt.packing import compact_packed_language_inputs
 from trt.vision import PI05VisualEmbed
 from trt.language import (
-    compile_lm_trt_with_plugin,
+    compile_language_trt_with_plugin,
+    language_head_dim,
+    make_plugin_lm_hidden_wrapper,
     pi05_plugin_lm_smoke_check,
-    run_prefix_plugin_language,
     run_prefix_language_eager
 )
 from trt.plugin_utils import (
@@ -203,23 +206,53 @@ def main() -> int:
     ) = compact_trt_prefix.as_tuple()
 
     # Compile the PaliGemma language stack with plugin attention for compact prefix prefill.
-    trt_language_model, trt_max_seq_len = compile_lm_trt_with_plugin(
-        core,
-        compact_trt_prefix_embs,
+    lm = copy.deepcopy(
+        core.paligemma_with_expert.paligemma.model.language_model
+    ).to(device=device, dtype=torch.float16).eval()
+    decoder = getattr(lm, "model", lm)
+    cfg = lm.config
+    plugin_language = make_plugin_lm_hidden_wrapper(
+        decoder,
+        cfg,
+        max_seq_len=int(compact_trt_prefix_embs.shape[1]),
         device=device,
         position_ids=compact_trt_prefix_position_ids,
-        settings=TRT_SETTINGS
+        return_prefix_kv=True,
+    )
+    trt_language_model, trt_max_seq_len = compile_language_trt_with_plugin(
+        plugin_language,
+        compact_trt_prefix_embs,
+        num_layers=int(cfg.num_hidden_layers),
+        num_key_value_heads=int(cfg.num_key_value_heads),
+        head_dim=language_head_dim(cfg),
+        device=device,
+        settings=TRT_SETTINGS,
     )
 
     # Run the compiled language model to produce TRT hidden states and the prefix KV cache.
-    trt_hidden, trt_prefix_k, trt_prefix_v = run_prefix_plugin_language(
-        trt_language_model,
-        core,
-        compact_trt_prefix_embs,
-        max_seq_len=trt_max_seq_len,
+    trt_prefix_embs = compact_trt_prefix_embs.to(device=device, dtype=torch.float16)
+    trt_kv_caches = [
+        torch.zeros(
+            int(trt_prefix_embs.shape[0]),
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            trt_max_seq_len,
+            language_head_dim(cfg),
+            device=device,
+            dtype=trt_prefix_embs.dtype,
+        )
+        for _ in range(int(cfg.num_hidden_layers))
+    ]
+    trt_ctx_len = torch.full(
+        (trt_prefix_embs.shape[0],),
+        trt_prefix_embs.shape[1],
         device=device,
-        prefix_pad_masks=compact_trt_prefix_pad_masks,
-        return_hidden=True
+        dtype=torch.int32,
+    )
+    trt_hidden, trt_prefix_k, trt_prefix_v = trt_language_model(
+        trt_prefix_embs,
+        trt_kv_caches,
+        trt_ctx_len,
     )
 
     # Smoke-check the plugin language output with logits and KV-cache comparisons.

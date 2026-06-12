@@ -1,4 +1,3 @@
-import copy
 import logging
 
 from typing import Any
@@ -165,81 +164,45 @@ def run_vlm_preprocessing(
         prefix_position_ids,
     )
 
-def compile_groot_lm_trt_with_plugin(
-    core,
-    input_embs,
+def compile_language_trt_with_plugin(
+    plugin_language: nn.Module,
+    inputs_embeds: torch.Tensor,
     *,
-    device,
-    position_ids=None,
+    num_layers: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    device: torch.device,
     settings,
+    max_seq_len: int | None = None,
+    dtype: torch.dtype = torch.float16,
 ):
-    max_seq_len = input_embs.shape[1]
+    ctx_seq_len = int(inputs_embeds.shape[1])
+    max_seq_len = ctx_seq_len if max_seq_len is None else int(max_seq_len)
+    batch_size = int(inputs_embeds.shape[0])
 
-    plugin_language = make_groot_plugin_language(
-        core,
-        max_seq_len=max_seq_len,
-        device=device,
-        position_ids=position_ids,
-        attention_cls=PluginAttention,
-    )
-
-    kv_caches = make_groot_language_kv_caches(
-        core,
-        batch_size=input_embs.shape[0],
-        max_seq_len=max_seq_len,
-        device=device,
-    )
+    kv_caches = [
+        torch.zeros(
+            batch_size,
+            2,  # key + value
+            int(num_key_value_heads),
+            max_seq_len,
+            int(head_dim),
+            device=device,
+            dtype=dtype,
+        )
+        for _ in range(int(num_layers))
+    ]
 
     ctx_len = torch.full(
-        (input_embs.shape[0],),
-        max_seq_len,
+        (batch_size,),
+        ctx_seq_len,
         device=device,
         dtype=torch.int32,
     )
 
     trt_language = compile_trt_module(
         plugin_language,
-        (input_embs.to(torch.float16), kv_caches, ctx_len),
-        settings,
-    )
-
-    return trt_language, max_seq_len
-
-def compile_lm_trt_with_plugin(
-    core,
-    prefix_embs,
-    *,
-    device,
-    position_ids=None,
-    settings
-):
-    max_seq_len = prefix_embs.shape[1]
-
-    plugin_language = make_pi05_plugin_language(
-        core,
-        max_seq_len=max_seq_len,
-        device=device,
-        position_ids=position_ids,
-        attention_cls=PluginAttention,
-    )
-
-    kv_caches = make_pi05_language_kv_caches(
-        core,
-        batch_size=prefix_embs.shape[0],
-        max_seq_len=max_seq_len,
-        device=device,
-    )
-
-    ctx_len = torch.full(
-        (prefix_embs.shape[0],),
-        max_seq_len,
-        device=device,
-        dtype=torch.int32,
-    )
-
-    trt_language = compile_trt_module(
-        plugin_language,
-        (prefix_embs, kv_caches, ctx_len),
+        (inputs_embeds.to(device=device, dtype=dtype), kv_caches, ctx_len),
         settings,
     )
 
@@ -258,99 +221,6 @@ def run_prefix_language_eager(language_model, prefix_embs, attention_mask, posit
     prefix_k = torch.stack([layer.keys for layer in cache.layers], dim=0)
     prefix_v = torch.stack([layer.values for layer in cache.layers], dim=0)
     return out.last_hidden_state, prefix_k, prefix_v
-
-@torch.no_grad()
-def run_prefix_plugin_language(
-    trt_language,
-    core,
-    prefix_embs,
-    *,
-    max_seq_len,
-    device,
-    attention_mask=None,
-    prefix_pad_masks=None,
-    return_hidden=False,
-):
-    prefix_embs = prefix_embs.to(torch.float16)
-
-    kv_caches = make_pi05_language_kv_caches(
-        core,
-        batch_size=prefix_embs.shape[0],
-        max_seq_len=max_seq_len,
-        device=device,
-    )
-
-    ctx_len = torch.full(
-        (prefix_embs.shape[0],),
-        prefix_embs.shape[1],
-        device=device,
-        dtype=torch.int32,
-    )
-    if prefix_pad_masks is not None or attention_mask is not None:
-        print("[plugin prefix] sanity check: using full seq_len ctx_len", ctx_len.detach().cpu().tolist())
-
-    out = trt_language(prefix_embs, kv_caches, ctx_len)
-    if isinstance(out, (tuple, list)) and len(out) == 3:
-        hidden, prefix_k, prefix_v = out
-        if return_hidden:
-            return hidden, prefix_k, prefix_v
-        return prefix_k, prefix_v
-    return out
-
-@torch.no_grad()
-def run_groot_plugin_language(
-    trt_language,
-    core,
-    input_embs,
-    *,
-    max_seq_len,
-    device,
-):
-    input_embs = input_embs.to(device=device, dtype=torch.float16)
-
-    kv_caches = make_groot_language_kv_caches(
-        core,
-        batch_size=input_embs.shape[0],
-        max_seq_len=max_seq_len,
-        device=device,
-    )
-
-    ctx_len = torch.full(
-        (input_embs.shape[0],),
-        input_embs.shape[1],
-        device=device,
-        dtype=torch.int32,
-    )
-
-    return trt_language(input_embs, kv_caches, ctx_len)
-
-def _groot_decoder(language_model):
-    # Eagle uses HF CausalLM wrappers like Qwen2ForCausalLM/Qwen3ForCausalLM.
-    return getattr(language_model, "model", language_model)
-
-def make_groot_language_kv_caches(core, batch_size, max_seq_len, device):
-    language_model = core.backbone.eagle_model.language_model
-    decoder = _groot_decoder(language_model)
-    cfg = language_model.config
-
-    head_dim = getattr(
-        cfg,
-        "head_dim",
-        cfg.hidden_size // cfg.num_attention_heads,
-    )
-
-    return [
-        torch.zeros(
-            batch_size,
-            2,
-            cfg.num_key_value_heads,
-            max_seq_len,
-            head_dim,
-            device=device,
-            dtype=torch.float16,
-        )
-        for _ in range(len(decoder.layers))
-    ]
 
 def _smoke_first_bad_index(mask, shape):
     flat_idx = int(mask.flatten().nonzero(as_tuple=False)[0].item())
@@ -448,16 +318,27 @@ def pi05_plugin_lm_smoke_check(
     )
     eager_hidden = _as_tensor(eager_out.last_hidden_state)
 
-    trt_hidden, trt_k, trt_v = run_prefix_plugin_language(
-        trt_language,
-        core,
-        prefix_embs,
-        max_seq_len=max_seq_len,
+    trt_prefix_embs = prefix_embs.to(device=device, dtype=torch.float16)
+    cfg = lm.config
+    kv_caches = [
+        torch.zeros(
+            int(trt_prefix_embs.shape[0]),
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            max_seq_len,
+            language_head_dim(cfg),
+            device=device,
+            dtype=trt_prefix_embs.dtype,
+        )
+        for _ in range(int(cfg.num_hidden_layers))
+    ]
+    ctx_len = torch.full(
+        (trt_prefix_embs.shape[0],),
+        trt_prefix_embs.shape[1],
         device=device,
-        attention_mask=attention_mask,
-        prefix_pad_masks=prefix_pad_masks,
-        return_hidden=True,
+        dtype=torch.int32,
     )
+    trt_hidden, trt_k, trt_v = trt_language(trt_prefix_embs, kv_caches, ctx_len)
 
     _smoke_tensor_health("LM plugin smoke-check eager hidden", eager_hidden)
     _smoke_tensor_health("LM plugin smoke-check TRT hidden", trt_hidden)
@@ -479,39 +360,14 @@ def pi05_plugin_lm_smoke_check(
     _smoke_error_metrics("LM plugin smoke-check prefix_k", trt_k, eager_k)
     _smoke_error_metrics("LM plugin smoke-check prefix_v", trt_v, eager_v)
 
-
-def _build_rope_cache(
-    lm: nn.Module,
-    S_input: int,
-    position_ids: torch.Tensor,
-    rope_deltas: torch.Tensor,
-    max_seq_len: int,
-    head_dim: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Pre-compute concatenated ``(cos, sin)`` RoPE cache for all positions up to ``max_seq_len``."""
-    with torch.no_grad():
-        d_eff = torch.arange(S_input, max_seq_len, device=device).float()
-        d_eff = d_eff + rope_deltas.to(device).float().squeeze()
-        d_3d = d_eff.view(1, 1, -1).expand(3, 1, -1).long()
-        full_pos = torch.cat([position_ids.to(device), d_3d], dim=2)
-        cos, sin = lm.rotary_emb(torch.ones(1, device=device, dtype=FP16), full_pos)
-        h2 = head_dim // 2
-        rope_cache = torch.cat(
-            [cos[:, :max_seq_len, :h2].float(), sin[:, :max_seq_len, :h2].float()],
-            dim=-1,
-        )
-    return rope_cache
-
 def _install_plugin_attention(
     lm: nn.Module,
     config,
     rope_cache: torch.Tensor,
     enable_bidirectional_prefill: int = 1,
-    attention_cls=PluginAttention,
 ) -> None:
     for i, layer in enumerate(lm.layers):
-        layer.self_attn = attention_cls(
+        layer.self_attn = PluginAttention(
             layer.self_attn,
             config,
             layer_idx=i,
@@ -526,7 +382,6 @@ def make_plugin_lm_hidden_wrapper(
     max_seq_len: int,
     device: torch.device,
     position_ids: torch.Tensor | None = None,
-    attention_cls=PluginAttention,
     enable_bidirectional_prefill: int = 1,
     return_prefix_kv: bool = False,
     log_prefix: str = "",
@@ -570,7 +425,6 @@ def make_plugin_lm_hidden_wrapper(
         config,
         rope_cache,
         enable_bidirectional_prefill=enable_bidirectional_prefill,
-        attention_cls=attention_cls,
     )
 
     return PluginLMHiddenWrapper(
@@ -579,78 +433,9 @@ def make_plugin_lm_hidden_wrapper(
         return_prefix_kv=return_prefix_kv,
     ).eval()
 
-def make_groot_plugin_language(
-    core,
-    max_seq_len,
-    device,
-    position_ids=None,
-    attention_cls=PluginAttention,
-):
-    eagle = core.backbone.eagle_model
-
-    language_model = copy.deepcopy(eagle.language_model).to(
-        device=device,
-        dtype=torch.float16,
-    ).eval()
-
-    decoder = _groot_decoder(language_model)
-
-    lm_wrapper = make_plugin_lm_hidden_wrapper(
-        decoder,
-        language_model.config,
-        max_seq_len=max_seq_len,
-        device=device,
-        position_ids=position_ids,
-        attention_cls=attention_cls,
-        enable_bidirectional_prefill=0,
-        return_prefix_kv=False,
-        log_prefix="groot",
-    )
-
-    context_projection = GROOTContextProjectionWrapper(
-        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
-    )
-
-    return GROOTLanguageContextWrapper(
-        lm_wrapper,
-        context_projection,
-    ).eval()
-
-
-def make_pi05_plugin_language(
-    core: nn.Module,
-    max_seq_len: int,
-    device: torch.device,
-    position_ids: torch.Tensor | None = None,
-    attention_cls=PluginAttention,
-) -> PluginLMHiddenWrapper:
-    lm = copy.deepcopy(
-        core.paligemma_with_expert.paligemma.model.language_model
-    ).to(device=device, dtype=torch.float16).eval()
-
-    return make_plugin_lm_hidden_wrapper(
-        lm,
-        lm.config,
-        max_seq_len=max_seq_len,
-        device=device,
-        position_ids=position_ids,
-        attention_cls=attention_cls,
-        return_prefix_kv=True,
-    )
-
-def make_pi05_language_kv_caches(core: nn.Module, batch_size: int, max_seq_len: int, device: torch.device):
-    cfg = core.paligemma_with_expert.paligemma.model.language_model.config
-    return [
-        torch.zeros(
-            batch_size,
-            2,
-            cfg.num_key_value_heads,
-            max_seq_len,
-            cfg.head_dim,
-            device=device,
-            dtype=torch.float16,
-        )
-        for _ in range(cfg.num_hidden_layers)
-    ]
+def language_head_dim(config) -> int:
+    return int(getattr(
+        config,
+        "head_dim",
+        config.hidden_size // config.num_attention_heads,
+    ))

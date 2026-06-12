@@ -32,8 +32,11 @@ from trt.packing import (
 )
 from trt.vision import GROOTVisualEmbed
 from trt.language import (
-    compile_groot_lm_trt_with_plugin,
-    run_groot_plugin_language,
+    compile_language_trt_with_plugin,
+    GROOTContextProjectionWrapper,
+    GROOTLanguageContextWrapper,
+    language_head_dim,
+    make_plugin_lm_hidden_wrapper,
 )
 from trt.measure import (
     compare_full_groot_to_eager_actions,
@@ -360,21 +363,64 @@ def main() -> int:
     )
 
     # Compile the Eagle LM with PluginAttention.
-    trt_language_model, trt_language_max_seq_len = compile_groot_lm_trt_with_plugin(
-        model,
-        trt_language_inputs.inputs_embeds,
+    language_model = copy.deepcopy(model.backbone.eagle_model.language_model).to(
+        device=device,
+        dtype=torch.float16,
+    ).eval()
+    decoder = getattr(language_model, "model", language_model)
+    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
+        decoder,
+        language_model.config,
+        max_seq_len=int(trt_language_inputs.inputs_embeds.shape[1]),
         device=device,
         position_ids=None,
+        enable_bidirectional_prefill=0,
+        return_prefix_kv=False,
+        log_prefix="groot",
+    )
+    context_projection = GROOTContextProjectionWrapper(
+        copy.deepcopy(model.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
+        copy.deepcopy(model.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
+        copy.deepcopy(model.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
+    )
+    plugin_language = GROOTLanguageContextWrapper(
+        hidden_lm_wrapper,
+        context_projection,
+    ).eval()
+    trt_language_model, trt_language_max_seq_len = compile_language_trt_with_plugin(
+        plugin_language,
+        trt_language_inputs.inputs_embeds,
+        num_layers=len(decoder.layers),
+        num_key_value_heads=int(language_model.config.num_key_value_heads),
+        head_dim=language_head_dim(language_model.config),
+        device=device,
         settings=TRT_SETTINGS,
     )
 
     # Run plugin LM/context with eager vision embeddings.
-    trt_context_from_eager_vision = run_groot_plugin_language(
-        trt_language_model,
-        model,
-        eager_language_inputs.inputs_embeds,
-        max_seq_len=trt_language_max_seq_len,
+    eager_lm_inputs = eager_language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+    eager_kv_caches = [
+        torch.zeros(
+            int(eager_lm_inputs.shape[0]),
+            2,  # key + value
+            int(language_model.config.num_key_value_heads),
+            trt_language_max_seq_len,
+            language_head_dim(language_model.config),
+            device=device,
+            dtype=eager_lm_inputs.dtype,
+        )
+        for _ in range(len(decoder.layers))
+    ]
+    eager_ctx_len = torch.full(
+        (eager_lm_inputs.shape[0],),
+        eager_lm_inputs.shape[1],
         device=device,
+        dtype=torch.int32,
+    )
+    trt_context_from_eager_vision = trt_language_model(
+        eager_lm_inputs,
+        eager_kv_caches,
+        eager_ctx_len,
     )
 
     compare_groot_context(
@@ -394,12 +440,29 @@ def main() -> int:
     )
 
     # Run plugin LM/context with TRT vision embeddings.
-    trt_context_embs = run_groot_plugin_language(
-        trt_language_model,
-        model,
-        trt_language_inputs.inputs_embeds,
-        max_seq_len=trt_language_max_seq_len,
+    trt_lm_inputs = trt_language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+    trt_kv_caches = [
+        torch.zeros(
+            int(trt_lm_inputs.shape[0]),
+            2,  # key + value
+            int(language_model.config.num_key_value_heads),
+            trt_language_max_seq_len,
+            language_head_dim(language_model.config),
+            device=device,
+            dtype=trt_lm_inputs.dtype,
+        )
+        for _ in range(len(decoder.layers))
+    ]
+    trt_ctx_len = torch.full(
+        (trt_lm_inputs.shape[0],),
+        trt_lm_inputs.shape[1],
         device=device,
+        dtype=torch.int32,
+    )
+    trt_context_embs = trt_language_model(
+        trt_lm_inputs,
+        trt_kv_caches,
+        trt_ctx_len,
     )
 
     compare_groot_context(
