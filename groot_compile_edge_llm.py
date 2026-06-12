@@ -60,7 +60,7 @@ from trt.language import (
     make_groot_plugin_language,
     make_groot_language_kv_caches,
     run_groot_plugin_language,
-    GROOTLanguageEngineWrapper
+    FlatKVLanguageEngineWrapper
 )
 from trt.measure import (
     mean,
@@ -386,7 +386,7 @@ def save_groot_lm_engine_for_edge_llm(
         dtype=torch.int32,
     )
 
-    wrapper = GROOTLanguageEngineWrapper(plugin_language).to(device=device).eval()
+    wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
 
     sample_inputs = (
         input_embs.to(device=device, dtype=dtype).contiguous(),

@@ -132,7 +132,7 @@ def prepare_model_inputs(
         padding=True,
         **processor_args,
     )
-
+    
     model_inputs = {
         "tokenized_data": tokenized_data,
         "state": data["state"],

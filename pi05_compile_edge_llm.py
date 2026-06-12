@@ -19,6 +19,7 @@ from trt.compile import compile_trt_module, save_trt_engine_module
 from trt.data import make_batch
 from trt.diffusion import PI05StaticKVDiffusionStep
 from trt.language import (
+    FlatKVLanguageEngineWrapper,
     compile_lm_trt_with_plugin,
     make_pi05_language_kv_caches,
     make_pi05_plugin_language,
@@ -76,15 +77,6 @@ ACTION_TRT_SETTINGS = {
 
 MODEL_ID = "lerobot/pi05_libero"
 SEED = 42
-
-
-class PI05LanguageEngineWrapper(nn.Module):
-    def __init__(self, plugin_language: nn.Module):
-        super().__init__()
-        self.plugin_language = plugin_language
-
-    def forward(self, inputs_embeds, ctx_len, *kv_caches):
-        return self.plugin_language(inputs_embeds, list(kv_caches), ctx_len)
 
 
 def parse_args() -> argparse.Namespace:
@@ -316,7 +308,7 @@ def save_pi05_lm_engine_for_edge_llm(
         dtype=torch.int32,
     )
 
-    wrapper = PI05LanguageEngineWrapper(plugin_language).to(device=device).eval()
+    wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
     sample_inputs = (
         prefix_embs,
         ctx_len.contiguous(),
