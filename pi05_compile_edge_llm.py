@@ -18,7 +18,7 @@ from lerobot.utils.constants import ACTION
 from trt.action_rollout import ActionRolloutContext, PI05ActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module, save_trt_engine_module
 from trt.data import make_batch
-from trt.diffusion import StaticActionVelocityStep
+from trt.diffusion import StaticActionVelocityStep, PI05PrefixKVStepEncoder
 from trt.language import (
     FlatKVLanguageEngineWrapper,
     compile_language_trt_with_plugin,
@@ -156,29 +156,6 @@ def crop_policy_actions(policy: Any, actions: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def build_suffix_inputs(core, x_t, timestep):
-    action_dtype = next(core.action_in_proj.parameters()).dtype
-    x_t = x_t.to(dtype=action_dtype)
-
-    suffix_embs = core.action_in_proj(x_t)
-
-    hidden_size = core.action_in_proj.out_features
-    time_emb = create_sinusoidal_pos_embedding(
-        timestep,
-        hidden_size,
-        min_period=core.config.min_period,
-        max_period=core.config.max_period,
-        device=timestep.device,
-    ).to(dtype=suffix_embs.dtype)
-
-    adarms_cond = core.time_mlp_in(time_emb)
-    adarms_cond = F.silu(adarms_cond)
-    adarms_cond = core.time_mlp_out(adarms_cond)
-    adarms_cond = F.silu(adarms_cond)
-
-    return suffix_embs, adarms_cond
-
-@torch.no_grad()
 def make_compile_inputs(
     core,
     *,
@@ -203,12 +180,6 @@ def make_compile_inputs(
         batch_size,
         device=device,
         dtype=torch.float32,
-    )
-
-    suffix_embs, adarms_cond = build_suffix_inputs(
-        core,
-        x_t,
-        timestep,
     )
 
     prefix_k = torch.zeros(
@@ -237,13 +208,21 @@ def make_compile_inputs(
     )
 
     return (
-        suffix_embs,
-        adarms_cond,
+        x_t,
+        timestep,
         prefix_k,
         prefix_v,
         position_ids,
         attention_mask,
     )
+
+def make_pi05_static_action_module(core, device):
+    return StaticActionVelocityStep(
+        step_encoder=PI05PrefixKVStepEncoder(core),
+        action_expert=core.paligemma_with_expert.gemma_expert.model,
+        velocity_decoder=core.action_out_proj,
+        output_tokens=core.config.chunk_size,
+    ).eval().to(device=device)
 
 def make_pi05_noise(core, batch_size: int, device: torch.device) -> torch.Tensor:
     return core.sample_noise(
@@ -434,10 +413,9 @@ def save_pi05_action_diffusion_engine_for_edge_llm(
     device: torch.device,
     model_type: str = "pi05_action_diffusion",
 ):
-    action_module = PI05StaticKVDiffusionStep(core).eval().to(device=device)
-    sample_inputs = make_pi05_action_compile_inputs(
+    action_module = make_pi05_static_action_module(core, device)
+    sample_inputs = make_compile_inputs(
         core,
-        action_module,
         batch_size=batch_size,
         prefix_len=prefix_len,
         device=device,
@@ -509,7 +487,15 @@ def compile_trt_with_plugin(
     }
 
     print("compiling PI0.5 vision")
-    visual = PI05VisualEmbed(core).eval().to(device=device)
+    visual = VisualFixedInput(
+        vision_model=core.paligemma_with_expert.paligemma.model.vision_tower,
+        projector=core.paligemma_with_expert.paligemma.model.multi_modal_projector,
+        sample_pixel_values=pixel_values,
+        select_layer=-1,
+        pixel_shuffle=False,
+        force_float32_input=True,
+        cast_output_to_input_dtype=True,
+    ).eval().to(device=device)
     vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
     batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
 
@@ -638,11 +624,7 @@ def compile_trt_with_plugin(
         )
 
     print("compiling PI0.5 action diffusion")
-    action_module = StaticActionVelocityStep(
-        action_expert=core.paligemma_with_expert.gemma_expert.model,
-        velocity_decoder=core.action_out_proj,
-        output_tokens=core.config.chunk_size,
-    ).eval().to(device=device)
+    action_module = make_pi05_static_action_module(core, device)
 
     sample_inputs = make_compile_inputs(
         core,
@@ -799,7 +781,7 @@ def run_inference_pytorch_pi05(
     )
 
     noise = make_pi05_noise(core, tokens.shape[0], device)
-    action_module = PI05StaticKVDiffusionStep(core).eval().to(device=device)
+    action_module = make_pi05_static_action_module(core, device)
     actions = sample_actions_raw(
         action_module,
         ActionRolloutContext(

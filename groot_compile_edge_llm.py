@@ -5,7 +5,6 @@ import argparse
 import ctypes
 import pathlib
 import subprocess
-import torch
 import copy
 import json
 import logging
