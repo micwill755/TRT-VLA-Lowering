@@ -27,18 +27,29 @@ def create_sinusoidal_pos_embedding(  # see openpi `create_sinusoidal_pos_embedd
     return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
 
 class TRTFixedCategorySpecificLinear(nn.Module):
+    """Freeze one GR00T embodiment-specific Linear into a normal Linear.
+
+    GR00T stores one weight matrix per robot embodiment and selects it with
+    embodiment_id at runtime. For TensorRT deployment we compile one robot at a
+    time, so this wrapper picks that robot's weights once in __init__ and the
+    forward path becomes a plain static F.linear.
+    """
+
     def __init__(self, layer: nn.Module, embodiment_id: torch.Tensor):
         super().__init__()
 
         cat_id = int(embodiment_id.flatten()[0].item())
 
-        # Original:
-        #   layer.W[cat_id]: [input_dim, output_dim]
-        # nn.functional.linear expects:
-        #   weight: [output_dim, input_dim]
+        # Original: [num_embodiments, input_dim, output_dim]
+        # using cat_id selects the weight matrix for one embodiment/robot -> [input_dim, output_dim]
+        # nn.functional.linear expects -> weight: [output_dim, input_dim] so we transpose
         weight = layer.W[cat_id].transpose(0, 1).contiguous()
         bias = layer.b[cat_id].contiguous()
 
+        # detach() breaks any autograd link to the original multi-embodiment
+        # parameter; clone() gives this fixed wrapper independent storage for
+        # the selected slice. This copy happens once during wrapper creation,
+        # not in forward, and lets TensorRT see normal immutable weights.
         self.weight = nn.Parameter(weight.detach().clone(), requires_grad=False)
         self.bias = nn.Parameter(bias.detach().clone(), requires_grad=False)
         self.out_features = int(bias.shape[0])
@@ -52,15 +63,42 @@ class TRTFixedCategorySpecificLinear(nn.Module):
         x = F.linear(x, self.weight, self.bias)
         return x.reshape(batch_size, seq_len, self.out_features)
 
-class TRTGrootActionDecoder(nn.Module):
-    def __init__(self, action_decoder: nn.Module, embodiment_id: torch.Tensor):
+class TRTDynamicCategorySpecificLinear(nn.Module):
+    def __init__(self, layer: nn.Module):
+        super().__init__()
+
+        # Keep the full embodiment weight bank.
+        # W: [num_embodiments, input_dim, output_dim]
+        # b: [num_embodiments, output_dim]
+        self.W = layer.W
+        self.b = layer.b
+
+    def forward(self, x, cat_ids):
+        # x:       [B, T, input_dim]
+        # cat_ids: [B]
+
+        cat_ids = cat_ids.to(dtype=torch.long)
+
+        # selected_w: [B, input_dim, output_dim]
+        # selected_b: [B, output_dim]
+        selected_w = torch.index_select(self.W, dim=0, index=cat_ids)
+        selected_b = torch.index_select(self.b, dim=0, index=cat_ids)
+
+        # out: [B, T, output_dim]
+        out = torch.bmm(x, selected_w)
+
+        # bias: [B, 1, output_dim], broadcast over T
+        return out + selected_b.unsqueeze(1)
+
+class TRTFixedCategorySpecificMLP(nn.Module):
+    def __init__(self, mlp: nn.Module, embodiment_id: torch.Tensor):
         super().__init__()
         self.layer1 = TRTFixedCategorySpecificLinear(
-            action_decoder.layer1,
+            mlp.layer1,
             embodiment_id,
         )
         self.layer2 = TRTFixedCategorySpecificLinear(
-            action_decoder.layer2,
+            mlp.layer2,
             embodiment_id,
         )
 
@@ -69,6 +107,58 @@ class TRTGrootActionDecoder(nn.Module):
         # not need to change. It is ignored because weights are already fixed.
         hidden = F.relu(self.layer1(x))
         return self.layer2(hidden)
+
+class TRTDynamicCategorySpecificMLP(nn.Module):
+    def __init__(self, mlp: nn.Module):
+        super().__init__()
+        self.layer1 = TRTDynamicCategorySpecificLinear(mlp.layer1)
+        self.layer2 = TRTDynamicCategorySpecificLinear(mlp.layer2)
+
+    def forward(self, x, embodiment_id):
+        hidden = F.relu(self.layer1(x, embodiment_id))
+        return self.layer2(hidden, embodiment_id)
+
+class TRTGrootActionEncoder(nn.Module):
+    def __init__(self, action_encoder: nn.Module, embodiment_id: torch.Tensor):
+        super().__init__()
+        self.W1 = TRTFixedCategorySpecificLinear(action_encoder.W1, embodiment_id)
+        self.W2 = TRTFixedCategorySpecificLinear(action_encoder.W2, embodiment_id)
+        self.W3 = TRTFixedCategorySpecificLinear(action_encoder.W3, embodiment_id)
+        self.pos_encoding = action_encoder.pos_encoding
+
+    def forward(self, actions, timesteps, embodiment_id):
+        batch_size, action_horizon, _ = actions.shape
+
+        if timesteps.dim() == 1 and timesteps.shape[0] == batch_size:
+            timesteps = timesteps.unsqueeze(1).expand(-1, action_horizon)
+        else:
+            raise ValueError("Expected `timesteps` to have shape (B,).")
+
+        action_emb = self.W1(actions)
+        timestep_emb = self.pos_encoding(timesteps).to(dtype=action_emb.dtype)
+        hidden = torch.cat([action_emb, timestep_emb], dim=-1)
+        hidden = F.silu(self.W2(hidden))
+        return self.W3(hidden)
+
+class TRTDynamicGrootActionEncoder(nn.Module):
+    def __init__(self, action_encoder: nn.Module):
+        super().__init__()
+        self.W1 = TRTDynamicCategorySpecificLinear(action_encoder.W1)
+        self.W2 = TRTDynamicCategorySpecificLinear(action_encoder.W2)
+        self.W3 = TRTDynamicCategorySpecificLinear(action_encoder.W3)
+        self.pos_encoding = action_encoder.pos_encoding
+
+    def forward(self, actions, timesteps, embodiment_id):
+        batch_size, action_horizon, _ = actions.shape
+
+        timesteps = timesteps.unsqueeze(1).expand(-1, action_horizon)
+
+        action_emb = self.W1(actions, embodiment_id)
+        timestep_emb = self.pos_encoding(timesteps).to(dtype=action_emb.dtype)
+
+        hidden = torch.cat([action_emb, timestep_emb], dim=-1)
+        hidden = F.silu(self.W2(hidden, embodiment_id))
+        return self.W3(hidden, embodiment_id)
 
 class ActionStepEncoder(nn.Module):
     """Base contract for model-specific action-step encoding.
@@ -293,10 +383,18 @@ class AlpamayoPrefixKVStepEncoder(ActionStepEncoder):
         return velocity.view(-1, *self.action_space_dims)
 
 class GrootDiTStepEncoder(ActionStepEncoder):
-    def __init__(self, action_head):
+    def __init__(self, action_head, embodiment_id: torch.Tensor | None = None):
         super().__init__()
-        self.state_encoder = action_head.state_encoder
-        self.action_encoder = action_head.action_encoder
+        if embodiment_id is None:
+            self.state_encoder = action_head.state_encoder
+            self.action_encoder = action_head.action_encoder
+        else:
+            self.state_encoder = TRTDynamicCategorySpecificMLP(
+                action_head.state_encoder
+            )
+            self.action_encoder = TRTDynamicGrootActionEncoder(
+                action_head.action_encoder
+            )
         self.future_tokens = action_head.future_tokens
         self.position_embedding = getattr(action_head, "position_embedding", None)
         self.add_pos_embed = action_head.config.add_pos_embed

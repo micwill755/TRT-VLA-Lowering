@@ -78,7 +78,6 @@ ACTION_TRT_SETTINGS = {
 MODEL_ID = "lerobot/pi05_libero"
 SEED = 42
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export PI0.5 TensorRT engines for TensorRT-Edge-LLM")
 
@@ -216,7 +215,7 @@ def make_compile_inputs(
         attention_mask,
     )
 
-def make_pi05_static_action_module(core, device):
+def make_static_action_module(core, device):
     return StaticActionVelocityStep(
         step_encoder=PI05PrefixKVStepEncoder(core),
         action_expert=core.paligemma_with_expert.gemma_expert.model,
@@ -263,7 +262,7 @@ def validate_language_len(compact_prefix: PackedLanguageInputs, max_seq_len: int
     return prefix_len
 
 
-def save_pi05_visual_engine_for_edge_llm(
+def save_visual_engine_for_edge_llm(
     core,
     pixel_values: torch.Tensor,
     engine_dir: str | pathlib.Path,
@@ -319,7 +318,7 @@ def save_pi05_visual_engine_for_edge_llm(
             restore_attention(patched)
 
 
-def save_pi05_lm_engine_for_edge_llm(
+def save_lm_engine_for_edge_llm(
     core,
     prefix_embs: torch.Tensor,
     engine_dir: str | pathlib.Path,
@@ -404,7 +403,7 @@ def save_pi05_lm_engine_for_edge_llm(
     )
 
 
-def save_pi05_action_diffusion_engine_for_edge_llm(
+def save_action_diffusion_engine_for_edge_llm(
     core,
     prefix_len: int,
     batch_size: int,
@@ -413,7 +412,7 @@ def save_pi05_action_diffusion_engine_for_edge_llm(
     device: torch.device,
     model_type: str = "pi05_action_diffusion",
 ):
-    action_module = make_pi05_static_action_module(core, device)
+    action_module = make_static_action_module(core, device)
     sample_inputs = make_compile_inputs(
         core,
         batch_size=batch_size,
@@ -624,7 +623,7 @@ def compile_trt_with_plugin(
         )
 
     print("compiling PI0.5 action diffusion")
-    action_module = make_pi05_static_action_module(core, device)
+    action_module = make_static_action_module(core, device)
 
     sample_inputs = make_compile_inputs(
         core,
@@ -686,7 +685,7 @@ def save_edge_engines_for_edge_llm(
 
     print("exporting PI0.5 vision.engine")
     vision_engine_dir = engine_root / "visual"
-    vision_engine = save_pi05_visual_engine_for_edge_llm(
+    vision_engine = save_visual_engine_for_edge_llm(
         core,
         pixel_values,
         vision_engine_dir,
@@ -710,7 +709,7 @@ def save_edge_engines_for_edge_llm(
 
     language_max_seq_len = validate_language_len(compact_prefix, max_seq_len)
     language_engine_dir = engine_root / "language"
-    language_engine = save_pi05_lm_engine_for_edge_llm(
+    language_engine = save_lm_engine_for_edge_llm(
         core,
         compact_prefix.inputs_embeds,
         language_engine_dir,
@@ -720,7 +719,7 @@ def save_edge_engines_for_edge_llm(
 
     print("exporting PI0.5 diffusion.engine")
     action_engine_dir = engine_root / "action"
-    action_engine = save_pi05_action_diffusion_engine_for_edge_llm(
+    action_engine = save_action_diffusion_engine_for_edge_llm(
         core,
         prefix_len=int(compact_prefix.pad_mask.shape[1]),
         batch_size=int(tokens.shape[0]),
@@ -781,7 +780,7 @@ def run_inference_pytorch_pi05(
     )
 
     noise = make_pi05_noise(core, tokens.shape[0], device)
-    action_module = make_pi05_static_action_module(core, device)
+    action_module = make_static_action_module(core, device)
     actions = sample_actions_raw(
         action_module,
         ActionRolloutContext(

@@ -20,7 +20,7 @@ from transformers import AutoProcessor
 
 from lerobot.policies.groot import GrootPolicy
 from lerobot.policies.groot.groot_n1 import DEFAULT_TOKENIZER_ASSETS_REPO
-from lerobot.utils.constants import HF_LEROBOT_HOME
+from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME
 
 from trt.action_rollout import ActionRolloutContext, GROOTActionAdapter, sample_actions_raw
 from trt.compile import (
@@ -28,7 +28,7 @@ from trt.compile import (
     save_trt_engine_module
 )
 
-from trt.diffusion import StaticActionVelocityStep, GrootDiTStepEncoder, TRTGrootActionDecoder
+from trt.diffusion import StaticActionVelocityStep, GrootDiTStepEncoder, TRTDynamicCategorySpecificMLP
 from trt.utils import (
     load_policy,
     compact_prefix_inputs,
@@ -40,7 +40,6 @@ from trt.helper import (
 from trt.data import (
     load_test_data,
     prepare_model_inputs,
-    make_batch,
     pack_state
 )
 from trt.packing import (
@@ -103,6 +102,7 @@ TRT_SETTINGS = {
 ACTION_TRT_SETTINGS = {
     **TRT_SETTINGS,
     "offload_module_to_cpu": True,
+    "use_fp32_acc": True,
 }
 
 MODEL_ID = "nvidia/GR00T-N1.5-3B"
@@ -120,44 +120,6 @@ GROOT_EMBODIMENT_MAPPING = {
 }
 
 logger = logging.getLogger(__name__)
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export GR00T TensorRT engines for TensorRT-Edge-LLM")
-
-    parser.add_argument("--model-id", type=str, default=MODEL_ID, help="GR00T policy/model id to load.")
-    parser.add_argument("--dataset-id", type=str, default="lerobot/libero", help="LeRobot dataset id used to build example compile inputs.")
-    parser.add_argument("--episode-index", type=int, default=0, help="Dataset episode index used for the compile sample.")
-    parser.add_argument("--frame-index", type=int, default=0, help="Dataset frame index used for the compile sample.")
-
-    parser.add_argument("--engine-dir", type=str, default="/tmp/groot_edge_llm", help="Root directory for exported Edge-LLM engines.")
-    parser.add_argument("--groot-runtime-bin", type=str, default=str(DEFAULT_GROOT_RUNTIME_BIN), help="Path to the C++ groot_runtime_smoke executable.")
-    parser.add_argument("--vision-engine-dir", type=str, default=None, help="Optional override for the vision engine directory.")
-    parser.add_argument("--language-engine-dir", type=str, default=None, help="Optional override for the language engine directory.")
-
-    parser.add_argument("--plugin-so", type=str, default=os.environ.get("EDGELLM_TRT_PLUGIN_SO") or os.environ.get("EDGE_LLM_PLUGIN_SO"), help="Path to libNvInfer_edgellm_plugin.so.")
-    parser.add_argument("--device", type=str, default="cuda", help="Compile device.")
-
-    parser.add_argument("--seed", type=int, default=SEED, help="Random seed used for compile/test tensors.")
-    parser.add_argument("--num-traj-samples", type=int, default=1, help="Number of GR00T trajectory samples for action/runtime checks.")
-    parser.add_argument("--max-generation-length", type=int, default=256, help="Max language generation length for GR00T checks.")
-    parser.add_argument("--max-seq-len", type=int, default=None, help="Optional static language sequence length override.")
-
-    parser.add_argument("--skip-vision", action="store_true", help="Skip visual.engine export.")
-    parser.add_argument("--skip-language", action="store_true", help="Skip language.engine export.")
-    parser.add_argument("--skip-action", action="store_true", help="Skip action/diffusion engine export if enabled later.")
-
-    parser.add_argument("--debug", action="store_true", help="Enable extra debug logging/checks.")
-    parser.add_argument("--no-accuracy-check", action="store_true", help="Skip eager-vs-TRT accuracy checks.")
-    parser.add_argument("--skip-export", action="store_true", help="Skip Edge engine export.")
-    parser.add_argument("--skip-pytorch", action="store_true", help="Skip eager PyTorch action rollout.")
-    parser.add_argument("--skip-trt", action="store_true", help="Skip Python TRT plugin action rollout.")
-    parser.add_argument("--skip-engine", action="store_true", help="Skip Python serialized .engine action rollout.")
-    parser.add_argument("--skip-edge", action="store_true", help="Skip Edge/C++ runtime action rollout.")
-    parser.add_argument("--no-stage-parity", action="store_true", help="Skip staged C++ vs eager parity diagnostics.")
-    parser.add_argument("--num-iterations", type=int, default=12, help="Total timing iterations including warmup.")
-    parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations to exclude from summary.")
-    
-    return parser.parse_args()
 
 @torch.no_grad()
 def make_compile_inputs(action_horizon, action_dim, vl_embs, state, embodiment_id, device):
@@ -186,7 +148,7 @@ def make_compile_inputs(action_horizon, action_dim, vl_embs, state, embodiment_i
         embodiment_id.to(device=device),
     )
 
-def make_groot_static_action_module(
+def make_static_action_module(
     action_head,
     device,
     dtype=torch.float16,
@@ -195,13 +157,12 @@ def make_groot_static_action_module(
     velocity_decoder = action_head.action_decoder
 
     if embodiment_id is not None:
-        velocity_decoder = TRTGrootActionDecoder(
-            action_head.action_decoder,
-            embodiment_id,
+        velocity_decoder = TRTDynamicCategorySpecificMLP(
+            action_head.action_decoder
         )
 
     return StaticActionVelocityStep(
-        step_encoder=GrootDiTStepEncoder(action_head),
+        step_encoder=GrootDiTStepEncoder(action_head, embodiment_id),
         action_expert=action_head.model,
         velocity_decoder=velocity_decoder,
         output_tokens=action_head.config.action_horizon,
@@ -209,7 +170,7 @@ def make_groot_static_action_module(
     ).eval().to(device=device, dtype=dtype)
 
 @torch.no_grad()
-def build_groot_language_inputs(core, vit_embs, input_ids, attention_mask=None) -> PackedLanguageInputs:
+def build_language_inputs(core, vit_embs, input_ids, attention_mask=None) -> PackedLanguageInputs:
     eagle = core.backbone.eagle_model
     image_token_index = getattr(
         eagle,
@@ -234,7 +195,7 @@ def build_groot_language_inputs(core, vit_embs, input_ids, attention_mask=None) 
     )
 
 @torch.no_grad()
-def build_groot_context_from_language_inputs(core, packed: PackedLanguageInputs):
+def build_context_from_language_inputs(core, packed: PackedLanguageInputs):
     eagle = core.backbone.eagle_model
 
     out = eagle.language_model(
@@ -256,9 +217,9 @@ def build_groot_context_from_language_inputs(core, packed: PackedLanguageInputs)
 
 
 @torch.no_grad()
-def build_groot_context_inputs(core, vit_embs, input_ids, attention_mask):
+def build_context_inputs(core, vit_embs, input_ids, attention_mask):
     eagle = core.backbone.eagle_model
-    packed = build_groot_language_inputs(
+    packed = build_language_inputs(
         core,
         vit_embs,
         input_ids,
@@ -289,7 +250,7 @@ def build_groot_context_inputs(core, vit_embs, input_ids, attention_mask):
         packed.position_ids,
     )
 
-def make_groot_context_masks(context_embs, attention_mask):
+def make_context_masks(context_embs, attention_mask):
     context_pad_masks = attention_mask.to(device=context_embs.device, dtype=torch.bool)
     context_position_ids = torch.cumsum(context_pad_masks, dim=1) - 1
 
@@ -299,7 +260,7 @@ def make_groot_context_masks(context_embs, attention_mask):
         context_position_ids,
     )
 
-def make_groot_visual_fixed_input(
+def make_visual_fixed_input(
     model: nn.Module,
     sample_pixel_values: torch.Tensor,
     *,
@@ -316,7 +277,7 @@ def make_groot_visual_fixed_input(
         downsample_ratio=eagle.downsample_ratio,
     ).eval().to(device=device, dtype=dtype)
 
-def save_groot_visual_engine_for_edge_llm(
+def save_visual_engine_for_edge_llm(
     model,
     pixel_values,
     engine_dir,
@@ -329,7 +290,7 @@ def save_groot_visual_engine_for_edge_llm(
     pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
 
     if visual is None:
-        visual = make_groot_visual_fixed_input(
+        visual = make_visual_fixed_input(
             model,
             pixel_values,
             device=device,
@@ -372,7 +333,7 @@ def save_groot_visual_engine_for_edge_llm(
         if patched:
             restore_attention(patched)
 
-def save_groot_lm_engine_for_edge_llm(
+def save_lm_engine_for_edge_llm(
     core,
     input_embs,
     engine_dir,
@@ -468,7 +429,7 @@ def save_groot_lm_engine_for_edge_llm(
         },
     )
 
-def save_groot_action_diffusion_engine_for_edge_llm(
+def save_action_diffusion_engine_for_edge_llm(
     core,
     context_embs,
     state,
@@ -479,7 +440,7 @@ def save_groot_action_diffusion_engine_for_edge_llm(
     dtype=torch.float16,
     model_type="groot_action_diffusion",
 ):
-    action_module = make_groot_static_action_module(core.action_head, device, dtype, embodiment_id)
+    action_module = make_static_action_module(core.action_head, device, dtype, embodiment_id)
 
     context_embs = context_embs.to(device=device, dtype=dtype).contiguous()
     state = state.to(device=device, dtype=dtype).contiguous()
@@ -584,7 +545,7 @@ def save_edge_engines_for_edge_llm(
     # -------------------------
     print("compiling vision")
 
-    visual = make_groot_visual_fixed_input(
+    visual = make_visual_fixed_input(
         model,
         pixel_values,
         device=device,
@@ -592,7 +553,7 @@ def save_edge_engines_for_edge_llm(
     )
 
     engine_dir = str(pathlib.Path(engine_root) / "visual")
-    trt_vision = save_groot_visual_engine_for_edge_llm(
+    trt_vision = save_visual_engine_for_edge_llm(
         model,
         pixel_values,
         engine_dir,
@@ -610,7 +571,7 @@ def save_edge_engines_for_edge_llm(
     with torch.no_grad():
         eager_image_embs = visual(pixel_values)
 
-    language_inputs = build_groot_language_inputs(
+    language_inputs = build_language_inputs(
         model,
         eager_image_embs,
         input_ids,
@@ -618,7 +579,7 @@ def save_edge_engines_for_edge_llm(
     )
 
     language_engine_dir = str(pathlib.Path(engine_root) / "language")
-    trt_lm = save_groot_lm_engine_for_edge_llm(
+    trt_lm = save_lm_engine_for_edge_llm(
         model,
         language_inputs.inputs_embeds,
         language_engine_dir,
@@ -634,7 +595,7 @@ def save_edge_engines_for_edge_llm(
     print("compiling action diffusion")
 
     with torch.no_grad():
-        context_embs, _, _, _ = build_groot_context_inputs(
+        context_embs, _, _, _ = build_context_inputs(
             model,
             eager_image_embs,
             input_ids,
@@ -642,7 +603,7 @@ def save_edge_engines_for_edge_llm(
         )
 
     action_engine_dir = str(pathlib.Path(engine_root) / "action")
-    trt_diffusion = save_groot_action_diffusion_engine_for_edge_llm(
+    trt_diffusion = save_action_diffusion_engine_for_edge_llm(
         model,
         context_embs,
         state,
@@ -729,7 +690,7 @@ def compile_trt_with_plugin(
     # -------------------------
     print("compiling vision")
 
-    visual = make_groot_visual_fixed_input(
+    visual = make_visual_fixed_input(
         model,
         pixel_values,
         device=device,
@@ -770,7 +731,7 @@ def compile_trt_with_plugin(
     # -------------------------
     print("compiling language")
 
-    language_inputs = build_groot_language_inputs(
+    language_inputs = build_language_inputs(
         model,
         trt_image_embs,
         input_ids,
@@ -849,7 +810,7 @@ def compile_trt_with_plugin(
     # -------------------------
     print("compiling action diffusion")
 
-    action_module = make_groot_static_action_module(
+    action_module = make_static_action_module(
         model.action_head,
         device,
         torch.float16,
@@ -919,14 +880,14 @@ def run_inference_pytorch_groot(
     start_time = time.perf_counter()
 
     with torch.autocast("cuda", dtype=torch.float16):
-        image_embs = make_groot_visual_fixed_input(
+        image_embs = make_visual_fixed_input(
             model,
             pixel_values,
             device=device,
             dtype=torch.float16,
         )(pixel_values)
 
-        context_embs, _, _, _ = build_groot_context_inputs(
+        context_embs, _, _, _ = build_context_inputs(
             model,
             image_embs,
             input_ids,
@@ -943,10 +904,11 @@ def run_inference_pytorch_groot(
             dtype=context_embs.dtype,
         )
 
-        action_module = make_groot_static_action_module(
+        action_module = make_static_action_module(
             model.action_head,
             device,
             torch.float16,
+            embodiment_id,
         )
 
         context = ActionRolloutContext(
@@ -1010,7 +972,7 @@ def run_inference_trt_plugin(
 
     image_embs = trt_vision(pixel_values)
 
-    language_inputs = build_groot_language_inputs(
+    language_inputs = build_language_inputs(
         model,
         image_embs,
         input_ids,
@@ -1111,7 +1073,7 @@ def _load_named_input_tensor(engine_root: pathlib.Path, component: str, name: st
     meta = config["inputs"][name]
     return _load_tensor_bin(path, meta["shape"], meta["dtype"], device)
 
-def _run_groot_runtime_stage(runtime_bin: str, engine_root: pathlib.Path, fixture_dir: pathlib.Path, stage: str, plugin_so: str | None) -> None:
+def _run_runtime_stage(runtime_bin: str, engine_root: pathlib.Path, fixture_dir: pathlib.Path, stage: str, plugin_so: str | None) -> None:
     runtime_path = pathlib.Path(runtime_bin)
     if not runtime_path.exists():
         raise FileNotFoundError(
@@ -1156,6 +1118,33 @@ def _make_embodiment_id(policy, state: torch.Tensor, device: torch.device) -> to
         device=device,
     )
 
+def _groot_output_action_dim(policy) -> int | None:
+    output_features = getattr(policy.config, "output_features", None)
+    if output_features is None:
+        return None
+
+    action_feature = output_features.get(ACTION)
+    if action_feature is None:
+        return None
+
+    shape = getattr(action_feature, "shape", None)
+    if not shape:
+        return None
+
+    return int(shape[0])
+
+def compute_groot_policy_action_metrics(
+    pred_actions: torch.Tensor,
+    target_actions: torch.Tensor,
+    policy,
+) -> dict[str, float]:
+    action_dim = _groot_output_action_dim(policy)
+    if action_dim is not None:
+        pred_actions = pred_actions[..., :action_dim]
+        target_actions = target_actions[..., :action_dim]
+
+    return compute_action_parity_metrics(pred_actions, target_actions)
+
 
 @torch.no_grad()
 def _print_groot_stage_parity(
@@ -1178,7 +1167,7 @@ def _print_groot_stage_parity(
     print("  staged parity:")
 
     with torch.autocast("cuda", dtype=torch.float16):
-        eager_visual_embeds = make_groot_visual_fixed_input(
+        eager_visual_embeds = make_visual_fixed_input(
             model,
             pixel_values,
             device=device,
@@ -1186,7 +1175,7 @@ def _print_groot_stage_parity(
         )(pixel_values)
     tensor_error_metrics("    visual_embeds", visual_embeds, eager_visual_embeds)
 
-    eager_context_embs = build_groot_context_from_language_inputs(
+    eager_context_embs = build_context_from_language_inputs(
         model,
         language_inputs,
     ).to(device=device, dtype=torch.float16)
@@ -1198,13 +1187,14 @@ def _print_groot_stage_parity(
         dtype=torch.long,
     ).contiguous()
     _dump_tensor_bin(fixture_dir / "timestep.bin", timestep)
-    _run_groot_runtime_stage(runtime_bin, engine_root, fixture_dir, "action-step", plugin_so)
+    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "action-step", plugin_so)
     pred_velocity = _load_first_output_tensor(engine_root, "action", fixture_dir / "pred_velocity.bin", device)
 
-    action_module = make_groot_static_action_module(
+    action_module = make_static_action_module(
         model.action_head,
         device,
         torch.float16,
+        embodiment_id,
     )
     eager_pred_velocity = action_module(
         noise,
@@ -1272,10 +1262,10 @@ def run_inference_edge_groot(
     start_time = time.perf_counter()
 
     _dump_tensor_bin(fixture_dir / "pixel_values.bin", pixel_values)
-    _run_groot_runtime_stage(runtime_bin, engine_root, fixture_dir, "visual", plugin_so)
+    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "visual", plugin_so)
     visual_embeds = _load_first_output_tensor(engine_root, "visual", fixture_dir / "visual_embeds.bin", device)
 
-    language_inputs = build_groot_language_inputs(
+    language_inputs = build_language_inputs(
         model,
         visual_embeds,
         input_ids,
@@ -1284,7 +1274,7 @@ def run_inference_edge_groot(
     inputs_embeds = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16).contiguous()
 
     _dump_tensor_bin(fixture_dir / "inputs_embeds.bin", inputs_embeds)
-    _run_groot_runtime_stage(runtime_bin, engine_root, fixture_dir, "language", plugin_so)
+    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "language", plugin_so)
     context_embs = _load_first_output_tensor(engine_root, "language", fixture_dir / "context_embs.bin", device)
     context_embs = context_embs.to(device=device, dtype=torch.float16).contiguous()
 
@@ -1301,7 +1291,7 @@ def run_inference_edge_groot(
     _dump_tensor_bin(fixture_dir / "state.bin", state)
     _dump_tensor_bin(fixture_dir / "embodiment_id.bin", embodiment_id)
 
-    _run_groot_runtime_stage(runtime_bin, engine_root, fixture_dir, "action", plugin_so)
+    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "action", plugin_so)
     actions = _load_named_input_tensor(engine_root, "action", "actions", fixture_dir / "actions_out.bin", device)
 
     elapsed = time.perf_counter() - start_time
@@ -1335,7 +1325,7 @@ def run_inference_edge_groot(
 
     return actions, extra, elapsed
 
-def make_groot_create_inputs_fn(processor, data, messages, device):
+def make_create_inputs_fn(processor, data, messages, device):
     def create_inputs():
         return prepare_model_inputs(
             processor,
@@ -1347,6 +1337,44 @@ def make_groot_create_inputs_fn(processor, data, messages, device):
             device,
         )
     return create_inputs
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Export GR00T TensorRT engines for TensorRT-Edge-LLM")
+
+    parser.add_argument("--model-id", type=str, default=MODEL_ID, help="GR00T policy/model id to load.")
+    parser.add_argument("--dataset-id", type=str, default="lerobot/libero", help="LeRobot dataset id used to build example compile inputs.")
+    parser.add_argument("--episode-index", type=int, default=0, help="Dataset episode index used for the compile sample.")
+    parser.add_argument("--frame-index", type=int, default=0, help="Dataset frame index used for the compile sample.")
+
+    parser.add_argument("--engine-dir", type=str, default="/tmp/groot_edge_llm", help="Root directory for exported Edge-LLM engines.")
+    parser.add_argument("--groot-runtime-bin", type=str, default=str(DEFAULT_GROOT_RUNTIME_BIN), help="Path to the C++ groot_runtime_smoke executable.")
+    parser.add_argument("--vision-engine-dir", type=str, default=None, help="Optional override for the vision engine directory.")
+    parser.add_argument("--language-engine-dir", type=str, default=None, help="Optional override for the language engine directory.")
+
+    parser.add_argument("--plugin-so", type=str, default=os.environ.get("EDGELLM_TRT_PLUGIN_SO") or os.environ.get("EDGE_LLM_PLUGIN_SO"), help="Path to libNvInfer_edgellm_plugin.so.")
+    parser.add_argument("--device", type=str, default="cuda", help="Compile device.")
+
+    parser.add_argument("--seed", type=int, default=SEED, help="Random seed used for compile/test tensors.")
+    parser.add_argument("--num-traj-samples", type=int, default=1, help="Number of GR00T trajectory samples for action/runtime checks.")
+    parser.add_argument("--max-generation-length", type=int, default=256, help="Max language generation length for GR00T checks.")
+    parser.add_argument("--max-seq-len", type=int, default=None, help="Optional static language sequence length override.")
+
+    parser.add_argument("--skip-vision", action="store_true", help="Skip visual.engine export.")
+    parser.add_argument("--skip-language", action="store_true", help="Skip language.engine export.")
+    parser.add_argument("--skip-action", action="store_true", help="Skip action/diffusion engine export if enabled later.")
+
+    parser.add_argument("--debug", action="store_true", help="Enable extra debug logging/checks.")
+    parser.add_argument("--no-accuracy-check", action="store_true", help="Skip eager-vs-TRT accuracy checks.")
+    parser.add_argument("--skip-export", action="store_true", help="Skip Edge engine export.")
+    parser.add_argument("--skip-pytorch", action="store_true", help="Skip eager PyTorch action rollout.")
+    parser.add_argument("--skip-trt", action="store_true", help="Skip Python TRT plugin action rollout.")
+    parser.add_argument("--skip-engine", action="store_true", help="Skip Python serialized .engine action rollout.")
+    parser.add_argument("--no-stage-parity", action="store_true", help="Skip staged C++ vs eager parity diagnostics.")
+    parser.add_argument("--num-iterations", type=int, default=12, help="Total timing iterations including warmup.")
+    parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations to exclude from summary.")
+    
+    return parser.parse_args()
 
 def main() -> int:
     args = parse_args()
@@ -1377,7 +1405,7 @@ def main() -> int:
 
     # TODO: right now we are using the same episode 0 and frame 0
     # each iteration should use a different frame
-    create_inputs_fn = make_groot_create_inputs_fn(
+    create_inputs_fn = make_create_inputs_fn(
         processor,
         data,
         messages,
@@ -1447,13 +1475,10 @@ def main() -> int:
     pt_times: list[float] = []
     trt_times: list[float] = []
     engine_times: list[float] = []
-    edge_times: list[float] = []
     action_ades: list[float] = []
     actionmean_abs: list[float] = []
     engine_action_ades: list[float] = []
     engine_actionmean_abs: list[float] = []
-    edge_action_ades: list[float] = []
-    edge_actionmean_abs: list[float] = []
 
     for i in range(args.num_iterations):
         print(f"\n=== iter {i} ===", flush=True)
@@ -1502,7 +1527,7 @@ def main() -> int:
             trt_times.append(trt_elapsed)
 
             if pred_actions_pt is not None:
-                trt_metrics = compute_action_parity_metrics(pred_actions_trt, pred_actions_pt)
+                trt_metrics = compute_groot_policy_action_metrics(pred_actions_trt, pred_actions_pt, policy)
                 action_ades.append(trt_metrics["action_ade"])
                 actionmean_abs.append(trt_metrics["mean_abs"])
                 print(f"  TRT Plugin : {trt_elapsed:7.1f} ms   actionADE={trt_metrics['action_ade']:.6f}  mean_abs={trt_metrics['mean_abs']:.6f}")
@@ -1533,42 +1558,12 @@ def main() -> int:
             engine_times.append(engine_elapsed)
 
             if pred_actions_pt is not None:
-                engine_metrics = compute_action_parity_metrics(pred_actions_engine, pred_actions_pt)
+                engine_metrics = compute_groot_policy_action_metrics(pred_actions_engine, pred_actions_pt, policy)
                 engine_action_ades.append(engine_metrics["action_ade"])
                 engine_actionmean_abs.append(engine_metrics["mean_abs"])
                 print(f"  Serialized : {engine_elapsed:7.1f} ms   actionADE={engine_metrics['action_ade']:.6f}  mean_abs={engine_metrics['mean_abs']:.6f}")
             else:
                 print(f"  Serialized : {engine_elapsed:7.1f} ms")
-
-        # -- Edge Runtime --------------------------------------------------
-        if not args.skip_edge:
-            if device.type == "cuda":
-                torch.cuda.synchronize(); t = time.perf_counter()
-            else:
-                t = time.perf_counter()
-            pred_actions_edge, extra_edge, _ = run_inference_edge_groot(
-                model,
-                policy,
-                create_inputs_fn,
-                plugin_info=edge_plugin_info,
-                runtime_bin=args.groot_runtime_bin,
-                seed=args.seed,
-                device=device,
-                plugin_so=args.plugin_so,
-                stage_parity=not args.no_stage_parity,
-            )
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            edge_elapsed = 1000 * (time.perf_counter() - t)
-            edge_times.append(edge_elapsed)
-
-            if pred_actions_pt is not None:
-                edge_metrics = compute_action_parity_metrics(pred_actions_edge, pred_actions_pt)
-                edge_action_ades.append(edge_metrics["action_ade"])
-                edge_actionmean_abs.append(edge_metrics["mean_abs"])
-                print(f"  Edge Runtime: {edge_elapsed:7.1f} ms   actionADE={edge_metrics['action_ade']:.6f}  mean_abs={edge_metrics['mean_abs']:.6f}")
-            else:
-                print(f"  Edge Runtime: {edge_elapsed:7.1f} ms")
 
     print("\n" + "=" * 78)
     print(f"Summary  (warmup={args.warmup} / {args.num_iterations})")
@@ -1583,9 +1578,6 @@ def main() -> int:
     if engine_times:
         print_timing("Serialized Engine", engine_times[args.warmup:])
 
-    if edge_times:
-        print_timing("Edge Runtime", edge_times[args.warmup:])
-
     if action_ades:
         print_action_metrics("TRT Action ADE", action_ades[args.warmup:])
         print_action_metrics("TRT Action mean abs", actionmean_abs[args.warmup:])
@@ -1593,10 +1585,6 @@ def main() -> int:
     if engine_action_ades:
         print_action_metrics("Engine Action ADE", engine_action_ades[args.warmup:])
         print_action_metrics("Engine Action mean abs", engine_actionmean_abs[args.warmup:])
-
-    if edge_action_ades:
-        print_action_metrics("Edge Action ADE", edge_action_ades[args.warmup:])
-        print_action_metrics("Edge Action mean abs", edge_actionmean_abs[args.warmup:])
 
     if pt_times and trt_times:
         pt_avg = mean(pt_times[args.warmup:])
@@ -1609,12 +1597,6 @@ def main() -> int:
         engine_avg = mean(engine_times[args.warmup:])
         speedup = pt_avg / engine_avg if engine_avg > 0 else float("nan")
         print(f"  Speedup (Engine vs PyTorch): {speedup:5.2f}x   ({pt_avg:.1f} -> {engine_avg:.1f} ms)")
-
-    if pt_times and edge_times:
-        pt_avg = mean(pt_times[args.warmup:])
-        edge_avg = mean(edge_times[args.warmup:])
-        speedup = pt_avg / edge_avg if edge_avg > 0 else float("nan")
-        print(f"  Speedup (Edge vs PyTorch): {speedup:5.2f}x   ({pt_avg:.1f} -> {edge_avg:.1f} ms)")
 
     return 0
 
