@@ -12,43 +12,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class GROOTVisualEmbed(nn.Module):
-    """
-    Semantic GR00T visual wrapper.
-
-    This calls Eagle's high-level extract_feature helper, which already returns
-    the projected visual-token embeddings consumed by the prompt/language path.
-    It is useful for eager comparisons, but extract_feature hides the selected
-    hidden-state path plus the optional pixel-shuffle projection path. In that
-    path Eagle derives reshape sizes from vit_embeds.shape using Python math:
-    sqrt, int(...), a float downsample_ratio, and -1 reshape inference. Those
-    ops are simple semantically, but they can be awkward for torch.export and
-    TensorRT when they are produced from symbolic tensor shapes inside the
-    helper.
-    """
-    def __init__(self, groot):
-        super().__init__()
-        self.eagle_model = groot.backbone.eagle_model
-
-    def forward(self, pixel_values):
-        return self.eagle_model.extract_feature(pixel_values)
-
-class PI05VisualEmbed(nn.Module):
-    def __init__(self, core):
-        super().__init__()
-        self.paligemma_with_expert = core.paligemma_with_expert
-
-    def forward(self, image):
-        return self.paligemma_with_expert.embed_image(image)
-
-class SmolVLAVisualEmbed(nn.Module):
-    def __init__(self, core):
-        super().__init__()
-        self.vlm_with_expert = core.vlm_with_expert
-
-    def forward(self, image):
-        return self.vlm_with_expert.embed_image(image)
-
 class PixelOnlyWrapper(nn.Module):
     def __init__(self, wrapped):
         super().__init__()

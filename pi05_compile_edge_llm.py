@@ -18,7 +18,7 @@ from lerobot.utils.constants import ACTION
 from trt.action_rollout import ActionRolloutContext, PI05ActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module, save_trt_engine_module
 from trt.data import make_batch
-from trt.diffusion import PI05StaticKVDiffusionStep
+from trt.diffusion import StaticActionVelocityStep
 from trt.language import (
     FlatKVLanguageEngineWrapper,
     compile_language_trt_with_plugin,
@@ -155,14 +155,62 @@ def crop_policy_actions(policy: Any, actions: torch.Tensor) -> torch.Tensor:
     return actions[..., : action_output_dim(policy)]
 
 
-def make_pi05_action_compile_inputs(core, action_step, batch_size: int, prefix_len: int, device: torch.device):
+@torch.no_grad()
+def build_suffix_inputs(core, x_t, timestep):
+    action_dtype = next(core.action_in_proj.parameters()).dtype
+    x_t = x_t.to(dtype=action_dtype)
+
+    suffix_embs = core.action_in_proj(x_t)
+
+    hidden_size = core.action_in_proj.out_features
+    time_emb = create_sinusoidal_pos_embedding(
+        timestep,
+        hidden_size,
+        min_period=core.config.min_period,
+        max_period=core.config.max_period,
+        device=timestep.device,
+    ).to(dtype=suffix_embs.dtype)
+
+    adarms_cond = core.time_mlp_in(time_emb)
+    adarms_cond = F.silu(adarms_cond)
+    adarms_cond = core.time_mlp_out(adarms_cond)
+    adarms_cond = F.silu(adarms_cond)
+
+    return suffix_embs, adarms_cond
+
+@torch.no_grad()
+def make_compile_inputs(
+    core,
+    *,
+    batch_size: int,
+    prefix_len: int,
+    device: torch.device,
+):
     chunk_size = core.config.chunk_size
     action_dim = core.config.max_action_dim
     expert_cfg = core.paligemma_with_expert.gemma_expert.model.config
-    dtype = next(action_step.parameters()).dtype
+    dtype = next(core.action_in_proj.parameters()).dtype
 
-    x_t = torch.randn(batch_size, chunk_size, action_dim, device=device, dtype=dtype)
-    timestep = torch.ones(batch_size, device=device, dtype=torch.float32)
+    x_t = torch.randn(
+        batch_size,
+        chunk_size,
+        action_dim,
+        device=device,
+        dtype=dtype,
+    )
+
+    timestep = torch.ones(
+        batch_size,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    suffix_embs, adarms_cond = build_suffix_inputs(
+        core,
+        x_t,
+        timestep,
+    )
+
     prefix_k = torch.zeros(
         expert_cfg.num_hidden_layers,
         batch_size,
@@ -173,11 +221,29 @@ def make_pi05_action_compile_inputs(core, action_step, batch_size: int, prefix_l
         dtype=dtype,
     )
     prefix_v = torch.zeros_like(prefix_k)
-    prefix_pad_masks = torch.ones(batch_size, prefix_len, dtype=torch.bool, device=device)
 
-    position_ids, attention_mask = make_suffix_position_and_mask(core, prefix_pad_masks, x_t, device)
-    return x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask
+    prefix_pad_masks = torch.ones(
+        batch_size,
+        prefix_len,
+        dtype=torch.bool,
+        device=device,
+    )
 
+    position_ids, attention_mask = make_suffix_position_and_mask(
+        core,
+        prefix_pad_masks,
+        x_t,
+        device,
+    )
+
+    return (
+        suffix_embs,
+        adarms_cond,
+        prefix_k,
+        prefix_v,
+        position_ids,
+        attention_mask,
+    )
 
 def make_pi05_noise(core, batch_size: int, device: torch.device) -> torch.Tensor:
     return core.sample_noise(
@@ -572,14 +638,19 @@ def compile_trt_with_plugin(
         )
 
     print("compiling PI0.5 action diffusion")
-    action_module = PI05StaticKVDiffusionStep(core).eval().to(device=device)
-    sample_inputs = make_pi05_action_compile_inputs(
+    action_module = StaticActionVelocityStep(
+        action_expert=core.paligemma_with_expert.gemma_expert.model,
+        velocity_decoder=core.action_out_proj,
+        output_tokens=core.config.chunk_size,
+    ).eval().to(device=device)
+
+    sample_inputs = make_compile_inputs(
         core,
-        action_module,
         batch_size=tokens.shape[0],
         prefix_len=trt_prefix.pad_mask.shape[1],
         device=device,
     )
+
     trt_diffusion = compile_trt_module(
         action_module,
         sample_inputs,

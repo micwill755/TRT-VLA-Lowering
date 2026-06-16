@@ -95,6 +95,7 @@ class PluginLMHiddenWrapper(nn.Module):
 
         return hidden, prefix_k, prefix_v
 
+# TODO: 
 class GROOTContextProjectionWrapper(nn.Module):
     def __init__(self, eagle_linear, vlln, vl_self_attention):
         super().__init__()

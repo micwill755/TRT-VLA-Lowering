@@ -29,7 +29,7 @@ from trt.compile import (
     save_trt_engine_module
 )
 
-from trt.diffusion import GrootStaticDiffusionStep
+from trt.diffusion import StaticActionVelocityStep, GrootDiTStepEncoder, TRTGrootActionDecoder
 from trt.utils import (
     load_policy,
     compact_prefix_inputs,
@@ -160,12 +160,10 @@ def parse_args() -> argparse.Namespace:
     
     return parser.parse_args()
 
-def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
+@torch.no_grad()
+def make_compile_inputs(action_horizon, action_dim, vl_embs, state, embodiment_id, device):
     batch_size = vl_embs.shape[0]
     dtype = vl_embs.dtype
-
-    action_horizon = action_step.action_horizon
-    action_dim = action_step.action_decoder.layer2.b.shape[-1]
 
     actions = torch.randn(
         batch_size,
@@ -184,10 +182,32 @@ def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
     return (
         actions,
         timestep,
-        vl_embs,
-        state,
-        embodiment_id,
+        vl_embs.to(device=device, dtype=dtype),
+        state.to(device=device, dtype=dtype),
+        embodiment_id.to(device=device),
     )
+
+def make_groot_static_action_module(
+    action_head,
+    device,
+    dtype=torch.float16,
+    embodiment_id=None,
+):
+    velocity_decoder = action_head.action_decoder
+
+    if embodiment_id is not None:
+        velocity_decoder = TRTGrootActionDecoder(
+            action_head.action_decoder,
+            embodiment_id,
+        )
+
+    return StaticActionVelocityStep(
+        step_encoder=GrootDiTStepEncoder(action_head),
+        action_expert=action_head.model,
+        velocity_decoder=velocity_decoder,
+        output_tokens=action_head.config.action_horizon,
+        cast_hidden_fp32=False,
+    ).eval().to(device=device, dtype=dtype)
 
 @torch.no_grad()
 def build_groot_language_inputs(core, vit_embs, input_ids, attention_mask=None) -> PackedLanguageInputs:
@@ -460,17 +480,15 @@ def save_groot_action_diffusion_engine_for_edge_llm(
     dtype=torch.float16,
     model_type="groot_action_diffusion",
 ):
-    action_module = GrootStaticDiffusionStep(core.action_head).eval().to(
-        device=device,
-        dtype=dtype,
-    )
+    action_module = make_groot_static_action_module(core.action_head, device, dtype, embodiment_id)
 
     context_embs = context_embs.to(device=device, dtype=dtype).contiguous()
     state = state.to(device=device, dtype=dtype).contiguous()
     embodiment_id = embodiment_id.to(device=device).contiguous()
 
     sample_inputs = make_compile_inputs(
-        action_module,
+        core.action_head.config.action_horizon,
+        core.action_head.config.action_dim,
         context_embs,
         state,
         embodiment_id,
@@ -832,13 +850,16 @@ def compile_trt_with_plugin(
     # -------------------------
     print("compiling action diffusion")
 
-    action_module = GrootStaticDiffusionStep(model.action_head).eval().to(
-        device=device,
-        dtype=torch.float16,
+    action_module = make_groot_static_action_module(
+        model.action_head,
+        device,
+        torch.float16,
+        embodiment_id,
     )
 
     sample_inputs = make_compile_inputs(
-        action_module,
+        model.action_head.config.action_horizon,
+        model.action_head.config.action_dim,
         trt_context_embs,
         state,
         embodiment_id,
@@ -923,9 +944,10 @@ def run_inference_pytorch_groot(
             dtype=context_embs.dtype,
         )
 
-        action_module = GrootStaticDiffusionStep(model.action_head).eval().to(
-            device=device,
-            dtype=torch.float16,
+        action_module = make_groot_static_action_module(
+            model.action_head,
+            device,
+            torch.float16,
         )
 
         context = ActionRolloutContext(
@@ -1180,9 +1202,10 @@ def _print_groot_stage_parity(
     _run_groot_runtime_stage(runtime_bin, engine_root, fixture_dir, "action-step", plugin_so)
     pred_velocity = _load_first_output_tensor(engine_root, "action", fixture_dir / "pred_velocity.bin", device)
 
-    action_module = GrootStaticDiffusionStep(model.action_head).eval().to(
-        device=device,
-        dtype=torch.float16,
+    action_module = make_groot_static_action_module(
+        model.action_head,
+        device,
+        torch.float16,
     )
     eager_pred_velocity = action_module(
         noise,
