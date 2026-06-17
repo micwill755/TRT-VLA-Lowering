@@ -64,6 +64,14 @@ class TRTFixedCategorySpecificLinear(nn.Module):
         return x.reshape(batch_size, seq_len, self.out_features)
 
 class TRTDynamicCategorySpecificLinear(nn.Module):
+    """TensorRT-friendly dynamic version of GR00T CategorySpecificLinear.
+
+    Unlike the fixed wrapper, this keeps the full embodiment weight bank and
+    uses runtime embodiment_id values to gather W/b for each batch item. The
+    math stays equivalent to GR00T category-specific linear:
+    x [B,T,in] @ W[embodiment] [B,in,out] + b[embodiment].
+    """
+
     def __init__(self, layer: nn.Module):
         super().__init__()
 
@@ -109,6 +117,13 @@ class TRTFixedCategorySpecificMLP(nn.Module):
         return self.layer2(hidden)
 
 class TRTDynamicCategorySpecificMLP(nn.Module):
+    """Dynamic two-layer category-specific MLP used by GR00T.
+
+    GR00T state encoders and action decoders are CategorySpecificMLP modules:
+    each contains layer1/layer2 CategorySpecificLinear layers. This wrapper
+    preserves runtime embodiment selection for both layers.
+    """
+
     def __init__(self, mlp: nn.Module):
         super().__init__()
         self.layer1 = TRTDynamicCategorySpecificLinear(mlp.layer1)
@@ -141,6 +156,14 @@ class TRTGrootActionEncoder(nn.Module):
         return self.W3(hidden)
 
 class TRTDynamicGrootActionEncoder(nn.Module):
+    """Dynamic GR00T noisy-action encoder.
+
+    The original action encoder uses three embodiment-specific linear layers
+    around the action embedding, timestep positional embedding, and SiLU block.
+    This wrapper keeps embodiment_id dynamic while spelling the category-specific
+    pieces as index_select + bmm so Torch-TRT can lower them reliably.
+    """
+
     def __init__(self, action_encoder: nn.Module):
         super().__init__()
         self.W1 = TRTDynamicCategorySpecificLinear(action_encoder.W1)
@@ -389,6 +412,8 @@ class GrootDiTStepEncoder(ActionStepEncoder):
             self.state_encoder = action_head.state_encoder
             self.action_encoder = action_head.action_encoder
         else:
+            # Keep embodiment_id as a runtime input while replacing GR00T's
+            # category-specific modules with Torch-TRT-friendly dynamic wrappers.
             self.state_encoder = TRTDynamicCategorySpecificMLP(
                 action_head.state_encoder
             )

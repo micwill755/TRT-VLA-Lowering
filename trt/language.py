@@ -39,13 +39,11 @@ class PluginLMHiddenWrapper(nn.Module):
         self,
         lm: nn.Module,
         *,
-        num_ds: int = 0,
-        return_prefix_kv: bool = False,
+        num_ds: int = 0
     ):
         super().__init__()
         self.lm = lm
         self.num_ds = int(num_ds)
-        self.return_prefix_kv = bool(return_prefix_kv)
 
     def forward(
         self,
@@ -80,9 +78,6 @@ class PluginLMHiddenWrapper(nn.Module):
                 hidden = hidden + ds_stack[i, :, :seq_len, :]
 
         hidden = _as_tensor(self.lm.norm(hidden))
-
-        if not self.return_prefix_kv:
-            return hidden
 
         prefix_k = torch.stack(
             [kv[:, 0, :, :seq_len, :] for kv in new_kvs],
@@ -127,12 +122,12 @@ class GROOTLanguageContextWrapper(nn.Module):
         self.context_projection = context_projection
 
     def forward(self, inputs_embeds, kv_caches, ctx_len):
-        hidden_states = self.lm_wrapper(
+        hidden, prefix_k, prefix_v = self.lm_wrapper(
             inputs_embeds,
             kv_caches,
             ctx_len,
         )
-        return self.context_projection(hidden_states)
+        return self.context_projection(hidden)
 
 @torch.no_grad()
 def run_vlm_preprocessing(
@@ -384,7 +379,6 @@ def make_plugin_lm_hidden_wrapper(
     device: torch.device,
     position_ids: torch.Tensor | None = None,
     enable_bidirectional_prefill: int = 1,
-    return_prefix_kv: bool = False,
     log_prefix: str = "",
 ) -> PluginLMHiddenWrapper:
     if position_ids is None:
@@ -430,8 +424,7 @@ def make_plugin_lm_hidden_wrapper(
 
     return PluginLMHiddenWrapper(
         decoder,
-        num_ds=0,
-        return_prefix_kv=return_prefix_kv,
+        num_ds=0
     ).eval()
 
 def language_head_dim(config) -> int:

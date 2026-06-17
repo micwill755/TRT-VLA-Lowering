@@ -101,11 +101,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-trt", action="store_true", help="Skip Python TRT plugin action rollout.")
     parser.add_argument("--skip-engine", action="store_true", help="Skip Python serialized .engine action rollout.")
 
-    edge_group = parser.add_mutually_exclusive_group()
-    edge_group.add_argument("--run-edge", dest="skip_edge", action="store_false", help="Attempt the PI0.5 C++ Edge runtime smoke path.")
-    edge_group.add_argument("--skip-edge", dest="skip_edge", action="store_true", help="Skip the C++ Edge runtime smoke path.")
-    parser.set_defaults(skip_edge=True)
-
     parser.add_argument("--num-iterations", type=int, default=12, help="Total timing iterations including warmup.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations to exclude from summary.")
 
@@ -268,7 +263,7 @@ def save_visual_engine_for_edge_llm(
     engine_dir: str | pathlib.Path,
     *,
     device: torch.device,
-    model_type: str = "pi05_vision",
+    model_type: str = "vision",
 ):
     pixel_values = pixel_values.to(device=device).contiguous()
     visual = VisualFixedInput(
@@ -325,7 +320,7 @@ def save_lm_engine_for_edge_llm(
     *,
     device: torch.device,
     position_ids: torch.Tensor | None,
-    model_type: str = "pi05_language",
+    model_type: str = "language",
 ):
     prefix_embs = prefix_embs.to(device=device, dtype=torch.float16).contiguous()
     max_seq_len = int(prefix_embs.shape[1])
@@ -402,7 +397,6 @@ def save_lm_engine_for_edge_llm(
         },
     )
 
-
 def save_action_diffusion_engine_for_edge_llm(
     core,
     prefix_len: int,
@@ -410,7 +404,7 @@ def save_action_diffusion_engine_for_edge_llm(
     engine_dir: str | pathlib.Path,
     *,
     device: torch.device,
-    model_type: str = "pi05_action_diffusion",
+    model_type: str = "action",
 ):
     action_module = make_static_action_module(core, device)
     sample_inputs = make_compile_inputs(
@@ -885,44 +879,6 @@ def run_inference_trt_plugin(
     }
     return actions, extra, elapsed
 
-
-def _torch_dtype_from_string(dtype: str) -> torch.dtype:
-    if dtype in {"torch.float16", "float16", "fp16"}:
-        return torch.float16
-    if dtype in {"torch.float32", "float32", "fp32"}:
-        return torch.float32
-    if dtype in {"torch.int32", "int32"}:
-        return torch.int32
-    if dtype in {"torch.int64", "int64"}:
-        return torch.int64
-    if dtype in {"torch.bool", "bool"}:
-        return torch.bool
-    if dtype in {"torch.uint8", "uint8"}:
-        return torch.uint8
-    raise ValueError(f"Unsupported tensor dtype in config: {dtype}")
-
-
-def _dump_tensor_bin(path: pathlib.Path, tensor: torch.Tensor) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cpu_tensor = tensor.detach().contiguous().cpu()
-    nbytes = cpu_tensor.numel() * cpu_tensor.element_size()
-    path.write_bytes(ctypes.string_at(cpu_tensor.data_ptr(), nbytes))
-
-
-def _load_tensor_bin(path: pathlib.Path, shape: list[int], dtype: str, device: torch.device) -> torch.Tensor:
-    raw = bytearray(path.read_bytes())
-    tensor = torch.frombuffer(raw, dtype=_torch_dtype_from_string(dtype)).clone()
-    return tensor.reshape(tuple(shape)).to(device=device)
-
-def run_inference_edge_pi05(*args, **kwargs):
-    del args, kwargs
-    raise NotImplementedError(
-        "PI0.5 C++ Edge runtime smoke is not wired in this checkout yet. "
-        "The exported engines use the PI0.5 prefix-KV action contract "
-        "(x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask), "
-        "while the current C++ smoke runner is GR00T-specific."
-    )
-
 def main() -> int:
     args = parse_args()
     configure_torch_runtime()
@@ -968,9 +924,6 @@ def main() -> int:
                 max_seq_len=args.max_seq_len,
                 engine_root=args.engine_dir
             )
-
-    if not args.skip_edge:
-        run_inference_edge_pi05()
 
     engine_vision = engine_lm = engine_diffusion = engine_info = None
     if not args.skip_engine:

@@ -284,7 +284,7 @@ def save_visual_engine_for_edge_llm(
     *,
     device="cuda",
     dtype=torch.float16,
-    model_type="groot_vision",
+    model_type="vision",
     visual: nn.Module | None = None,
 ):
     pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
@@ -341,7 +341,7 @@ def save_lm_engine_for_edge_llm(
     device,
     position_ids=None,
     dtype=torch.float16,
-    model_type="groot_language",
+    model_type="language",
 ):
     max_seq_len = int(input_embs.shape[1])
     batch_size = int(input_embs.shape[0])
@@ -361,7 +361,6 @@ def save_lm_engine_for_edge_llm(
         device=device,
         position_ids=position_ids,
         enable_bidirectional_prefill=0,
-        return_prefix_kv=False,
         log_prefix="groot",
     )
 
@@ -438,7 +437,7 @@ def save_action_diffusion_engine_for_edge_llm(
     *,
     device,
     dtype=torch.float16,
-    model_type="groot_action_diffusion",
+    model_type="action",
 ):
     action_module = make_static_action_module(core.action_head, device, dtype, embodiment_id)
 
@@ -559,7 +558,6 @@ def save_edge_engines_for_edge_llm(
         engine_dir,
         device=device,
         dtype=torch.float16,
-        model_type="groot_vision",
         visual=visual,
     )
 
@@ -586,7 +584,6 @@ def save_edge_engines_for_edge_llm(
         device=device,
         position_ids=None,
         dtype=torch.float16,
-        model_type="groot_language",
     )
     
     # -------------------------
@@ -611,7 +608,21 @@ def save_edge_engines_for_edge_llm(
         action_engine_dir,
         device=device,
         dtype=torch.float16,
-        model_type="groot_action_diffusion",
+    )
+
+    fixture_dir = _dump_groot_edge_fixture(
+        engine_root=engine_root,
+        model=model,
+        policy=policy,
+        pixel_values=pixel_values,
+        input_ids=input_ids,
+        language_inputs=language_inputs,
+        visual_embeds=eager_image_embs,
+        context_embs=context_embs,
+        state=state,
+        embodiment_id=embodiment_id,
+        seed=seed,
+        device=device,
     )
 
     plugin_info = {
@@ -627,6 +638,7 @@ def save_edge_engines_for_edge_llm(
         "context_hidden_size": int(context_embs.shape[2]),
         "state_shape": list(state.shape),
         "embodiment_id": embodiment_id.detach().cpu().tolist(),
+        "fixture_dir": str(fixture_dir),
     }
 
     return trt_vision, trt_lm, trt_diffusion, plugin_info
@@ -756,7 +768,6 @@ def compile_trt_with_plugin(
         device=device,
         position_ids=None,
         enable_bidirectional_prefill=0,
-        return_prefix_kv=False,
         log_prefix="groot",
     )
 
@@ -936,7 +947,6 @@ def run_inference_pytorch_groot(
 
     return actions, extra, elapsed
 
-
 @torch.no_grad()
 def run_inference_trt_plugin(
     model,
@@ -1035,22 +1045,6 @@ def run_inference_trt_plugin(
 
     return actions, extra, elapsed
 
-def _torch_dtype_from_string(dtype: str) -> torch.dtype:
-    if dtype in {"torch.float16", "float16", "fp16"}:
-        return torch.float16
-    if dtype in {"torch.float32", "float32", "fp32"}:
-        return torch.float32
-    if dtype in {"torch.int32", "int32"}:
-        return torch.int32
-    if dtype in {"torch.int64", "int64"}:
-        return torch.int64
-    if dtype in {"torch.bool", "bool"}:
-        return torch.bool
-    if dtype in {"torch.uint8", "uint8"}:
-        return torch.uint8
-    raise ValueError(f"Unsupported tensor dtype in config: {dtype}")
-
-
 def _dump_tensor_bin(path: pathlib.Path, tensor: torch.Tensor) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cpu_tensor = tensor.detach().contiguous().cpu()
@@ -1058,47 +1052,91 @@ def _dump_tensor_bin(path: pathlib.Path, tensor: torch.Tensor) -> None:
     path.write_bytes(ctypes.string_at(cpu_tensor.data_ptr(), nbytes))
 
 
-def _load_tensor_bin(path: pathlib.Path, shape: list[int], dtype: str, device: torch.device) -> torch.Tensor:
-    raw = bytearray(path.read_bytes())
-    tensor = torch.frombuffer(raw, dtype=_torch_dtype_from_string(dtype)).clone()
-    return tensor.reshape(tuple(shape)).to(device=device)
+def _dump_groot_edge_fixture(
+    *,
+    engine_root: str,
+    model: nn.Module,
+    policy: Any,
+    pixel_values: torch.Tensor,
+    input_ids: torch.Tensor,
+    language_inputs: PackedLanguageInputs,
+    visual_embeds: torch.Tensor,
+    context_embs: torch.Tensor,
+    state: torch.Tensor,
+    embodiment_id: torch.Tensor,
+    seed: int,
+    device: torch.device,
+) -> pathlib.Path:
+    fixture_dir = pathlib.Path(engine_root) / "fixtures" / f"pid_{os.getpid()}"
 
-def _load_first_output_tensor(engine_root: pathlib.Path, component: str, path: pathlib.Path, device: torch.device) -> torch.Tensor:
-    config = load_engine_config(engine_root, component)
-    output = config["outputs"][0]
-    return _load_tensor_bin(path, output["shape"], output["dtype"], device)
+    eagle = model.backbone.eagle_model
+    text_embeds = eagle.language_model.get_input_embeddings()(
+        input_ids.to(device=device)
+    ).to(device=device, dtype=torch.float16)
 
-def _load_named_input_tensor(engine_root: pathlib.Path, component: str, name: str, path: pathlib.Path, device: torch.device) -> torch.Tensor:
-    config = load_engine_config(engine_root, component)
-    meta = config["inputs"][name]
-    return _load_tensor_bin(path, meta["shape"], meta["dtype"], device)
+    state = state.to(device=device, dtype=torch.float16).contiguous()
+    context_embs = context_embs.to(device=device, dtype=torch.float16).contiguous()
+    embodiment_id = embodiment_id.to(device=device).contiguous()
 
-def _run_runtime_stage(runtime_bin: str, engine_root: pathlib.Path, fixture_dir: pathlib.Path, stage: str, plugin_so: str | None) -> None:
-    runtime_path = pathlib.Path(runtime_bin)
-    if not runtime_path.exists():
-        raise FileNotFoundError(
-            f"Missing GR00T runtime executable: {runtime_path}. "
-            "Build it with: cmake --build gitlab/TensorRT-Edge-LLM/build-plugin-trt10 --target groot_runtime_smoke"
-        )
-
-    env = os.environ.copy()
-    plugin_path = plugin_so or env.get("EDGELLM_TRT_PLUGIN_SO") or env.get("EDGE_LLM_PLUGIN_SO") or env.get("EDGELLM_PLUGIN_PATH")
-    if plugin_path:
-        env["EDGELLM_PLUGIN_PATH"] = plugin_path
-
-    subprocess.run(
-        [
-            str(runtime_path),
-            "--engine-root",
-            str(engine_root),
-            "--fixture-dir",
-            str(fixture_dir),
-            "--stage",
-            stage,
-        ],
-        check=True,
-        env=env,
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    initial_actions = torch.randn(
+        context_embs.shape[0],
+        model.action_head.config.action_horizon,
+        model.action_head.config.action_dim,
+        device=device,
+        dtype=context_embs.dtype,
+        generator=generator,
     )
+    timestep = torch.zeros(
+        context_embs.shape[0],
+        device=device,
+        dtype=torch.long,
+    )
+
+    action_module = make_static_action_module(
+        model.action_head,
+        device,
+        torch.float16,
+        embodiment_id,
+    )
+    pred_velocity = action_module(
+        initial_actions,
+        timestep,
+        context_embs,
+        state,
+        embodiment_id,
+    )
+    actions_out = sample_actions_raw(
+        action_module,
+        ActionRolloutContext(
+            noise=initial_actions,
+            device=device,
+            context_embs=context_embs,
+            state=state,
+            embodiment_id=embodiment_id,
+        ),
+        GROOTActionAdapter(model.action_head),
+    )
+
+    if language_inputs.image_token_mask is None:
+        raise ValueError("GR00T Edge fixture export requires image_token_mask for visual-to-LM packing")
+
+    _dump_tensor_bin(fixture_dir / "pixel_values.bin", pixel_values.to(device=device, dtype=torch.float16))
+    _dump_tensor_bin(fixture_dir / "text_embeds.bin", text_embeds)
+    _dump_tensor_bin(fixture_dir / "image_token_mask.bin", language_inputs.image_token_mask.to(dtype=torch.uint8))
+    _dump_tensor_bin(fixture_dir / "inputs_embeds.bin", language_inputs.inputs_embeds.to(device=device, dtype=torch.float16))
+    _dump_tensor_bin(fixture_dir / "visual_embeds.bin", visual_embeds.to(device=device, dtype=torch.float16))
+    _dump_tensor_bin(fixture_dir / "context_embs.bin", context_embs)
+    _dump_tensor_bin(fixture_dir / "state.bin", state)
+    _dump_tensor_bin(fixture_dir / "embodiment_id.bin", embodiment_id)
+    _dump_tensor_bin(fixture_dir / "initial_actions.bin", initial_actions)
+    _dump_tensor_bin(fixture_dir / "timestep.bin", timestep)
+    _dump_tensor_bin(fixture_dir / "pred_velocity.bin", pred_velocity.to(device=device, dtype=torch.float16))
+    _dump_tensor_bin(fixture_dir / "actions_out.bin", actions_out.to(device=device, dtype=torch.float16))
+
+    return fixture_dir
+
 
 def _make_embodiment_id(policy, state: torch.Tensor, device: torch.device) -> torch.Tensor:
     """
@@ -1145,186 +1183,6 @@ def compute_groot_policy_action_metrics(
 
     return compute_action_parity_metrics(pred_actions, target_actions)
 
-
-@torch.no_grad()
-def _print_groot_stage_parity(
-    model,
-    *,
-    pixel_values: torch.Tensor,
-    language_inputs: PackedLanguageInputs,
-    visual_embeds: torch.Tensor,
-    context_embs: torch.Tensor,
-    noise: torch.Tensor,
-    actions: torch.Tensor,
-    state: torch.Tensor,
-    embodiment_id: torch.Tensor,
-    engine_root: pathlib.Path,
-    fixture_dir: pathlib.Path,
-    runtime_bin: str,
-    plugin_so: str | None,
-    device: torch.device,
-) -> None:
-    print("  staged parity:")
-
-    with torch.autocast("cuda", dtype=torch.float16):
-        eager_visual_embeds = make_visual_fixed_input(
-            model,
-            pixel_values,
-            device=device,
-            dtype=torch.float16,
-        )(pixel_values)
-    tensor_error_metrics("    visual_embeds", visual_embeds, eager_visual_embeds)
-
-    eager_context_embs = build_context_from_language_inputs(
-        model,
-        language_inputs,
-    ).to(device=device, dtype=torch.float16)
-    tensor_error_metrics("    context_embs", context_embs, eager_context_embs)
-
-    timestep = torch.zeros(
-        noise.shape[0],
-        device=device,
-        dtype=torch.long,
-    ).contiguous()
-    _dump_tensor_bin(fixture_dir / "timestep.bin", timestep)
-    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "action-step", plugin_so)
-    pred_velocity = _load_first_output_tensor(engine_root, "action", fixture_dir / "pred_velocity.bin", device)
-
-    action_module = make_static_action_module(
-        model.action_head,
-        device,
-        torch.float16,
-        embodiment_id,
-    )
-    eager_pred_velocity = action_module(
-        noise,
-        timestep,
-        context_embs,
-        state,
-        embodiment_id,
-    )
-    tensor_error_metrics("    action_step_pred_velocity", pred_velocity, eager_pred_velocity)
-
-    eager_actions = sample_actions_raw(
-        action_module,
-        ActionRolloutContext(
-            noise=noise,
-            device=device,
-            context_embs=context_embs,
-            state=state,
-            embodiment_id=embodiment_id,
-        ),
-        GROOTActionAdapter(model.action_head),
-    )
-    tensor_error_metrics("    action_rollout", actions, eager_actions)
-
-    metrics = compute_action_parity_metrics(actions, eager_actions)
-    print(
-        f"    action_rollout ADE={metrics['action_ade']:.6f}  "
-        f"mean_abs={metrics['mean_abs']:.6f}  max_abs={metrics['max_abs']:.6f}"
-    )
-
-@torch.no_grad()
-def run_inference_edge_groot(
-    model,
-    policy,
-    create_inputs_fn: Callable[[], dict],
-    *,
-    plugin_info: dict | None,
-    runtime_bin: str,
-    seed: int,
-    device: torch.device,
-    plugin_so: str | None = None,
-    stage_parity: bool = True,
-) -> tuple[torch.Tensor, dict, float]:
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
-
-    model_inputs = create_inputs_fn()
-    engine_root = pathlib.Path((plugin_info or {}).get("engine_root", "/tmp/groot_edge_llm"))
-    fixture_dir = engine_root / "fixtures" / f"pid_{os.getpid()}"
-    fixture_dir.mkdir(parents=True, exist_ok=True)
-
-    tokenized_data = model_inputs["tokenized_data"]
-    input_ids = tokenized_data["input_ids"]
-    attention_mask = tokenized_data["attention_mask"]
-    pixel_values = tokenized_data["pixel_values"].to(device=device, dtype=torch.float16)
-
-    state, _ = pack_state(
-        model_inputs["state"],
-        max_state_dim=policy.config.max_state_dim,
-        device=device,
-    )
-    state = state.to(device=device, dtype=torch.float16).contiguous()
-    embodiment_id = _make_embodiment_id(policy, state, device).contiguous()
-
-    start_time = time.perf_counter()
-
-    _dump_tensor_bin(fixture_dir / "pixel_values.bin", pixel_values)
-    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "visual", plugin_so)
-    visual_embeds = _load_first_output_tensor(engine_root, "visual", fixture_dir / "visual_embeds.bin", device)
-
-    language_inputs = build_language_inputs(
-        model,
-        visual_embeds,
-        input_ids,
-        attention_mask,
-    )
-    inputs_embeds = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16).contiguous()
-
-    _dump_tensor_bin(fixture_dir / "inputs_embeds.bin", inputs_embeds)
-    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "language", plugin_so)
-    context_embs = _load_first_output_tensor(engine_root, "language", fixture_dir / "context_embs.bin", device)
-    context_embs = context_embs.to(device=device, dtype=torch.float16).contiguous()
-
-    noise = torch.randn(
-        context_embs.shape[0],
-        model.action_head.config.action_horizon,
-        model.action_head.config.action_dim,
-        device=device,
-        dtype=context_embs.dtype,
-    ).contiguous()
-
-    _dump_tensor_bin(fixture_dir / "initial_actions.bin", noise)
-    _dump_tensor_bin(fixture_dir / "context_embs.bin", context_embs)
-    _dump_tensor_bin(fixture_dir / "state.bin", state)
-    _dump_tensor_bin(fixture_dir / "embodiment_id.bin", embodiment_id)
-
-    _run_runtime_stage(runtime_bin, engine_root, fixture_dir, "action", plugin_so)
-    actions = _load_named_input_tensor(engine_root, "action", "actions", fixture_dir / "actions_out.bin", device)
-
-    elapsed = time.perf_counter() - start_time
-
-    if stage_parity:
-        _print_groot_stage_parity(
-            model,
-            pixel_values=pixel_values,
-            language_inputs=language_inputs,
-            visual_embeds=visual_embeds,
-            context_embs=context_embs,
-            noise=noise,
-            actions=actions,
-            state=state,
-            embodiment_id=embodiment_id,
-            engine_root=engine_root,
-            fixture_dir=fixture_dir,
-            runtime_bin=runtime_bin,
-            plugin_so=plugin_so,
-            device=device,
-        )
-
-    extra = {
-        "fixture_dir": str(fixture_dir),
-        "noise": noise,
-        "visual_embeds": visual_embeds,
-        "context_embs": context_embs,
-        "state": state,
-        "embodiment_id": embodiment_id,
-    }
-
-    return actions, extra, elapsed
-
 def make_create_inputs_fn(processor, data, messages, device):
     def create_inputs():
         return prepare_model_inputs(
@@ -1337,8 +1195,7 @@ def make_create_inputs_fn(processor, data, messages, device):
             device,
         )
     return create_inputs
-
-
+    
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export GR00T TensorRT engines for TensorRT-Edge-LLM")
 
