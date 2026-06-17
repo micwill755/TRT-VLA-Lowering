@@ -16,7 +16,13 @@ from lerobot.policies.pi05 import PI05Policy
 from lerobot.utils.constants import ACTION
 
 from trt.action_rollout import ActionRolloutContext, PI05ActionAdapter, sample_actions_raw
-from trt.compile import compile_trt_module, save_trt_engine_module
+from trt.compile import compile_trt_module, dump_edge_fixture, save_trt_engine_module
+from trt.io_spec import (
+    PI05_ACTION_ROLLOUT,
+    PI05_EDGE_IO,
+    PipelineIOSpec,
+    action_rollout_extra_config,
+)
 from trt.data import make_batch
 from trt.diffusion import StaticActionVelocityStep, PI05PrefixKVStepEncoder
 from trt.language import (
@@ -321,6 +327,7 @@ def save_lm_engine_for_edge_llm(
     device: torch.device,
     position_ids: torch.Tensor | None,
     model_type: str = "language",
+    io: PipelineIOSpec = PI05_EDGE_IO,
 ):
     prefix_embs = prefix_embs.to(device=device, dtype=torch.float16).contiguous()
     max_seq_len = int(prefix_embs.shape[1])
@@ -337,8 +344,7 @@ def save_lm_engine_for_edge_llm(
         cfg,
         max_seq_len=max_seq_len,
         device=device,
-        position_ids=position_ids,
-        return_prefix_kv=True,
+        position_ids=position_ids
     )
 
     kv_caches = [
@@ -368,10 +374,7 @@ def save_lm_engine_for_edge_llm(
         *[kv.contiguous() for kv in kv_caches],
     )
 
-    input_names = (
-        ["inputs_embeds", "ctx_len"]
-        + [f"kv_cache_{i}" for i in range(len(kv_caches))]
-    )
+    input_names = io.language_input_names(len(kv_caches))
 
     with torch.no_grad():
         example_output = wrapper(*sample_inputs)
@@ -384,7 +387,7 @@ def save_lm_engine_for_edge_llm(
         model_type=model_type,
         component="language",
         input_names=input_names,
-        output_names=["hidden_states", "prefix_k", "prefix_v"],
+        output_names=list(io.language.output_names),
         example_output=example_output,
         extra_config={
             "max_seq_len": max_seq_len,
@@ -405,6 +408,7 @@ def save_action_diffusion_engine_for_edge_llm(
     *,
     device: torch.device,
     model_type: str = "action",
+    io: PipelineIOSpec = PI05_EDGE_IO,
 ):
     action_module = make_static_action_module(core, device)
     sample_inputs = make_compile_inputs(
@@ -430,28 +434,102 @@ def save_action_diffusion_engine_for_edge_llm(
         engine_file="diffusion.engine",
         model_type=model_type,
         component="diffusion",
-        input_names=[
-            "x_t",
-            "timestep",
-            "prefix_k",
-            "prefix_v",
-            "position_ids",
-            "attention_mask",
-        ],
-        output_names=["velocity"],
+        input_names=list(io.action.input_names),
+        output_names=list(io.action.output_names),
         example_output=eager_output,
         extra_config={
             "engine_role": "single_action_denoising_step",
-            "num_inference_steps": int(core.config.num_inference_steps),
-            "chunk_size": int(core.config.chunk_size),
-            "max_action_dim": int(core.config.max_action_dim),
-            "prefix_seq_len": int(prefix_len),
-            "num_layers": int(expert_cfg.num_hidden_layers),
-            "num_key_value_heads": int(expert_cfg.num_key_value_heads),
-            "head_dim": int(expert_cfg.head_dim),
+            **action_rollout_extra_config(
+                io,
+                PI05_ACTION_ROLLOUT,
+                num_steps=int(core.config.num_inference_steps),
+                chunk_size=int(core.config.chunk_size),
+                max_action_dim=int(core.config.max_action_dim),
+                prefix_seq_len=int(prefix_len),
+                num_layers=int(expert_cfg.num_hidden_layers),
+                num_key_value_heads=int(expert_cfg.num_key_value_heads),
+                head_dim=int(expert_cfg.head_dim),
+            ),
         },
         trt_settings=ACTION_TRT_SETTINGS,
     )
+
+@torch.no_grad()
+def _dump_pi05_edge_fixture(
+    *,
+    engine_root: str | pathlib.Path,
+    core,
+    policy: Any,
+    pixel_values: torch.Tensor,
+    compact_prefix: PackedLanguageInputs,
+    hidden_states: torch.Tensor,
+    prefix_k: torch.Tensor,
+    prefix_v: torch.Tensor,
+    seed: int,
+    device: torch.device,
+    io: PipelineIOSpec = PI05_EDGE_IO,
+) -> pathlib.Path:
+    set_reproducible_seed(seed, device)
+    batch_size = int(compact_prefix.inputs_embeds.shape[0])
+    noise = make_pi05_noise(core, batch_size, device)
+    position_ids, attention_mask = make_suffix_position_and_mask(
+        core,
+        compact_prefix.pad_mask,
+        noise,
+        device,
+    )
+
+    num_steps = int(core.config.num_inference_steps)
+    timestep = torch.full(
+        (batch_size,),
+        1.0,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    action_module = make_static_action_module(core, device)
+    prefix_k = prefix_k.to(device=device, dtype=noise.dtype).contiguous()
+    prefix_v = prefix_v.to(device=device, dtype=noise.dtype).contiguous()
+
+    velocity = action_module(
+        noise,
+        timestep,
+        prefix_k,
+        prefix_v,
+        position_ids.contiguous(),
+        attention_mask.contiguous(),
+    )
+    actions_out = sample_actions_raw(
+        action_module,
+        ActionRolloutContext(
+            noise=noise,
+            device=device,
+            prefix_k=prefix_k,
+            prefix_v=prefix_v,
+            prefix_pad_mask=compact_prefix.pad_mask,
+        ),
+        PI05ActionAdapter(core, num_steps),
+    )
+
+    velocity_name = io.action.output_names[0]
+    return dump_edge_fixture(
+        engine_root,
+        {
+            "pixel_values": pixel_values.to(device=device).contiguous(),
+            "inputs_embeds": compact_prefix.inputs_embeds.to(device=device, dtype=torch.float16),
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+            "hidden_states": hidden_states.to(device=device, dtype=torch.float16),
+            "prefix_k": prefix_k,
+            "prefix_v": prefix_v,
+            "initial_actions": noise,
+            "timestep": timestep,
+            velocity_name: velocity,
+            # Full padded action shape must match the exported action engine x_t tensor.
+            "actions_out": actions_out.to(device=device, dtype=noise.dtype),
+        },
+    )
+
 
 def compile_trt_with_plugin(
     core: nn.Module,
@@ -555,8 +633,7 @@ def compile_trt_with_plugin(
         cfg,
         max_seq_len=language_max_seq_len,
         device=device,
-        position_ids=trt_prefix.position_ids,
-        return_prefix_kv=True,
+        position_ids=trt_prefix.position_ids
     )
     trt_lm, trt_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
@@ -668,8 +745,10 @@ def save_edge_engines_for_edge_llm(
     device: torch.device,
     batch: dict[str, Any],
     *,
+    seed: int = 42,
     max_seq_len: int | None = None,
-    engine_root: str | pathlib.Path = "/tmp/pi05_edge_llm"
+    engine_root: str | pathlib.Path = "/tmp/pi05_edge_llm",
+    io: PipelineIOSpec = PI05_EDGE_IO,
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, dict]:
     engine_root = pathlib.Path(engine_root)
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
@@ -709,6 +788,7 @@ def save_edge_engines_for_edge_llm(
         language_engine_dir,
         device=device,
         position_ids=compact_prefix.position_ids,
+        io=io,
     )
 
     print("exporting PI0.5 diffusion.engine")
@@ -719,6 +799,29 @@ def save_edge_engines_for_edge_llm(
         batch_size=int(tokens.shape[0]),
         engine_dir=action_engine_dir,
         device=device,
+        io=io,
+    )
+
+    with torch.no_grad():
+        eager_hidden, eager_prefix_k, eager_prefix_v = run_prefix_language_eager(
+            core.paligemma_with_expert.paligemma.model.language_model,
+            compact_prefix.inputs_embeds,
+            compact_prefix.attention_mask,
+            compact_prefix.position_ids,
+        )
+
+    fixture_dir = _dump_pi05_edge_fixture(
+        engine_root=engine_root,
+        core=core,
+        policy=policy,
+        pixel_values=pixel_values,
+        compact_prefix=compact_prefix,
+        hidden_states=eager_hidden,
+        prefix_k=eager_prefix_k,
+        prefix_v=eager_prefix_v,
+        seed=seed,
+        device=device,
+        io=io,
     )
 
     plugin_info = {
@@ -735,6 +838,8 @@ def save_edge_engines_for_edge_llm(
         "max_action_dim": int(core.config.max_action_dim),
         "output_action_dim": action_output_dim(policy),
         "num_inference_steps": int(core.config.num_inference_steps),
+        "fixture_dir": str(fixture_dir),
+        **io.to_plugin_info(),
     }
 
     return vision_engine, language_engine, action_engine, plugin_info
@@ -921,8 +1026,9 @@ def main() -> int:
                 policy,
                 device,
                 compile_inputs,
+                seed=args.seed,
                 max_seq_len=args.max_seq_len,
-                engine_root=args.engine_dir
+                engine_root=args.engine_dir,
             )
 
     engine_vision = engine_lm = engine_diffusion = engine_info = None

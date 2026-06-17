@@ -206,6 +206,8 @@ def compile_language_trt_with_plugin(
 
 @torch.no_grad()
 def run_prefix_language_eager(language_model, prefix_embs, attention_mask, position_ids):
+    lm_dtype = next(language_model.parameters()).dtype
+    prefix_embs = prefix_embs.to(dtype=lm_dtype)
     out = language_model(
         inputs_embeds=prefix_embs,
         attention_mask=attention_mask,

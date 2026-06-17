@@ -221,18 +221,42 @@ class SerializedGrootLanguage:
 
         return self.engine(inputs)[0]
 
-class SerializedGrootAction:
-    def __init__(self, engine):
+class SerializedPositionalEngine:
+    """Run a serialized TRT engine with positional tensor args matching config input_names."""
+
+    def __init__(self, engine: SerializedTRTEngine):
         self.engine = engine
+        self.input_names = tuple(engine.config["input_names"])
+        self.output_names = tuple(engine.config.get("output_names", ()))
+
+    def __call__(self, *args) -> tuple[torch.Tensor, ...]:
+        if len(args) != len(self.input_names):
+            raise ValueError(
+                f"Expected {len(self.input_names)} positional inputs {self.input_names}, "
+                f"got {len(args)}"
+            )
+        inputs = {
+            name: arg.contiguous() if isinstance(arg, torch.Tensor) else arg
+            for name, arg in zip(self.input_names, args)
+        }
+        return self.engine(inputs)
+
+    def forward_one(self, *args) -> torch.Tensor:
+        return self(*args)[0]
+
+
+class SerializedGrootAction(SerializedPositionalEngine):
+    def __init__(self, engine: SerializedTRTEngine):
+        super().__init__(engine)
 
     def __call__(self, actions, timestep, context_embs, state, embodiment_id):
-        return self.engine({
-            "actions": actions,
-            "timestep": timestep,
-            "context_embs": context_embs,
-            "state": state,
-            "embodiment_id": embodiment_id,
-        })[0]
+        return super().__call__(
+            actions,
+            timestep,
+            context_embs,
+            state,
+            embodiment_id,
+        )[0]
 
 class SerializedPI05Vision:
     def __init__(self, engine):

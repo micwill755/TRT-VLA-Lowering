@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import argparse
-import ctypes
 import pathlib
 import subprocess
 import copy
@@ -25,7 +24,8 @@ from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME
 from trt.action_rollout import ActionRolloutContext, GROOTActionAdapter, sample_actions_raw
 from trt.compile import (
     compile_trt_module, 
-    save_trt_engine_module
+    dump_edge_fixture,
+    save_trt_engine_module,
 )
 
 from trt.diffusion import StaticActionVelocityStep, GrootDiTStepEncoder, TRTDynamicCategorySpecificMLP
@@ -78,6 +78,12 @@ from trt.plugin_utils import (
     infer_siglip_seq_len,
     load_plugins_for_trt
 )
+from trt.io_spec import (
+    GROOT_ACTION_ROLLOUT,
+    GROOT_EDGE_IO,
+    PipelineIOSpec,
+    action_rollout_extra_config,
+)
 from trt.serialize import (
     SerializedTRTEngine,
     SerializedModuleSpec,
@@ -85,7 +91,7 @@ from trt.serialize import (
     load_engine_config,
     SerializedGrootVision,
     SerializedGrootLanguage,
-    SerializedGrootAction
+    SerializedGrootAction,
 )
 
 TRT_SETTINGS = {
@@ -286,6 +292,7 @@ def save_visual_engine_for_edge_llm(
     dtype=torch.float16,
     model_type="vision",
     visual: nn.Module | None = None,
+    io: PipelineIOSpec = GROOT_EDGE_IO,
 ):
     pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
 
@@ -320,8 +327,8 @@ def save_visual_engine_for_edge_llm(
             engine_file="visual.engine",
             model_type=model_type,
             component="vision",
-            input_names=["pixel_values"],
-            output_names=["visual_embeds"],
+            input_names=list(io.vision.input_names),
+            output_names=list(io.vision.output_names),
             example_output=eager_output,
             extra_config={
                 "siglip_batch_size": batch_size,
@@ -342,6 +349,7 @@ def save_lm_engine_for_edge_llm(
     position_ids=None,
     dtype=torch.float16,
     model_type="language",
+    io: PipelineIOSpec = GROOT_EDGE_IO,
 ):
     max_seq_len = int(input_embs.shape[1])
     batch_size = int(input_embs.shape[0])
@@ -403,10 +411,7 @@ def save_lm_engine_for_edge_llm(
         *[kv.contiguous() for kv in kv_caches],
     )
 
-    input_names = (
-        ["inputs_embeds", "ctx_len"]
-        + [f"kv_cache_{i}" for i in range(len(kv_caches))]
-    )
+    input_names = io.language_input_names(len(kv_caches))
 
     return save_trt_engine_module(
         wrapper,
@@ -416,7 +421,7 @@ def save_lm_engine_for_edge_llm(
         model_type=model_type,
         component="language",
         input_names=input_names,
-        output_names=["context_embs"],
+        output_names=list(io.language.output_names),
         extra_config={
             "max_seq_len": max_seq_len,
             "batch_size": batch_size,
@@ -438,6 +443,7 @@ def save_action_diffusion_engine_for_edge_llm(
     device,
     dtype=torch.float16,
     model_type="action",
+    io: PipelineIOSpec = GROOT_EDGE_IO,
 ):
     action_module = make_static_action_module(core.action_head, device, dtype, embodiment_id)
 
@@ -471,25 +477,23 @@ def save_action_diffusion_engine_for_edge_llm(
         engine_file="diffusion.engine",
         model_type=model_type,
         component="diffusion",
-        input_names=[
-            "actions",
-            "timestep",
-            "context_embs",
-            "state",
-            "embodiment_id",
-        ],
-        output_names=["pred_velocity"],
+        input_names=list(io.action.input_names),
+        output_names=list(io.action.output_names),
         example_output=eager_output,
         extra_config={
             "engine_role": "single_action_denoising_step",
-            "action_horizon": int(cfg.action_horizon),
-            "action_dim": int(cfg.action_dim),
-            "num_inference_timesteps": int(core.action_head.num_inference_timesteps),
-            "num_timestep_buckets": int(core.action_head.num_timestep_buckets),
-            "context_seq_len": int(context_embs.shape[1]),
-            "context_hidden_size": int(context_embs.shape[2]),
-            "state_horizon": int(state.shape[1]),
-            "state_dim": int(state.shape[2]),
+            **action_rollout_extra_config(
+                io,
+                GROOT_ACTION_ROLLOUT,
+                num_steps=int(core.action_head.num_inference_timesteps),
+                num_timestep_buckets=int(core.action_head.num_timestep_buckets),
+                action_horizon=int(cfg.action_horizon),
+                action_dim=int(cfg.action_dim),
+                context_seq_len=int(context_embs.shape[1]),
+                context_hidden_size=int(context_embs.shape[2]),
+                state_horizon=int(state.shape[1]),
+                state_dim=int(state.shape[2]),
+            ),
         },
     )
 
@@ -507,6 +511,7 @@ def save_edge_engines_for_edge_llm(
     debug: bool = False,
     accuracy_check: bool = True,
     engine_root: str = "/tmp/groot_edge_llm",
+    io: PipelineIOSpec = GROOT_EDGE_IO,
 ) -> tuple[nn.Module | None, nn.Module | None, nn.Module | None, dict]:
     engine_root = str(pathlib.Path(engine_root))
     tokenized_data = model_inputs['tokenized_data']
@@ -559,6 +564,7 @@ def save_edge_engines_for_edge_llm(
         device=device,
         dtype=torch.float16,
         visual=visual,
+        io=io,
     )
 
     # -------------------------
@@ -584,6 +590,7 @@ def save_edge_engines_for_edge_llm(
         device=device,
         position_ids=None,
         dtype=torch.float16,
+        io=io,
     )
     
     # -------------------------
@@ -608,6 +615,7 @@ def save_edge_engines_for_edge_llm(
         action_engine_dir,
         device=device,
         dtype=torch.float16,
+        io=io,
     )
 
     fixture_dir = _dump_groot_edge_fixture(
@@ -639,6 +647,7 @@ def save_edge_engines_for_edge_llm(
         "state_shape": list(state.shape),
         "embodiment_id": embodiment_id.detach().cpu().tolist(),
         "fixture_dir": str(fixture_dir),
+        **io.to_plugin_info(),
     }
 
     return trt_vision, trt_lm, trt_diffusion, plugin_info
@@ -1045,12 +1054,6 @@ def run_inference_trt_plugin(
 
     return actions, extra, elapsed
 
-def _dump_tensor_bin(path: pathlib.Path, tensor: torch.Tensor) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cpu_tensor = tensor.detach().contiguous().cpu()
-    nbytes = cpu_tensor.numel() * cpu_tensor.element_size()
-    path.write_bytes(ctypes.string_at(cpu_tensor.data_ptr(), nbytes))
-
 
 def _dump_groot_edge_fixture(
     *,
@@ -1067,8 +1070,6 @@ def _dump_groot_edge_fixture(
     seed: int,
     device: torch.device,
 ) -> pathlib.Path:
-    fixture_dir = pathlib.Path(engine_root) / "fixtures" / f"pid_{os.getpid()}"
-
     eagle = model.backbone.eagle_model
     text_embeds = eagle.language_model.get_input_embeddings()(
         input_ids.to(device=device)
@@ -1122,20 +1123,23 @@ def _dump_groot_edge_fixture(
     if language_inputs.image_token_mask is None:
         raise ValueError("GR00T Edge fixture export requires image_token_mask for visual-to-LM packing")
 
-    _dump_tensor_bin(fixture_dir / "pixel_values.bin", pixel_values.to(device=device, dtype=torch.float16))
-    _dump_tensor_bin(fixture_dir / "text_embeds.bin", text_embeds)
-    _dump_tensor_bin(fixture_dir / "image_token_mask.bin", language_inputs.image_token_mask.to(dtype=torch.uint8))
-    _dump_tensor_bin(fixture_dir / "inputs_embeds.bin", language_inputs.inputs_embeds.to(device=device, dtype=torch.float16))
-    _dump_tensor_bin(fixture_dir / "visual_embeds.bin", visual_embeds.to(device=device, dtype=torch.float16))
-    _dump_tensor_bin(fixture_dir / "context_embs.bin", context_embs)
-    _dump_tensor_bin(fixture_dir / "state.bin", state)
-    _dump_tensor_bin(fixture_dir / "embodiment_id.bin", embodiment_id)
-    _dump_tensor_bin(fixture_dir / "initial_actions.bin", initial_actions)
-    _dump_tensor_bin(fixture_dir / "timestep.bin", timestep)
-    _dump_tensor_bin(fixture_dir / "pred_velocity.bin", pred_velocity.to(device=device, dtype=torch.float16))
-    _dump_tensor_bin(fixture_dir / "actions_out.bin", actions_out.to(device=device, dtype=torch.float16))
-
-    return fixture_dir
+    return dump_edge_fixture(
+        engine_root,
+        {
+            "pixel_values": pixel_values.to(device=device, dtype=torch.float16),
+            "text_embeds": text_embeds,
+            "image_token_mask": language_inputs.image_token_mask.to(dtype=torch.uint8),
+            "inputs_embeds": language_inputs.inputs_embeds.to(device=device, dtype=torch.float16),
+            "visual_embeds": visual_embeds.to(device=device, dtype=torch.float16),
+            "context_embs": context_embs,
+            "state": state,
+            "embodiment_id": embodiment_id,
+            "initial_actions": initial_actions,
+            "timestep": timestep,
+            "pred_velocity": pred_velocity.to(device=device, dtype=torch.float16),
+            "actions_out": actions_out.to(device=device, dtype=torch.float16),
+        },
+    )
 
 
 def _make_embodiment_id(policy, state: torch.Tensor, device: torch.device) -> torch.Tensor:
