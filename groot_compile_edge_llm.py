@@ -291,18 +291,17 @@ def save_visual_engine_for_edge_llm(
     device="cuda",
     dtype=torch.float16,
     model_type="vision",
-    visual: nn.Module | None = None,
-    io: PipelineIOSpec = GROOT_EDGE_IO,
+    visual: nn.Module,
+    io: PipelineIOSpec,
 ):
     pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
 
-    if visual is None:
-        visual = make_visual_fixed_input(
-            model,
-            pixel_values,
-            device=device,
-            dtype=dtype,
-        )
+    visual = make_visual_fixed_input(
+        model,
+        pixel_values,
+        device=device,
+        dtype=dtype,
+    )
 
     vision_model = model.backbone.eagle_model.vision_model.vision_model
 
@@ -349,7 +348,7 @@ def save_lm_engine_for_edge_llm(
     position_ids=None,
     dtype=torch.float16,
     model_type="language",
-    io: PipelineIOSpec = GROOT_EDGE_IO,
+    io: PipelineIOSpec,
 ):
     max_seq_len = int(input_embs.shape[1])
     batch_size = int(input_embs.shape[0])
@@ -443,7 +442,7 @@ def save_action_diffusion_engine_for_edge_llm(
     device,
     dtype=torch.float16,
     model_type="action",
-    io: PipelineIOSpec = GROOT_EDGE_IO,
+    io: PipelineIOSpec,
 ):
     action_module = make_static_action_module(core.action_head, device, dtype, embodiment_id)
 
@@ -510,8 +509,8 @@ def save_edge_engines_for_edge_llm(
     max_seq_len: int | None = None,
     debug: bool = False,
     accuracy_check: bool = True,
-    engine_root: str = "/tmp/groot_edge_llm",
-    io: PipelineIOSpec = GROOT_EDGE_IO,
+    engine_root: str,
+    io: PipelineIOSpec,
 ) -> tuple[nn.Module | None, nn.Module | None, nn.Module | None, dict]:
     engine_root = str(pathlib.Path(engine_root))
     tokenized_data = model_inputs['tokenized_data']
@@ -1314,6 +1313,7 @@ def main() -> int:
                 debug=args.debug,
                 accuracy_check=not args.no_accuracy_check,
                 engine_root=args.engine_dir,
+                io=GROOT_EDGE_IO,
             )
         edge_plugin_info = serialized_engine_info
 

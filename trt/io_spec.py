@@ -3,12 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 @dataclass(frozen=True)
 class ComponentIOSpec:
     input_names: tuple[str, ...]
     output_names: tuple[str, ...]
-
 
 @dataclass(frozen=True)
 class PipelineIOSpec:
@@ -95,13 +93,11 @@ PI05_EDGE_IO = PipelineIOSpec(
     lm_to_action_slots=((1, 2), (2, 3)),
 )
 
-
 @dataclass(frozen=True)
 class ActionRolloutConfig:
     noise_input_name: str
     timestep_schedule: str
     rollout_dt_sign: int
-
 
 GROOT_ACTION_ROLLOUT = ActionRolloutConfig(
     noise_input_name="actions",
