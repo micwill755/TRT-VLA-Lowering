@@ -9,7 +9,7 @@ import json
 import logging
 import time
 
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -53,13 +53,18 @@ from trt.vision import (
     PixelOnlyWrapper
 )
 
-from trt.language import (
-    compile_language_trt_with_plugin,
+from trt.groot_context import (
     GROOTContextProjectionWrapper,
-    GROOTLanguageContextWrapper,
+    GROOTLanguageAdapter,
+    make_groot_context_projection,
+    save_groot_language_post_engine,
+)
+from trt.language import (
+    compile_vla_lm_trt,
     language_head_dim,
-    make_plugin_lm_hidden_wrapper,
-    FlatKVLanguageEngineWrapper
+    make_vla_plugin_causal_lm,
+    run_vla_lm_prefill,
+    save_lm_engine,
 )
 from trt.measure import (
     mean,
@@ -342,95 +347,58 @@ def save_visual_engine_for_edge_llm(
 def save_lm_engine_for_edge_llm(
     core,
     input_embs,
-    engine_dir,
+    engine_root,
     *,
     device,
     position_ids=None,
     dtype=torch.float16,
-    model_type="language",
-    io: PipelineIOSpec,
 ):
+    engine_root = pathlib.Path(engine_root)
     max_seq_len = int(input_embs.shape[1])
-    batch_size = int(input_embs.shape[0])
+    input_embs = input_embs.to(device=device, dtype=dtype).contiguous()
 
-    language_model = copy.deepcopy(core.backbone.eagle_model.language_model).to(
-        device=device,
-        dtype=torch.float16,
-    ).eval()
-    decoder = getattr(language_model, "model", language_model)
+    language_model = core.backbone.eagle_model.language_model
+    lm_stack = getattr(language_model, "model", language_model)
     cfg = language_model.config
-    head_dim = language_head_dim(cfg)
+    lm_head = getattr(core.backbone.eagle_model, "lm_head", None)
 
-    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
-        decoder,
+    causal_lm = make_vla_plugin_causal_lm(
+        lm_stack,
+        lm_head,
         cfg,
         max_seq_len=max_seq_len,
+        max_kv_capacity=max_seq_len,
         device=device,
         position_ids=position_ids,
         enable_bidirectional_prefill=0,
-        log_prefix="groot",
+        export_hidden_states=True,
     )
 
-    context = GROOTContextProjectionWrapper(
-        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=dtype).eval(),
+    llm_dir = engine_root / "llm"
+    save_lm_engine(
+        causal_lm,
+        input_embs,
+        llm_dir,
+        max_kv_capacity=max_seq_len,
+        model_type=str(cfg.model_type),
+        trt_settings=TRT_SETTINGS,
     )
 
-    plugin_language = GROOTLanguageContextWrapper(
-        hidden_lm_wrapper,
-        context,
-    ).eval()
-
-    kv_caches = [
-        torch.zeros(
-            batch_size,
-            2,  # key + value
-            int(cfg.num_key_value_heads),
-            max_seq_len,
-            head_dim,
-            device=device,
-            dtype=dtype,
-        )
-        for _ in range(len(decoder.layers))
-    ]
-
-    ctx_len = torch.full(
-        (batch_size,),
-        max_seq_len,
+    _, hidden, _ = run_vla_lm_prefill(
+        causal_lm,
+        input_embs,
+        max_kv_capacity=max_seq_len,
+    )
+    post_dir = engine_root / "language_post"
+    save_groot_language_post_engine(
+        core,
+        hidden,
+        post_dir,
         device=device,
-        dtype=torch.int32,
+        dtype=dtype,
     )
+    return llm_dir / "model.engine"
 
-    wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
-
-    sample_inputs = (
-        input_embs.to(device=device, dtype=dtype).contiguous(),
-        ctx_len.contiguous(),
-        *[kv.contiguous() for kv in kv_caches],
-    )
-
-    input_names = io.language_input_names(len(kv_caches))
-
-    return save_trt_engine_module(
-        wrapper,
-        sample_inputs,
-        engine_dir,
-        engine_file="language.engine",
-        model_type=model_type,
-        component="language",
-        input_names=input_names,
-        output_names=list(io.language.output_names),
-        extra_config={
-            "max_seq_len": max_seq_len,
-            "batch_size": batch_size,
-            "num_layers": len(kv_caches),
-            "hidden_size": cfg.hidden_size,
-            "num_attention_heads": cfg.num_attention_heads,
-            "num_key_value_heads": cfg.num_key_value_heads,
-            "head_dim": head_dim,
-        },
-    )
 
 def save_action_diffusion_engine_for_edge_llm(
     core,
@@ -524,20 +492,14 @@ def save_edge_engines_for_edge_llm(
         device=device,
     )
 
-    embodiment_tag = getattr(policy.config, "embodiment_tag", "new_embodiment")
-    embodiment_id = torch.full(
-        (state.shape[0],),
-        GROOT_EMBODIMENT_MAPPING.get(embodiment_tag, 0),
-        dtype=torch.long,
-        device=device,
-    )
+    embodiment_id = _make_embodiment_id(policy, state, device).contiguous()
 
     # Keep the raw image pixels as a one-stream list so this mirrors the PI0.5 script.
-    images = [tokenized_data["pixel_values"].to(
+    pixel_values = tokenized_data["pixel_values"].to(
         device=device,
         dtype=torch.float16,
-    )]
-    pixel_values = images[0]
+    ).contiguous()
+    
     # groot specifc inputs ------
 
     # Load the custom TensorRT plugin library before compiling plugin-backed modules.
@@ -581,16 +543,16 @@ def save_edge_engines_for_edge_llm(
         attention_mask,
     )
 
-    language_engine_dir = str(pathlib.Path(engine_root) / "language")
     trt_lm = save_lm_engine_for_edge_llm(
         model,
         language_inputs.inputs_embeds,
-        language_engine_dir,
+        engine_root,
         device=device,
         position_ids=None,
         dtype=torch.float16,
-        io=io,
     )
+    language_engine_dir = str(pathlib.Path(engine_root) / "llm")
+    language_post_engine_dir = str(pathlib.Path(engine_root) / "language_post")
     
     # -------------------------
     # Action/diffusion engine
@@ -617,7 +579,7 @@ def save_edge_engines_for_edge_llm(
         io=io,
     )
 
-    fixture_dir = _dump_groot_edge_fixture(
+    fixture_dir = _dump_edge_fixture(
         engine_root=engine_root,
         model=model,
         policy=policy,
@@ -636,6 +598,7 @@ def save_edge_engines_for_edge_llm(
         "engine_root": engine_root,
         "vision_engine_dir": str(pathlib.Path(engine_root) / "visual"),
         "language_engine_dir": language_engine_dir,
+        "language_post_engine_dir": language_post_engine_dir,
         "action_engine_dir": action_engine_dir,
         "vision_engine": str(trt_vision),
         "language_engine": str(trt_lm),
@@ -652,222 +615,11 @@ def save_edge_engines_for_edge_llm(
     return trt_vision, trt_lm, trt_diffusion, plugin_info
 
 
-def compile_trt_with_plugin(
-    model: nn.Module,
-    policy: Any,
-    device: torch.device,
-    model_inputs: dict,
-    *,
-    seed: int = 42,
-    offload_module_to_cpu: bool = False,
-    max_generation_length: int = 256,
-    num_traj_samples: int = 1,
-    max_seq_len: int | None = None,
-    debug: bool = False,
-    accuracy_check: bool = True,
-) -> tuple[nn.Module | None, nn.Module | None, nn.Module | None, dict]:
-    '''
-    tokenized_data
-    input_ids          text token IDs, including image placeholder tokens
-    attention_mask     text mask
-    pixel_values       processed image tensor
-    '''
-    tokenized_data = model_inputs["tokenized_data"]
-    input_ids = tokenized_data["input_ids"]
-    attention_mask = tokenized_data["attention_mask"]
-
-    # GROOT is built to handle multiple embodiments, 
-    # where each robot can expose a different state vector width so 
-    # GROOT uses a fixed max_state_dim.
-    state, _ = pack_state(
-        model_inputs["state"],
-        max_state_dim=policy.config.max_state_dim,
-        device=device,
-    )
-    state = state.to(device=device, dtype=torch.float16).contiguous()
-    # the same model can support different robots but the action head has robot-specific weights.
-    # embodiment_id chooses which embodiment-specific state/action encoder and decoder weights to use
-    embodiment_id = _make_embodiment_id(policy, state, device).contiguous()
-    # pixelk values [B, C, H, W]
-    pixel_values = tokenized_data["pixel_values"].to(
-        device=device,
-        dtype=torch.float16,
-    ).contiguous()
-
-    load_plugins_for_trt()
-
-    plugin_settings = {
-        **TRT_SETTINGS,
-        "use_python_runtime": True,
-    }
-    action_settings = {
-        **ACTION_TRT_SETTINGS,
-        "use_python_runtime": True,
-    }
-
-    # -------------------------
-    # Vision engine
-    # -------------------------
-    print("compiling vision")
-
-    visual = make_visual_fixed_input(
-        model,
-        pixel_values,
-        device=device,
-        dtype=torch.float16,
-    )
-
-    with torch.no_grad():
-        eager_image_embs = visual(pixel_values)
-
-    vision_model = model.backbone.eagle_model.vision_model.vision_model
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
-
-    patched = []
-    try:
-        patched = patch_vision_attention(
-            vision_model,
-            batch_size=batch_size,
-            seq_len=seq_len,
-            name="SigLIP",
-        )
-        trt_vision = compile_trt_module(
-            visual,
-            (pixel_values,),
-            plugin_settings,
-        )
-    finally:
-        if patched:
-            restore_attention(patched)
-
-    with torch.no_grad():
-        trt_image_embs = trt_vision(pixel_values)
-
-    if accuracy_check:
-        tensor_error_metrics("groot TRT vs original vision embeddings", trt_image_embs, eager_image_embs)
-
-    # -------------------------
-    # Language/context engine
-    # -------------------------
-    print("compiling language")
-
-    language_inputs = build_language_inputs(
-        model,
-        trt_image_embs,
-        input_ids,
-        attention_mask,
-    )
-
-    language_max_seq_len = int(language_inputs.inputs_embeds.shape[1])
-    if max_seq_len is not None:
-        language_max_seq_len = int(max_seq_len)
-
-    language_model = copy.deepcopy(model.backbone.eagle_model.language_model).to(
-        device=device,
-        dtype=torch.float16,
-    ).eval()
-    decoder = getattr(language_model, "model", language_model)
-    cfg = language_model.config
-
-    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
-        decoder,
-        cfg,
-        max_seq_len=language_max_seq_len,
-        device=device,
-        position_ids=None,
-        enable_bidirectional_prefill=0,
-        log_prefix="groot",
-    )
-
-    context = GROOTContextProjectionWrapper(
-        copy.deepcopy(model.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
-    )
-
-    plugin_language = GROOTLanguageContextWrapper(
-        hidden_lm_wrapper,
-        context,
-    ).eval()
-
-    trt_lm, trt_max_seq_len = compile_language_trt_with_plugin(
-        plugin_language,
-        language_inputs.inputs_embeds,
-        num_layers=len(decoder.layers),
-        num_key_value_heads=int(cfg.num_key_value_heads),
-        head_dim=language_head_dim(cfg),
-        device=device,
-        settings=plugin_settings,
-        max_seq_len=language_max_seq_len,
-    )
-    language_max_seq_len = int(trt_max_seq_len)
-
-    with torch.no_grad():
-        lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
-        kv_caches = [
-            torch.zeros(
-                int(lm_inputs.shape[0]),
-                2,  # key + value
-                int(cfg.num_key_value_heads),
-                language_max_seq_len,
-                language_head_dim(cfg),
-                device=device,
-                dtype=lm_inputs.dtype,
-            )
-            for _ in range(len(decoder.layers))
-        ]
-        ctx_len = torch.full(
-            (lm_inputs.shape[0],),
-            lm_inputs.shape[1],
-            device=device,
-            dtype=torch.int32,
-        )
-        trt_context_embs = trt_lm(lm_inputs, kv_caches, ctx_len).to(device=device, dtype=torch.float16)
-
-    # -------------------------
-    # Action/diffusion engine
-    # -------------------------
-    print("compiling action diffusion")
-
-    action_module = make_static_action_module(
-        model.action_head,
-        device,
-        torch.float16,
-        embodiment_id,
-    )
-
-    sample_inputs = make_compile_inputs(
-        model.action_head.config.action_horizon,
-        model.action_head.config.action_dim,
-        trt_context_embs,
-        state,
-        embodiment_id,
-        device,
-    )
-
-    trt_diffusion = compile_trt_module(
-        action_module,
-        sample_inputs,
-        action_settings,
-    )
-
-    action_module = action_module.to(device=device, dtype=torch.float16).eval()
-
-    plugin_info = {
-        "language_max_seq_len": language_max_seq_len,
-        "context_seq_len": int(trt_context_embs.shape[1]),
-        "context_hidden_size": int(trt_context_embs.shape[2]),
-        "state_shape": list(state.shape),
-        "embodiment_id": embodiment_id.detach().cpu().tolist(),
-    }
-
-    return trt_vision, trt_lm, trt_diffusion, plugin_info
-
 @torch.no_grad()
 def run_inference_pytorch_groot(
     model,
     policy,
-    create_inputs_fn: Callable[[], dict],
+    model_inputs: dict,
     *,
     seed: int,
     device: torch.device,
@@ -875,8 +627,6 @@ def run_inference_pytorch_groot(
     torch.manual_seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
-
-    model_inputs = create_inputs_fn()
     tokenized_data = model_inputs["tokenized_data"]
     input_ids = tokenized_data["input_ids"]
     attention_mask = tokenized_data["attention_mask"]
@@ -959,7 +709,7 @@ def run_inference_pytorch_groot(
 def run_inference_trt_plugin(
     model,
     policy,
-    create_inputs_fn: Callable[[], dict],
+    model_inputs: dict,
     *,
     trt_vision,
     trt_lm,
@@ -971,8 +721,6 @@ def run_inference_trt_plugin(
     torch.manual_seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
-
-    model_inputs = create_inputs_fn()
     tokenized_data = model_inputs["tokenized_data"]
     input_ids = tokenized_data["input_ids"]
     attention_mask = tokenized_data["attention_mask"]
@@ -1054,7 +802,7 @@ def run_inference_trt_plugin(
     return actions, extra, elapsed
 
 
-def _dump_groot_edge_fixture(
+def _dump_edge_fixture(
     *,
     engine_root: str,
     model: nn.Module,
@@ -1186,19 +934,6 @@ def compute_groot_policy_action_metrics(
 
     return compute_action_parity_metrics(pred_actions, target_actions)
 
-def make_create_inputs_fn(processor, data, messages, device):
-    def create_inputs():
-        return prepare_model_inputs(
-            processor,
-            processor.process_vision_info,
-            {"add_generation_prompt": True},
-            {"images_kwargs": {"min_dynamic_tiles": 1, "max_dynamic_tiles": 1, "use_thumbnail": False}},
-            data,
-            messages,
-            device,
-        )
-    return create_inputs
-    
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export GR00T TensorRT engines for TensorRT-Edge-LLM")
 
@@ -1265,14 +1000,15 @@ def main() -> int:
 
     # TODO: right now we are using the same episode 0 and frame 0
     # each iteration should use a different frame
-    create_inputs_fn = make_create_inputs_fn(
+    compile_inputs = prepare_model_inputs(
         processor,
+        processor.process_vision_info,
+        {"add_generation_prompt": True},
+        {"images_kwargs": {"min_dynamic_tiles": 1, "max_dynamic_tiles": 1, "use_thumbnail": False}},
         data,
         messages,
         device,
     )
-
-    compile_inputs = create_inputs_fn()
 
     print(
         f"dataset={args.dataset_id}  episode={args.episode_index}  frame={args.frame_index}  "
@@ -1283,25 +1019,11 @@ def main() -> int:
     serialized_engine_info = None
     edge_plugin_info = None
 
-    if not args.skip_trt:
-        trt_vision, trt_lm, trt_diffusion, plugin_info = compile_trt_with_plugin(
-            model,
-            policy,
-            device,
-            compile_inputs,
-            seed=args.seed,
-            max_generation_length=args.max_generation_length,
-            num_traj_samples=args.num_traj_samples,
-            max_seq_len=args.max_seq_len,
-            debug=args.debug,
-            accuracy_check=not args.no_accuracy_check,
-        )
-
     if not args.skip_engine or not args.skip_edge:
         if args.skip_export:
             serialized_engine_info = {"engine_root": args.engine_dir}
         else:
-            _, _, _, serialized_engine_info = save_edge_engines_for_edge_llm(
+            trt_vision, trt_lm, trt_diffusion, serialized_engine_info = save_edge_engines_for_edge_llm(
                 model,
                 policy,
                 device,
@@ -1355,7 +1077,7 @@ def main() -> int:
             pred_actions_pt, extra_pt, _ = run_inference_pytorch_groot(
                 model,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 seed=args.seed,
                 device=device,
             )
@@ -1374,7 +1096,7 @@ def main() -> int:
             pred_actions_trt, extra_trt, _ = run_inference_trt_plugin(
                 model,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 trt_vision=trt_vision,
                 trt_lm=trt_lm,
                 trt_diffusion=trt_diffusion,
@@ -1405,7 +1127,7 @@ def main() -> int:
             pred_actions_engine, extra_engine, _ = run_inference_trt_plugin(
                 model,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 trt_vision=engine_vision,
                 trt_lm=engine_lm,
                 trt_diffusion=engine_diffusion,

@@ -267,21 +267,33 @@ class SerializedPI05Vision:
             "pixel_values": pixel_values,
         })[0]
 
-class SerializedPI05Language:
+class SerializedPI05LLM:
     def __init__(self, engine):
+        from trt.language import PI05PrefillLanguageAdapter
+
         self.engine = engine
-        self.max_seq_len = int(engine.config["max_seq_len"])
+        builder = engine.config.get("builder_config", {})
+        self.max_seq_len = int(
+            engine.config.get("max_seq_len", builder.get("max_kv_cache_capacity", 0))
+        )
+        rope_file = engine.engine_dir / engine.config.get("rope_cache_file", "rope_cache.pt")
+        if not rope_file.exists():
+            raise FileNotFoundError(f"Missing rope cache for LLM engine: {rope_file}")
+        self.rope_cache = torch.load(rope_file, map_location="cpu", weights_only=True)
+        cfg = engine.config
+        self.adapter = PI05PrefillLanguageAdapter(
+            SerializedPositionalEngine(engine),
+            cfg,
+            max_kv_capacity=self.max_seq_len,
+            rope_cache=self.rope_cache,
+        )
 
-    def __call__(self, input_embs, kv_caches, ctx_len):
-        inputs = {
-            "inputs_embeds": input_embs,
-            "ctx_len": ctx_len,
-        }
+    def __call__(self, input_embs, kv_caches=None, ctx_len=None):
+        return self.adapter(input_embs, kv_caches, ctx_len)
 
-        for i, kv_cache in enumerate(kv_caches):
-            inputs[f"kv_cache_{i}"] = kv_cache
 
-        return self.engine(inputs)
+class SerializedPI05Language(SerializedPI05LLM):
+    """Backward-compatible alias."""
 
 class SerializedPI05Action:
     def __init__(self, engine):

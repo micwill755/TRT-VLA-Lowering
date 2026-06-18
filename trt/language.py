@@ -1,211 +1,169 @@
-import logging
+"""LLM export/runtime aligned with LLMEngineRunner I/O."""
 
-from typing import Any
+from __future__ import annotations
+
+import copy
+import json
+import pathlib
+from typing import Any, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 
 from trt.attention import PluginAttention
-from trt.utils import build_prefix_inputs
-from trt.compile import compile_trt_module
+from trt.compile import compile_trt_module, save_trt_engine_module
 from trt.plugin_utils import set_plugin_config_from_model
 
-FP16 = torch.float16
-
-logger = logging.getLogger(__name__)
 
 def _as_tensor(x):
     if isinstance(x, (tuple, list)):
         return x[0]
     return x
 
-class FlatKVLanguageEngineWrapper(nn.Module):
-    """Expose list-style KV caches as flat TensorRT engine inputs."""
 
-    def __init__(self, plugin_language: nn.Module):
-        super().__init__()
-        self.plugin_language = plugin_language
-
-    def forward(self, inputs_embeds, ctx_len, *kv_caches):
-        return self.plugin_language(inputs_embeds, list(kv_caches), ctx_len)
-
-class PluginLMHiddenWrapper(nn.Module):
-    """Shared plugin-attention LM prefill.
-
-    Returns hidden states, and optionally prefix K/V.
-    """
-
-    def __init__(
-        self,
-        lm: nn.Module,
-        *,
-        num_ds: int = 0
-    ):
-        super().__init__()
-        self.lm = lm
-        self.num_ds = int(num_ds)
-
-    def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        kv_caches: list[torch.Tensor],
-        ctx_len: torch.Tensor,
-        ds_stack: torch.Tensor | None = None,
-    ):
-        hidden = _as_tensor(inputs_embeds)
-        seq_len = inputs_embeds.shape[1]
-        new_kvs = []
-
-        for i, layer in enumerate(self.lm.layers):
-            residual = hidden
-            hidden = _as_tensor(layer.input_layernorm(hidden))
-            hidden, kv = layer.self_attn(
-                hidden_states=hidden,
-                past_key_value=kv_caches[i],
-                ctx_len=ctx_len,
-            )
-            hidden = _as_tensor(hidden)
-            hidden = residual + hidden
-
-            residual = hidden
-            hidden = _as_tensor(layer.post_attention_layernorm(hidden))
-            hidden = _as_tensor(layer.mlp(hidden))
-            hidden = residual + hidden
-
-            new_kvs.append(kv)
-
-            if self.num_ds > 0 and ds_stack is not None and i < self.num_ds:
-                hidden = hidden + ds_stack[i, :, :seq_len, :]
-
-        hidden = _as_tensor(self.lm.norm(hidden))
-
-        prefix_k = torch.stack(
-            [kv[:, 0, :, :seq_len, :] for kv in new_kvs],
-            dim=0,
+def language_head_dim(config: Any) -> int:
+    return int(
+        getattr(
+            config,
+            "head_dim",
+            config.hidden_size // config.num_attention_heads,
         )
-        prefix_v = torch.stack(
-            [kv[:, 1, :, :seq_len, :] for kv in new_kvs],
-            dim=0,
-        )
-
-        return hidden, prefix_k, prefix_v
-
-# TODO: 
-class GROOTContextProjectionWrapper(nn.Module):
-    def __init__(self, eagle_linear, vlln, vl_self_attention):
-        super().__init__()
-        self.eagle_linear = eagle_linear
-        self.vlln = vlln
-        self.vl_self_attention = vl_self_attention
-
-    def forward(self, hidden_states: torch.Tensor):
-        context_embs = self.eagle_linear(hidden_states)
-
-        vlln_weight = getattr(self.vlln, "weight", None)
-        if vlln_weight is not None:
-            context_embs = context_embs.to(dtype=vlln_weight.dtype)
-
-        context_embs = self.vlln(context_embs)
-        context_embs = self.vl_self_attention(context_embs)
-        return context_embs
-
-class GROOTLanguageContextWrapper(nn.Module):
-    """Single exported engine: inputs_embeds -> LM -> GR00T context_embs."""
-
-    def __init__(
-        self,
-        lm_wrapper: PluginLMHiddenWrapper,
-        context_projection: GROOTContextProjectionWrapper,
-    ):
-        super().__init__()
-        self.lm_wrapper = lm_wrapper
-        self.context_projection = context_projection
-
-    def forward(self, inputs_embeds, kv_caches, ctx_len):
-        hidden, prefix_k, prefix_v = self.lm_wrapper(
-            inputs_embeds,
-            kv_caches,
-            ctx_len,
-        )
-        return self.context_projection(hidden)
-
-@torch.no_grad()
-def run_vlm_preprocessing(
-    core,
-    images,
-    img_masks,
-    tokens,
-    masks,
-    trt_vision=None,
-    *,
-    dtype=torch.float16,
-):
-    image_embs = [
-        trt_vision(image) if trt_vision is not None else core.paligemma_with_expert.embed_image(image)
-        for image in images
-    ]
-
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
-        core,
-        image_embs,
-        img_masks,
-        tokens,
-        masks,
     )
 
-    return (
-        prefix_embs.to(dtype),
-        prefix_pad_masks,
-        prefix_attention_mask,
-        prefix_position_ids,
-    )
 
-def compile_language_trt_with_plugin(
-    plugin_language: nn.Module,
-    inputs_embeds: torch.Tensor,
+def install_plugin_attention(
+    lm: nn.Module,
+    config: Any,
+    rope_cache: torch.Tensor,
     *,
+    enable_bidirectional_prefill: int = 1,
+) -> None:
+    for i, layer in enumerate(lm.layers):
+        layer.self_attn = PluginAttention(
+            layer.self_attn,
+            config,
+            layer_idx=i,
+            rope_cache=rope_cache,
+            enable_bidirectional_prefill=enable_bidirectional_prefill,
+        ).eval()
+
+
+def build_rope_cache(
+    lm: nn.Module,
+    config: Any,
+    *,
+    max_seq_len: int,
+    device: torch.device,
+    position_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if position_ids is None:
+        position_ids = torch.arange(max_seq_len, device=device).view(1, max_seq_len)
+    position_ids = position_ids.to(device=device)[:, :max_seq_len]
+
+    head_dim = language_head_dim(config)
+    with torch.no_grad():
+        dummy = torch.ones(
+            position_ids.shape[0],
+            max_seq_len,
+            config.hidden_size,
+            device=device,
+            dtype=torch.float16,
+        )
+        cos, sin = lm.rotary_emb(dummy, position_ids)
+        h2 = head_dim // 2
+        return torch.cat(
+            [cos[:, :max_seq_len, :h2].float(), sin[:, :max_seq_len, :h2].float()],
+            dim=-1,
+        )
+
+
+def runner_rope_input(
+    rope_cache: torch.Tensor,
+    *,
+    batch_size: int,
+    max_kv_capacity: int,
+) -> torch.Tensor:
+    rope = rope_cache[:, :max_kv_capacity, :].to(dtype=torch.float32)
+    if rope.shape[0] == 1 and batch_size > 1:
+        rope = rope.expand(batch_size, -1, -1)
+    return rope.contiguous()
+
+
+def empty_kv_caches(
+    *,
+    batch_size: int,
     num_layers: int,
-    num_key_value_heads: int,
+    num_kv_heads: int,
+    max_kv_capacity: int,
     head_dim: int,
     device: torch.device,
-    settings,
-    max_seq_len: int | None = None,
-    dtype: torch.dtype = torch.float16,
-):
-    ctx_seq_len = int(inputs_embeds.shape[1])
-    max_seq_len = ctx_seq_len if max_seq_len is None else int(max_seq_len)
-    batch_size = int(inputs_embeds.shape[0])
-
-    kv_caches = [
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, ...]:
+    return tuple(
         torch.zeros(
             batch_size,
-            2,  # key + value
-            int(num_key_value_heads),
-            max_seq_len,
-            int(head_dim),
+            2,
+            num_kv_heads,
+            max_kv_capacity,
+            head_dim,
             device=device,
             dtype=dtype,
         )
-        for _ in range(int(num_layers))
-    ]
+        for _ in range(num_layers)
+    )
 
-    ctx_len = torch.full(
-        (batch_size,),
-        ctx_seq_len,
+
+def prefill_inputs(
+    inputs_embeds: torch.Tensor,
+    config: Any,
+    *,
+    max_kv_capacity: int,
+    rope_cache: torch.Tensor,
+) -> dict[str, Any]:
+    batch_size, seq_len, _ = inputs_embeds.shape
+    device = inputs_embeds.device
+
+    past_key_values = empty_kv_caches(
+        batch_size=batch_size,
+        num_layers=int(config.num_hidden_layers),
+        num_kv_heads=int(config.num_key_value_heads),
+        max_kv_capacity=max_kv_capacity,
+        head_dim=language_head_dim(config),
         device=device,
-        dtype=torch.int32,
+        dtype=inputs_embeds.dtype,
     )
 
-    trt_language = compile_trt_module(
-        plugin_language,
-        (inputs_embeds.to(device=device, dtype=dtype), kv_caches, ctx_len),
-        settings,
-    )
+    return {
+        "inputs_embeds": inputs_embeds,
+        "past_key_values": past_key_values,
+        "rope_rotary_cos_sin": runner_rope_input(
+            rope_cache,
+            batch_size=batch_size,
+            max_kv_capacity=max_kv_capacity,
+        ),
+        "context_lengths": torch.full((batch_size,), seq_len, dtype=torch.int32, device=device),
+        "last_token_ids": torch.full((batch_size, 1), seq_len - 1, dtype=torch.int64, device=device),
+        "kvcache_start_index": torch.empty(0, dtype=torch.int32, device=device),
+    }
 
-    return trt_language, max_seq_len
+
+def stack_prefix_kv_from_present(
+    present_key_values: Sequence[torch.Tensor],
+    *,
+    seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    prefix_k = torch.stack([kv[:, 0, :, :seq_len, :] for kv in present_key_values], dim=0)
+    prefix_v = torch.stack([kv[:, 1, :, :seq_len, :] for kv in present_key_values], dim=0)
+    return prefix_k, prefix_v
+
 
 @torch.no_grad()
-def run_prefix_language_eager(language_model, prefix_embs, attention_mask, position_ids):
+def run_prefix_language_eager(
+    language_model: nn.Module,
+    prefix_embs: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    position_ids: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     lm_dtype = next(language_model.parameters()).dtype
     prefix_embs = prefix_embs.to(dtype=lm_dtype)
     out = language_model(
@@ -220,218 +178,392 @@ def run_prefix_language_eager(language_model, prefix_embs, attention_mask, posit
     prefix_v = torch.stack([layer.values for layer in cache.layers], dim=0)
     return out.last_hidden_state, prefix_k, prefix_v
 
-def _smoke_first_bad_index(mask, shape):
-    flat_idx = int(mask.flatten().nonzero(as_tuple=False)[0].item())
-    coords = []
-    for dim in reversed(shape):
-        coords.append(flat_idx % dim)
-        flat_idx //= dim
-    return tuple(reversed(coords))
 
-def _smoke_tensor_health(name, tensor):
-    finite = torch.isfinite(tensor)
-    bad = ~finite
-    bad_count = int(bad.sum().item())
-    if bad_count == 0:
-        return
+class VLAPluginCausalLM(nn.Module):
+    """Plugin-attention causal LM with LLMEngineRunner-compatible forward I/O."""
 
-    nan_count = int(torch.isnan(tensor).sum().item())
-    inf_count = int(torch.isinf(tensor).sum().item())
-    first_idx = _smoke_first_bad_index(bad, tensor.shape)
-    first_val = tensor[first_idx].detach().cpu().item()
-    print(f"{name} nonfinite count:", bad_count, "of", tensor.numel())
-    print(f"{name} nan count:", nan_count)
-    print(f"{name} inf count:", inf_count)
-    print(f"{name} first nonfinite index:", first_idx, "value:", first_val)
+    def __init__(
+        self,
+        lm: nn.Module,
+        lm_head: nn.Module | None,
+        config: Any,
+        *,
+        rope_cache: torch.Tensor,
+        enable_bidirectional_prefill: int = 1,
+        export_hidden_states: bool = False,
+        num_ds: int = 0,
+    ):
+        super().__init__()
+        self.lm = lm
+        self.lm_head = lm_head
+        self.config = config
+        self.enable_bidirectional_prefill = int(enable_bidirectional_prefill)
+        self.export_hidden_states = bool(export_hidden_states)
+        self.num_ds = int(num_ds)
+        self.register_buffer("rope_cache", rope_cache)
 
-def _smoke_error_metrics(name, trt_tensor, eager_tensor, include_top1=False):
-    _smoke_tensor_health(f"{name} TRT", trt_tensor)
-    _smoke_tensor_health(f"{name} eager", eager_tensor)
-    trt_f = trt_tensor.float()
-    eager_f = eager_tensor.float()
-    diff = trt_f - eager_f
-    abs_diff = diff.abs()
-    rel_l2 = diff.norm() / eager_f.norm().clamp_min(1e-8)
-    rel_mean_pct = abs_diff.mean() / eager_f.abs().mean().clamp_min(1e-8) * 100
-    if include_top1:
-        top1_match = (trt_tensor.argmax(dim=-1) == eager_tensor.argmax(dim=-1)).float().mean()
-    else:
-        top1_match = None
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        past_key_values: Tuple[torch.Tensor, ...],
+        rope_rotary_cos_sin: torch.Tensor,
+        context_lengths: torch.Tensor,
+        last_token_ids: torch.Tensor,
+        kvcache_start_index: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        ds_stack: torch.Tensor | None = None,
+    ):
+        del rope_rotary_cos_sin, position_ids, attention_mask
 
-    print(f"{name} mean diff:", abs_diff.mean().item())
-    print(f"{name} max diff:", abs_diff.max().item())
-    print(f"{name} relative L2:", rel_l2.item())
-    print(f"{name} relative mean %:", rel_mean_pct.item())
-    if top1_match is not None:
-        print(f"{name} top1 match %:", (top1_match * 100).item())
+        hidden = inputs_embeds
+        present_key_values = []
+        seq_len = hidden.shape[1]
+
+        for layer_idx, layer in enumerate(self.lm.layers):
+            residual = hidden
+            hidden = _as_tensor(layer.input_layernorm(hidden))
+            hidden, present_kv = layer.self_attn(
+                hidden_states=hidden,
+                past_key_value=past_key_values[layer_idx],
+                ctx_len=context_lengths,
+                kvcache_start_index=kvcache_start_index,
+            )
+            hidden = residual + _as_tensor(hidden)
+
+            residual = hidden
+            hidden = _as_tensor(layer.post_attention_layernorm(hidden))
+            hidden = _as_tensor(layer.mlp(hidden))
+            hidden = residual + hidden
+
+            if ds_stack is not None and self.num_ds > 0 and layer_idx < self.num_ds:
+                hidden = hidden + ds_stack[layer_idx, :, :seq_len, :]
+
+            present_key_values.append(present_kv)
+
+        hidden = _as_tensor(self.lm.norm(hidden))
+
+        logits = None
+        if self.lm_head is not None:
+            if last_token_ids.ndim == 1:
+                index = last_token_ids.view(-1, 1, 1).expand(-1, 1, hidden.shape[-1])
+            else:
+                index = last_token_ids.unsqueeze(-1).expand(-1, -1, hidden.shape[-1])
+            gathered = hidden.gather(1, index.to(dtype=torch.long))
+            logits = self.lm_head(gathered.squeeze(1)).to(torch.float32)
+
+        if self.export_hidden_states:
+            return logits, hidden, tuple(present_key_values)
+        return logits, tuple(present_key_values)
 
 
-def _select_valid_token_rows(hidden, prefix_pad_masks=None, max_logit_tokens=16):
-    if prefix_pad_masks is None:
-        rows = hidden.reshape(-1, hidden.shape[-1])
-        desc = f"{rows.shape[0]} total token rows"
-    else:
-        valid = prefix_pad_masks.to(device=hidden.device, dtype=torch.bool)
-        rows = torch.cat(
-            [hidden[b, valid[b], :] for b in range(valid.shape[0])],
-            dim=0,
+class FlatLLMRunnerExportWrapper(nn.Module):
+    """Flatten per-layer KV tensors for torch.export / TRT serialization."""
+
+    def __init__(self, model: VLAPluginCausalLM):
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
+        context_lengths: torch.Tensor,
+        last_token_ids: torch.Tensor,
+        kvcache_start_index: torch.Tensor,
+        *past_key_values: torch.Tensor,
+        ds_stack: torch.Tensor | None = None,
+    ):
+        outputs = self.model(
+            inputs_embeds,
+            past_key_values,
+            rope_rotary_cos_sin,
+            context_lengths,
+            last_token_ids,
+            kvcache_start_index,
+            ds_stack=ds_stack,
         )
-        desc = f"{rows.shape[0]} valid token rows"
+        if self.model.export_hidden_states:
+            logits, hidden_states, present_kvs = outputs
+            if self.model.lm_head is None:
+                return (hidden_states, *present_kvs)
+            return (logits, hidden_states, *present_kvs)
+        logits, present_kvs = outputs
+        return (logits, *present_kvs)
 
-    if max_logit_tokens is not None and rows.shape[0] > max_logit_tokens:
-        rows = rows[-max_logit_tokens:]
-        desc = f"{desc}; comparing last {max_logit_tokens}"
 
-    return rows, desc
+def llm_runner_past_key_value_names(num_layers: int, *, is_past: bool = True) -> list[str]:
+    prefix = "past_key_values" if is_past else "present_key_values"
+    return [f"{prefix}_{i}" for i in range(num_layers)]
 
-@torch.no_grad()
-def pi05_plugin_lm_smoke_check(
-    core,
-    trt_language,
-    prefix_embs,
-    *,
-    max_seq_len,
-    device,
-    attention_mask=None,
-    position_ids=None,
-    prefix_pad_masks=None,
-    max_logit_tokens=16,
-):
-    lm = core.paligemma_with_expert.paligemma.model.language_model
-    lm_head = getattr(core.paligemma_with_expert.paligemma, "lm_head", None)
-    if lm_head is None:
-        print("LM plugin smoke-check logits: skipped, no lm_head on PaliGemma model")
-        return
 
-    lm_dtype = next(lm.parameters()).dtype
-    head_dtype = next(lm_head.parameters()).dtype
-
-    eager_prefix_embs = prefix_embs.to(device=device, dtype=lm_dtype)
-    eager_out = lm(
-        inputs_embeds=eager_prefix_embs,
-        attention_mask=attention_mask,
-        position_ids=position_ids,
-        past_key_values=None,
-        use_cache=True,
-    )
-    eager_hidden = _as_tensor(eager_out.last_hidden_state)
-
-    trt_prefix_embs = prefix_embs.to(device=device, dtype=torch.float16)
-    cfg = lm.config
-    kv_caches = [
-        torch.zeros(
-            int(trt_prefix_embs.shape[0]),
-            2,  # key + value
-            int(cfg.num_key_value_heads),
-            max_seq_len,
-            language_head_dim(cfg),
-            device=device,
-            dtype=trt_prefix_embs.dtype,
-        )
-        for _ in range(int(cfg.num_hidden_layers))
+def llm_runner_input_names(num_layers: int) -> list[str]:
+    return [
+        "inputs_embeds",
+        *llm_runner_past_key_value_names(num_layers, is_past=True),
+        "rope_rotary_cos_sin",
+        "context_lengths",
+        "last_token_ids",
+        "kvcache_start_index",
     ]
-    ctx_len = torch.full(
-        (trt_prefix_embs.shape[0],),
-        trt_prefix_embs.shape[1],
-        device=device,
-        dtype=torch.int32,
-    )
-    trt_hidden, trt_k, trt_v = trt_language(trt_prefix_embs, kv_caches, ctx_len)
 
-    _smoke_tensor_health("LM plugin smoke-check eager hidden", eager_hidden)
-    _smoke_tensor_health("LM plugin smoke-check TRT hidden", trt_hidden)
 
-    eager_rows, desc = _select_valid_token_rows(eager_hidden, prefix_pad_masks, max_logit_tokens)
-    trt_rows, _ = _select_valid_token_rows(trt_hidden, prefix_pad_masks, max_logit_tokens)
+def llm_runner_output_names(num_layers: int, *, include_hidden_states: bool = False, include_logits: bool = True) -> list[str]:
+    names: list[str] = []
+    if include_logits:
+        names.append("logits")
+    if include_hidden_states:
+        names.append("hidden_states")
+    names.extend(llm_runner_past_key_value_names(num_layers, is_past=False))
+    return names
 
-    eager_logits = lm_head(eager_rows.to(device=device, dtype=head_dtype))
-    trt_logits = lm_head(trt_rows.to(device=device, dtype=head_dtype))
 
-    print("LM plugin smoke-check logits rows:", desc)
-    print("LM plugin smoke-check logits shape:", tuple(trt_logits.shape))
-    _smoke_error_metrics("LM plugin smoke-check logits", trt_logits, eager_logits, include_top1=True)
-
-    cache = eager_out.past_key_values
-    eager_k = torch.stack([layer.keys for layer in cache.layers], dim=0)
-    eager_v = torch.stack([layer.values for layer in cache.layers], dim=0)
-
-    _smoke_error_metrics("LM plugin smoke-check prefix_k", trt_k, eager_k)
-    _smoke_error_metrics("LM plugin smoke-check prefix_v", trt_v, eager_v)
-
-def _install_plugin_attention(
+def make_vla_plugin_causal_lm(
     lm: nn.Module,
-    config,
-    rope_cache: torch.Tensor,
-    enable_bidirectional_prefill: int = 1,
-) -> None:
-    for i, layer in enumerate(lm.layers):
-        layer.self_attn = PluginAttention(
-            layer.self_attn,
-            config,
-            layer_idx=i,
-            rope_cache=rope_cache,
-            enable_bidirectional_prefill=enable_bidirectional_prefill,
-        ).eval()
-
-def make_plugin_lm_hidden_wrapper(
-    decoder: nn.Module,
-    config,
+    lm_head: nn.Module | None,
+    config: Any,
     *,
     max_seq_len: int,
+    max_kv_capacity: int,
     device: torch.device,
     position_ids: torch.Tensor | None = None,
     enable_bidirectional_prefill: int = 1,
-    log_prefix: str = "",
-) -> PluginLMHiddenWrapper:
-    if position_ids is None:
-        position_ids = torch.arange(max_seq_len, device=device).view(1, max_seq_len)
+    export_hidden_states: bool = False,
+    num_ds: int = 0,
+) -> VLAPluginCausalLM:
+    lm = copy.deepcopy(lm).to(device=device, dtype=torch.float16).eval()
+    if lm_head is not None:
+        lm_head = copy.deepcopy(lm_head).to(device=device, dtype=torch.float16).eval()
 
-    position_ids = position_ids.to(device=device)[:, :max_seq_len]
-
-    head_dim = getattr(
+    rope_cache = build_rope_cache(
+        lm,
         config,
-        "head_dim",
-        config.hidden_size // config.num_attention_heads,
+        max_seq_len=max_seq_len,
+        device=device,
+        position_ids=position_ids,
     )
 
-    with torch.no_grad():
-        dummy = torch.ones(
-            position_ids.shape[0],
-            max_seq_len,
-            config.hidden_size,
-            device=device,
-            dtype=torch.float16,
-        )
-        cos, sin = decoder.rotary_emb(dummy, position_ids)
-
-        h2 = head_dim // 2
-        rope_cache = torch.cat(
-            [
-                cos[:, :max_seq_len, :h2].float(),
-                sin[:, :max_seq_len, :h2].float(),
-            ],
-            dim=-1,
-        )
-
-    prefix = f"{log_prefix} " if log_prefix else ""
-    print(f"{prefix}rope_cache shape/dtype:", rope_cache.shape, rope_cache.dtype)
-    print(f"{prefix}head_dim:", head_dim)
-
-    _install_plugin_attention(
-        decoder,
+    set_plugin_config_from_model(config, max_kv_capacity)
+    install_plugin_attention(
+        lm,
         config,
         rope_cache,
         enable_bidirectional_prefill=enable_bidirectional_prefill,
     )
 
-    return PluginLMHiddenWrapper(
-        decoder,
-        num_ds=0
+    return VLAPluginCausalLM(
+        lm,
+        lm_head,
+        config,
+        rope_cache=rope_cache,
+        enable_bidirectional_prefill=enable_bidirectional_prefill,
+        export_hidden_states=export_hidden_states,
+        num_ds=num_ds,
     ).eval()
 
-def language_head_dim(config) -> int:
-    return int(getattr(
+
+def _llm_runner_sample_args(inputs: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        inputs["inputs_embeds"],
+        inputs["rope_rotary_cos_sin"],
+        inputs["context_lengths"],
+        inputs["last_token_ids"],
+        inputs["kvcache_start_index"],
+        *inputs["past_key_values"],
+    )
+
+
+@torch.no_grad()
+def run_vla_lm_prefill(
+    model: VLAPluginCausalLM | nn.Module,
+    inputs_embeds: torch.Tensor,
+    *,
+    max_kv_capacity: int,
+    rope_cache: torch.Tensor | None = None,
+    config: Any | None = None,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, tuple[torch.Tensor, ...]]:
+    if config is None:
+        config = model.config
+    if rope_cache is None:
+        rope_cache = model.rope_cache
+
+    inputs = prefill_inputs(
+        inputs_embeds,
         config,
-        "head_dim",
-        config.hidden_size // config.num_attention_heads,
-    ))
+        max_kv_capacity=max_kv_capacity,
+        rope_cache=rope_cache,
+    )
+    outputs = model(
+        inputs["inputs_embeds"],
+        inputs["past_key_values"],
+        inputs["rope_rotary_cos_sin"],
+        inputs["context_lengths"],
+        inputs["last_token_ids"],
+        inputs["kvcache_start_index"],
+    )
+    if getattr(model, "export_hidden_states", False):
+        logits, hidden, present_kvs = outputs
+        return logits, hidden, present_kvs
+    logits, present_kvs = outputs
+    return logits, None, present_kvs
+
+
+def compile_vla_lm_trt(
+    model: VLAPluginCausalLM,
+    inputs_embeds: torch.Tensor,
+    *,
+    max_kv_capacity: int,
+    device: torch.device,
+    settings: dict[str, Any],
+) -> nn.Module:
+    wrapper = FlatLLMRunnerExportWrapper(model).eval()
+    inputs = prefill_inputs(
+        inputs_embeds.to(device=device, dtype=torch.float16),
+        model.config,
+        max_kv_capacity=max_kv_capacity,
+        rope_cache=model.rope_cache,
+    )
+    return compile_trt_module(wrapper, _llm_runner_sample_args(inputs), settings)
+
+
+class PI05PrefillLanguageAdapter:
+    """Adapt compiled LLM runner TRT module to PI0.5 prefix_k/v prefill API."""
+
+    def __init__(self, trt_lm: nn.Module, config: Any, *, max_kv_capacity: int, rope_cache: torch.Tensor):
+        self.trt_lm = trt_lm
+        self.config = config
+        self.max_kv_capacity = int(max_kv_capacity)
+        self.rope_cache = rope_cache
+
+    def __call__(
+        self,
+        inputs_embeds: torch.Tensor,
+        kv_caches: list[torch.Tensor] | None = None,
+        ctx_len: torch.Tensor | None = None,
+    ) -> tuple[None, torch.Tensor, torch.Tensor]:
+        del kv_caches, ctx_len
+        inputs = prefill_inputs(
+            inputs_embeds,
+            self.config,
+            max_kv_capacity=self.max_kv_capacity,
+            rope_cache=self.rope_cache,
+        )
+        outputs = self.trt_lm(*_llm_runner_sample_args(inputs))
+        present_kvs = outputs[1:]
+        seq_len = int(inputs_embeds.shape[1])
+        prefix_k, prefix_v = stack_prefix_kv_from_present(present_kvs, seq_len=seq_len)
+        return None, prefix_k, prefix_v
+
+
+def _build_llm_runner_config(
+    config: Any,
+    *,
+    max_input_len: int,
+    max_kv_cache_capacity: int,
+    max_batch_size: int,
+    model_type: str,
+    input_names: list[str],
+    output_names: list[str],
+    example_inputs: tuple[Any, ...],
+    example_output: tuple[Any, ...],
+) -> dict[str, Any]:
+    head_dim = language_head_dim(config)
+    return {
+        "model_type": model_type,
+        "num_hidden_layers": int(config.num_hidden_layers),
+        "num_key_value_heads": int(config.num_key_value_heads),
+        "num_attention_heads": int(config.num_attention_heads),
+        "head_dim": head_dim,
+        "hidden_size": int(config.hidden_size),
+        "vocab_size": int(getattr(config, "vocab_size", 0)),
+        "partial_rotary_factor": float(getattr(config, "partial_rotary_factor", 1.0)),
+        "max_position_embeddings": int(
+            getattr(config, "max_position_embeddings", max_kv_cache_capacity)
+        ),
+        "builder_config": {
+            "max_batch_size": int(max_batch_size),
+            "max_input_len": int(max_input_len),
+            "max_kv_cache_capacity": int(max_kv_cache_capacity),
+            "max_lora_rank": 0,
+            "eagle_base": False,
+            "trt_native_ops": False,
+        },
+        "lm_runtime": "llm_engine_runner",
+        "input_names": input_names,
+        "output_names": output_names,
+        "inputs": {name: {"shape": list(t.shape), "dtype": str(t.dtype)} for name, t in zip(input_names, example_inputs)},
+        "outputs": [{"name": name, "shape": list(t.shape), "dtype": str(t.dtype)} for name, t in zip(output_names, example_output)],
+    }
+
+
+def save_lm_engine(
+    model: VLAPluginCausalLM,
+    inputs_embeds: torch.Tensor,
+    engine_dir: str | pathlib.Path,
+    *,
+    max_kv_capacity: int | None = None,
+    max_batch_size: int = 1,
+    model_type: str = "gemma",
+    manifest: dict[str, Any] | None = None,
+    engine_file: str = "model.engine",
+    trt_settings: dict[str, Any] | None = None,
+) -> pathlib.Path:
+    """Export LLMEngineRunner-aligned TRT engine + config under ``llm/``."""
+    engine_dir = pathlib.Path(engine_dir)
+    max_kv_capacity = int(max_kv_capacity or inputs_embeds.shape[1])
+    cfg = model.config
+    num_layers = int(cfg.num_hidden_layers)
+
+    wrapper = FlatLLMRunnerExportWrapper(model).eval()
+    inputs = prefill_inputs(
+        inputs_embeds.to(device=inputs_embeds.device, dtype=torch.float16).contiguous(),
+        cfg,
+        max_kv_capacity=max_kv_capacity,
+        rope_cache=model.rope_cache,
+    )
+    sample_args = _llm_runner_sample_args(inputs)
+    input_names = llm_runner_input_names(num_layers)
+    output_names = llm_runner_output_names(
+        num_layers,
+        include_hidden_states=model.export_hidden_states,
+        include_logits=model.lm_head is not None,
+    )
+
+    with torch.no_grad():
+        example_output = wrapper(*sample_args)
+
+    save_trt_engine_module(
+        wrapper,
+        sample_args,
+        engine_dir,
+        engine_file=engine_file,
+        model_type=model_type,
+        component="llm",
+        input_names=input_names,
+        output_names=output_names,
+        example_output=example_output,
+        extra_config={
+            **_build_llm_runner_config(
+                cfg,
+                max_input_len=int(inputs_embeds.shape[1]),
+                max_kv_cache_capacity=max_kv_capacity,
+                max_batch_size=max_batch_size,
+                model_type=model_type,
+                input_names=input_names,
+                output_names=output_names,
+                example_inputs=sample_args,
+                example_output=example_output if isinstance(example_output, tuple) else (example_output,),
+            ),
+            "max_seq_len": max_kv_capacity,
+            "rope_cache_file": "rope_cache.pt",
+        },
+        trt_settings=trt_settings,
+    )
+
+    torch.save(model.rope_cache.detach().cpu(), engine_dir / "rope_cache.pt")
+
+    if manifest is not None:
+        manifest_path = engine_dir.parent / "vla_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    return engine_dir / engine_file

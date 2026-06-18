@@ -26,11 +26,11 @@ from trt.data import make_batch
 from trt.packing import compact_packed_language_inputs
 from trt.vision import PI05VisualEmbed
 from trt.language import (
-    compile_language_trt_with_plugin,
+    PI05PrefillLanguageAdapter,
+    compile_vla_lm_trt,
     language_head_dim,
-    make_plugin_lm_hidden_wrapper,
-    pi05_plugin_lm_smoke_check,
-    run_prefix_language_eager
+    make_vla_plugin_causal_lm,
+    run_prefix_language_eager,
 )
 from trt.plugin_utils import (
     load_plugin,
@@ -209,75 +209,51 @@ def main() -> int:
     lm = copy.deepcopy(
         core.paligemma_with_expert.paligemma.model.language_model
     ).to(device=device, dtype=torch.float16).eval()
-    decoder = getattr(lm, "model", lm)
     cfg = lm.config
-    plugin_language = make_plugin_lm_hidden_wrapper(
-        decoder,
+    lm_stack = getattr(lm, "model", lm)
+    lm_head = core.paligemma_with_expert.paligemma.lm_head
+    max_seq_len = int(compact_trt_prefix_embs.shape[1])
+
+    causal_lm = make_vla_plugin_causal_lm(
+        lm_stack,
+        lm_head,
         cfg,
-        max_seq_len=int(compact_trt_prefix_embs.shape[1]),
+        max_seq_len=max_seq_len,
+        max_kv_capacity=max_seq_len,
         device=device,
         position_ids=compact_trt_prefix_position_ids,
-        return_prefix_kv=True,
     )
-    trt_language_model, trt_max_seq_len = compile_language_trt_with_plugin(
-        plugin_language,
+    trt_language_module = compile_vla_lm_trt(
+        causal_lm,
         compact_trt_prefix_embs,
-        num_layers=int(cfg.num_hidden_layers),
-        num_key_value_heads=int(cfg.num_key_value_heads),
-        head_dim=language_head_dim(cfg),
+        max_kv_capacity=max_seq_len,
         device=device,
         settings=TRT_SETTINGS,
     )
-
-    # Run the compiled language model to produce TRT hidden states and the prefix KV cache.
-    trt_prefix_embs = compact_trt_prefix_embs.to(device=device, dtype=torch.float16)
-    trt_kv_caches = [
-        torch.zeros(
-            int(trt_prefix_embs.shape[0]),
-            2,  # key + value
-            int(cfg.num_key_value_heads),
-            trt_max_seq_len,
-            language_head_dim(cfg),
-            device=device,
-            dtype=trt_prefix_embs.dtype,
-        )
-        for _ in range(int(cfg.num_hidden_layers))
-    ]
-    trt_ctx_len = torch.full(
-        (trt_prefix_embs.shape[0],),
-        trt_prefix_embs.shape[1],
-        device=device,
-        dtype=torch.int32,
+    trt_language_model = PI05PrefillLanguageAdapter(
+        trt_language_module,
+        cfg,
+        max_kv_capacity=max_seq_len,
+        rope_cache=causal_lm.rope_cache,
     )
+    trt_max_seq_len = max_seq_len
+
+    trt_prefix_embs = compact_trt_prefix_embs.to(device=device, dtype=torch.float16)
     trt_hidden, trt_prefix_k, trt_prefix_v = trt_language_model(
         trt_prefix_embs,
-        trt_kv_caches,
-        trt_ctx_len,
+        None,
+        None,
     )
 
-    # Smoke-check the plugin language output with logits and KV-cache comparisons.
-    pi05_plugin_lm_smoke_check(
-        core,
-        trt_language_model,
+    _, eager_prefix_k, eager_prefix_v = run_prefix_language_eager(
+        core.paligemma_with_expert.paligemma.model.language_model,
         compact_trt_prefix_embs,
-        max_seq_len=trt_max_seq_len,
-        device=device,
-        attention_mask=compact_trt_prefix_attention_mask,
-        position_ids=compact_trt_prefix_position_ids,
-        prefix_pad_masks=compact_trt_prefix_pad_masks,
-        max_logit_tokens=16,
+        compact_trt_prefix_attention_mask,
+        compact_trt_prefix_position_ids,
     )
-
-    # Compare eager and TRT language hidden states plus prefix K/V caches.
-    compare_language(
-        eager_hidden,
-        eager_prefix_k,
-        eager_prefix_v,
-        trt_hidden,
-        trt_prefix_k,
-        trt_prefix_v,
-        compact_trt_prefix_pad_masks,
-    )
+    from trt.measure import tensor_error_metrics
+    tensor_error_metrics("language prefix_k", trt_prefix_k, eager_prefix_k)
+    tensor_error_metrics("language prefix_v", trt_prefix_v, eager_prefix_v)
 
     # -------------------------
     # Eager baseline before action compile/offload

@@ -18,7 +18,24 @@ from trt.data import make_batch
 from trt.measure import compute_action_chunk_ade, tensor_error_metrics
 from trt.utils import load_policy
 from trt.vision import SmolVLAVisualEmbed
-from trt.language import SmolVLAPrefixLanguagePrefill
+from trt.language import run_prefix_language_eager
+
+
+class SmolVLAPrefixLanguagePrefill(nn.Module):
+    def __init__(self, core):
+        super().__init__()
+        self.language_model = core.vlm_with_expert.get_vlm_model().language_model
+
+    def forward(self, prefix_embs, attention_mask, position_ids):
+        _, prefix_k, prefix_v = run_prefix_language_eager(
+            self.language_model,
+            prefix_embs,
+            attention_mask,
+            position_ids,
+        )
+        return prefix_k, prefix_v
+
+
 from trt.diffusion import SmolVLAStaticKVDiffusionStep
 from trt.attention import PI05SigLIPViTPluginAttention
 from trt.plugin_utils import (

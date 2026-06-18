@@ -67,6 +67,7 @@ class PluginAttention(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         past_key_value: Optional[torch.Tensor] = None,
         ctx_len: Optional[torch.Tensor] = None,
+        kvcache_start_index: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -113,10 +114,15 @@ class PluginAttention(nn.Module):
         if past_key_value is None:
             raise ValueError("past_key_value (KV cache tensor) must be provided")
 
-        # Empty start indices signal normal prefill with no existing KV cache.
-        kv_cache_start_idx = torch.empty(
-            0, dtype=torch.int32, device=hidden_states.device
-        )
+        if kvcache_start_index is None or kvcache_start_index.numel() == 0:
+            # Empty start indices signal fresh prefill with no existing KV cache.
+            kv_cache_start_idx = torch.empty(
+                0, dtype=torch.int32, device=hidden_states.device
+            )
+        else:
+            kv_cache_start_idx = kvcache_start_index.to(
+                device=hidden_states.device, dtype=torch.int32
+            )
 
         attn_out, updated_kv = torch.ops.tensorrt_edge_llm.xqa_attn.default(
             qkv,

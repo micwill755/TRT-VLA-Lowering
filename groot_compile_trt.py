@@ -31,12 +31,15 @@ from trt.packing import (
     PromptTensorInputs,
 )
 from trt.vision import GROOTVisualEmbed
-from trt.language import (
-    compile_language_trt_with_plugin,
+from trt.groot_context import (
     GROOTContextProjectionWrapper,
-    GROOTLanguageContextWrapper,
+    GROOTLanguageAdapter,
+    make_groot_context_projection,
+)
+from trt.language import (
+    compile_vla_lm_trt,
     language_head_dim,
-    make_plugin_lm_hidden_wrapper,
+    make_vla_plugin_causal_lm,
 )
 from trt.measure import (
     compare_full_groot_to_eager_actions,
@@ -367,60 +370,45 @@ def main() -> int:
         device=device,
         dtype=torch.float16,
     ).eval()
-    decoder = getattr(language_model, "model", language_model)
-    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
-        decoder,
-        language_model.config,
-        max_seq_len=int(trt_language_inputs.inputs_embeds.shape[1]),
+    lm_stack = getattr(language_model, "model", language_model)
+    cfg = language_model.config
+    lm_head = getattr(model.backbone.eagle_model, "lm_head", None)
+    language_max_seq_len = int(trt_language_inputs.inputs_embeds.shape[1])
+
+    causal_lm = make_vla_plugin_causal_lm(
+        lm_stack,
+        lm_head,
+        cfg,
+        max_seq_len=language_max_seq_len,
+        max_kv_capacity=language_max_seq_len,
         device=device,
         position_ids=None,
         enable_bidirectional_prefill=0,
-        return_prefix_kv=False,
-        log_prefix="groot",
+        export_hidden_states=True,
     )
-    context_projection = GROOTContextProjectionWrapper(
-        copy.deepcopy(model.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
-    )
-    plugin_language = GROOTLanguageContextWrapper(
-        hidden_lm_wrapper,
-        context_projection,
-    ).eval()
-    trt_language_model, trt_language_max_seq_len = compile_language_trt_with_plugin(
-        plugin_language,
+    context_projection = make_groot_context_projection(model, device=device, dtype=torch.float16)
+    trt_language_module = compile_vla_lm_trt(
+        causal_lm,
         trt_language_inputs.inputs_embeds,
-        num_layers=len(decoder.layers),
-        num_key_value_heads=int(language_model.config.num_key_value_heads),
-        head_dim=language_head_dim(language_model.config),
+        max_kv_capacity=language_max_seq_len,
         device=device,
         settings=TRT_SETTINGS,
     )
-
-    # Run plugin LM/context with eager vision embeddings.
-    eager_lm_inputs = eager_language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
-    eager_kv_caches = [
-        torch.zeros(
-            int(eager_lm_inputs.shape[0]),
-            2,  # key + value
-            int(language_model.config.num_key_value_heads),
-            trt_language_max_seq_len,
-            language_head_dim(language_model.config),
-            device=device,
-            dtype=eager_lm_inputs.dtype,
-        )
-        for _ in range(len(decoder.layers))
-    ]
-    eager_ctx_len = torch.full(
-        (eager_lm_inputs.shape[0],),
-        eager_lm_inputs.shape[1],
-        device=device,
-        dtype=torch.int32,
+    trt_language_model = GROOTLanguageAdapter(
+        trt_language_module,
+        context_projection,
+        max_kv_capacity=language_max_seq_len,
+        rope_cache=causal_lm.rope_cache,
+        config=cfg,
+        include_logits=lm_head is not None,
     )
+    trt_language_max_seq_len = language_max_seq_len
+
+    eager_lm_inputs = eager_language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
     trt_context_from_eager_vision = trt_language_model(
         eager_lm_inputs,
-        eager_kv_caches,
-        eager_ctx_len,
+        None,
+        None,
     )
 
     compare_groot_context(

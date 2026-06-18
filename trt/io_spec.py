@@ -140,3 +140,78 @@ def lm_to_action_slots_from_config(action_config: dict[str, Any]) -> tuple[tuple
     if not raw:
         return ()
     return tuple(tuple(pair) for pair in raw)
+
+
+@dataclass(frozen=True)
+class LMActionBinding:
+    """Maps LLMEngineRunner state to action-engine inputs."""
+
+    source: str  # "kv_cache" | "hidden_states" | "postprocess"
+    action_input: str
+    dtype: str | None = None
+    kv_axis: str | None = None  # e.g. "prefix_k" | "prefix_v" when source is kv_cache
+
+
+@dataclass(frozen=True)
+class VLAPipelineManifest:
+    """Runtime wiring manifest for VLA pipelines using LLMEngineRunner."""
+
+    model: str
+    lm_runtime: str
+    llm_dir: str
+    action_dir: str
+    vision_dir: str
+    lm_action_bindings: tuple[LMActionBinding, ...]
+    language_post_dir: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "lm_runtime": self.lm_runtime,
+            "llm_dir": self.llm_dir,
+            "vision_dir": self.vision_dir,
+            "action_dir": self.action_dir,
+            "lm_action_bindings": [
+                {
+                    "source": b.source,
+                    "action_input": b.action_input,
+                    **({"dtype": b.dtype} if b.dtype else {}),
+                    **({"kv_axis": b.kv_axis} if b.kv_axis else {}),
+                }
+                for b in self.lm_action_bindings
+            ],
+        }
+        if self.language_post_dir is not None:
+            payload["language_post_dir"] = self.language_post_dir
+        return payload
+
+
+def pi05_llm_runner_manifest(
+    *,
+    llm_dir: str = "llm",
+    vision_dir: str = "visual",
+    action_dir: str = "action",
+) -> dict[str, Any]:
+    """Manifest for PI0.5: extract prefix K/V from LinearKVCache after LM prefill."""
+    manifest = VLAPipelineManifest(
+        model="pi05",
+        lm_runtime="llm_engine_runner",
+        llm_dir=llm_dir,
+        vision_dir=vision_dir,
+        action_dir=action_dir,
+        lm_action_bindings=(
+            LMActionBinding(
+                source="kv_cache",
+                action_input="prefix_k",
+                kv_axis="prefix_k",
+                dtype="float16",
+            ),
+            LMActionBinding(
+                source="kv_cache",
+                action_input="prefix_v",
+                kv_axis="prefix_v",
+                dtype="float16",
+            ),
+        ),
+    )
+    return manifest.to_dict()
