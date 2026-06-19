@@ -187,4 +187,4 @@ class GROOTActionAdapter:
         context: ActionRolloutContext,
     ) -> torch.Tensor:
         dt = 1.0 / self.num_steps(context)
-        return actions + dt * model_output
+        return actions + dt * model_output.float()

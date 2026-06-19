@@ -29,7 +29,6 @@ from trt.language import (
     compile_language_trt_with_plugin,
     language_head_dim,
     make_plugin_lm_hidden_wrapper,
-    make_prefill_kvcache_start_index,
     pi05_plugin_lm_smoke_check,
     run_prefix_language_eager
 )
@@ -258,7 +257,7 @@ def main() -> int:
         language_model=lm,
         position_ids=compact_trt_prefix_position_ids,
     )
-    trt_kvcache_start_index = make_prefill_kvcache_start_index(device)
+    trt_kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     trt_hidden, trt_prefix_k, trt_prefix_v = trt_language_model(
         trt_prefix_embs,
         trt_rope,

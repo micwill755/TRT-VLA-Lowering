@@ -60,7 +60,6 @@ from trt.language import (
     language_edge_llm_config,
     language_head_dim,
     make_groot_language_context_wrapper,
-    make_prefill_last_token_ids,
     FlatKVLanguageEngineWrapper
 )
 from trt.rope import (
@@ -113,6 +112,11 @@ TRT_SETTINGS = {
 ACTION_TRT_SETTINGS = {
     **TRT_SETTINGS,
     "offload_module_to_cpu": True,
+    "use_fp32_acc": True,
+}
+
+VISION_TRT_SETTINGS = {
+    **TRT_SETTINGS,
     "use_fp32_acc": True,
 }
 
@@ -298,6 +302,7 @@ def save_visual_engine_for_edge_llm(
     model_type="vision",
     visual: nn.Module,
     io: PipelineIOSpec,
+    trt_settings=None,
 ):
     pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
 
@@ -338,6 +343,7 @@ def save_visual_engine_for_edge_llm(
                 "siglip_batch_size": batch_size,
                 "siglip_seq_len": seq_len,
             },
+            trt_settings=trt_settings,
         )
 
     finally:
@@ -406,7 +412,12 @@ def save_lm_engine_for_edge_llm(
         device=device,
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    last_token_ids = make_prefill_last_token_ids(batch_size, max_seq_len, device)
+    last_token_ids = torch.full(
+        (batch_size, 1),
+        max_seq_len - 1,
+        device=device,
+        dtype=torch.int64,
+    )
     sample_inputs = (
         input_embs,
         rope_rotary_cos_sin,
@@ -429,6 +440,7 @@ def save_lm_engine_for_edge_llm(
         component="language",
         input_names=input_names,
         output_names=list(io.language.output_names),
+        dual_optimization_profiles=True,
         example_output=(example_logits, example_context_embs),
         extra_config=language_edge_llm_config(
             cfg,
@@ -503,6 +515,65 @@ def save_action_diffusion_engine_for_edge_llm(
         },
     )
 
+@torch.no_grad()
+def run_serialized_groot_language(
+    engine_lm: SerializedGrootLanguage,
+    model: nn.Module,
+    language_inputs: PackedLanguageInputs,
+    device: torch.device,
+) -> torch.Tensor:
+    """Run an exported language.engine and return context_embs."""
+    lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+    language_model = model.backbone.eagle_model.language_model
+    decoder = getattr(language_model, "model", language_model)
+    cfg = language_model.config
+    max_seq_len = int(lm_inputs.shape[1])
+    language_head_dim_val = language_head_dim(cfg)
+
+    kv_caches = [
+        torch.zeros(
+            int(lm_inputs.shape[0]),
+            2,  # key + value
+            int(cfg.num_key_value_heads),
+            max_seq_len,
+            language_head_dim_val,
+            device=device,
+            dtype=lm_inputs.dtype,
+        )
+        for _ in range(len(decoder.layers))
+    ]
+    ctx_len = torch.full(
+        (lm_inputs.shape[0],),
+        lm_inputs.shape[1],
+        device=device,
+        dtype=torch.int32,
+    )
+    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+        cfg,
+        max_seq_len,
+        device,
+        language_model=language_model,
+        position_ids=language_inputs.position_ids,
+    )
+    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
+    last_token_ids = torch.full(
+        (int(lm_inputs.shape[0]), 1),
+        int(lm_inputs.shape[1]) - 1,
+        device=device,
+        dtype=torch.int64,
+    )
+    lm_out = engine_lm(
+        lm_inputs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        last_token_ids,
+        kv_caches,
+    )
+    if isinstance(lm_out, tuple):
+        return lm_out[1]
+    return lm_out
+
 def save_edge_engines_for_edge_llm(
     model: nn.Module,
     policy: Any,
@@ -563,7 +634,7 @@ def save_edge_engines_for_edge_llm(
     )
 
     engine_dir = str(pathlib.Path(engine_root) / "visual")
-    trt_vision = save_visual_engine_for_edge_llm(
+    save_visual_engine_for_edge_llm(
         model,
         pixel_values,
         engine_dir,
@@ -571,25 +642,27 @@ def save_edge_engines_for_edge_llm(
         dtype=torch.float16,
         visual=visual,
         io=io,
+        trt_settings=VISION_TRT_SETTINGS,
     )
+
+    vision_runner = SerializedGrootVision(SerializedTRTEngine(engine_dir))
+    with torch.no_grad():
+        trt_image_embs = vision_runner(pixel_values)
 
     # -------------------------
     # Language/context engine
     # -------------------------
     print("compiling language")
 
-    with torch.no_grad():
-        eager_image_embs = visual(pixel_values)
-
     language_inputs = build_language_inputs(
         model,
-        eager_image_embs,
+        trt_image_embs,
         input_ids,
         attention_mask,
     )
 
     language_engine_dir = str(pathlib.Path(engine_root) / "language")
-    trt_lm = save_lm_engine_for_edge_llm(
+    save_lm_engine_for_edge_llm(
         model,
         language_inputs.inputs_embeds,
         language_engine_dir,
@@ -598,19 +671,20 @@ def save_edge_engines_for_edge_llm(
         dtype=torch.float16,
         io=io,
     )
-    
+
+    language_runner = SerializedGrootLanguage(SerializedTRTEngine(language_engine_dir))
+    with torch.no_grad():
+        context_embs = run_serialized_groot_language(
+            language_runner,
+            model,
+            language_inputs,
+            torch.device(device),
+        )
+
     # -------------------------
     # Action/diffusion engine
     # -------------------------
     print("compiling action diffusion")
-
-    with torch.no_grad():
-        context_embs, _, _, _ = build_context_inputs(
-            model,
-            eager_image_embs,
-            input_ids,
-            attention_mask,
-        )
 
     action_engine_dir = str(pathlib.Path(engine_root) / "action")
     trt_diffusion = save_action_diffusion_engine_for_edge_llm(
@@ -631,7 +705,7 @@ def save_edge_engines_for_edge_llm(
         pixel_values=pixel_values,
         input_ids=input_ids,
         language_inputs=language_inputs,
-        visual_embeds=eager_image_embs,
+        visual_embeds=trt_image_embs,
         context_embs=context_embs,
         state=state,
         embodiment_id=embodiment_id,
@@ -644,9 +718,9 @@ def save_edge_engines_for_edge_llm(
         "vision_engine_dir": str(pathlib.Path(engine_root) / "visual"),
         "language_engine_dir": language_engine_dir,
         "action_engine_dir": action_engine_dir,
-        "vision_engine": str(trt_vision),
-        "language_engine": str(trt_lm),
-        "diffusion_engine": str(trt_diffusion),
+        "vision_engine": str(pathlib.Path(engine_dir) / "visual.engine"),
+        "language_engine": str(pathlib.Path(language_engine_dir) / "language.engine"),
+        "diffusion_engine": str(pathlib.Path(action_engine_dir) / "diffusion.engine"),
         "language_seq_len": int(language_inputs.inputs_embeds.shape[1]),
         "context_seq_len": int(context_embs.shape[1]),
         "context_hidden_size": int(context_embs.shape[2]),
@@ -656,7 +730,7 @@ def save_edge_engines_for_edge_llm(
         **io.to_plugin_info(),
     }
 
-    return trt_vision, trt_lm, trt_diffusion, plugin_info
+    return None, None, trt_diffusion, plugin_info
 
 
 def compile_trt_with_plugin(
@@ -706,6 +780,11 @@ def compile_trt_with_plugin(
     plugin_settings = {
         **TRT_SETTINGS,
         "use_python_runtime": True,
+        "use_fp32_acc": True,
+    }
+    vision_settings = {
+        **VISION_TRT_SETTINGS,
+        "use_python_runtime": True,
     }
     action_settings = {
         **ACTION_TRT_SETTINGS,
@@ -741,7 +820,7 @@ def compile_trt_with_plugin(
         trt_vision = compile_trt_module(
             visual,
             (pixel_values,),
-            plugin_settings,
+            vision_settings,
         )
     finally:
         if patched:
@@ -826,10 +905,11 @@ def compile_trt_with_plugin(
             position_ids=language_inputs.position_ids,
         )
         kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-        last_token_ids = make_prefill_last_token_ids(
-            int(lm_inputs.shape[0]),
-            int(lm_inputs.shape[1]),
-            device,
+        last_token_ids = torch.full(
+            (int(lm_inputs.shape[0]), 1),
+            int(lm_inputs.shape[1]) - 1,
+            device=device,
+            dtype=torch.int64,
         )
         _, trt_context_embs = trt_lm(
             lm_inputs,
@@ -840,6 +920,19 @@ def compile_trt_with_plugin(
             kv_caches,
         )
         trt_context_embs = trt_context_embs.to(device=device, dtype=torch.float16)
+
+        if accuracy_check:
+            eager_context_embs, _, _, _ = build_context_inputs(
+                model,
+                trt_image_embs,
+                input_ids,
+                attention_mask,
+            )
+            tensor_error_metrics(
+                "groot TRT vs eager language context (TRT vision)",
+                trt_context_embs,
+                eager_context_embs.to(device=device, dtype=torch.float16),
+            )
 
     # -------------------------
     # Action/diffusion engine
@@ -889,6 +982,7 @@ def run_inference_pytorch_groot(
     *,
     seed: int,
     device: torch.device,
+    vision_module=None,
 ) -> tuple[torch.Tensor, dict, float]:
     torch.manual_seed(seed)
     if device.type == "cuda":
@@ -905,6 +999,7 @@ def run_inference_pytorch_groot(
         max_state_dim=policy.config.max_state_dim,
         device=device,
     )
+    state = state.to(device=device, dtype=torch.float16)
 
     embodiment_tag = getattr(policy.config, "embodiment_tag", "new_embodiment")
     embodiment_id = torch.full(
@@ -917,12 +1012,15 @@ def run_inference_pytorch_groot(
     start_time = time.perf_counter()
 
     with torch.autocast("cuda", dtype=torch.float16):
-        image_embs = make_visual_fixed_input(
-            model,
-            pixel_values,
-            device=device,
-            dtype=torch.float16,
-        )(pixel_values)
+        if vision_module is None:
+            image_embs = make_visual_fixed_input(
+                model,
+                pixel_values,
+                device=device,
+                dtype=torch.float16,
+            )(pixel_values)
+        else:
+            image_embs = vision_module(pixel_values)
 
         context_embs, _, _, _ = build_context_inputs(
             model,
@@ -1045,11 +1143,13 @@ def run_inference_trt_plugin(
         position_ids=language_inputs.position_ids,
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    last_token_ids = make_prefill_last_token_ids(
-        int(lm_inputs.shape[0]),
-        int(lm_inputs.shape[1]),
-        device,
+    last_token_ids = torch.full(
+        (int(lm_inputs.shape[0]), 1),
+        int(lm_inputs.shape[1]) - 1,
+        device=device,
+        dtype=torch.int64,
     )
+
     lm_out = trt_lm(
         lm_inputs,
         rope_rotary_cos_sin,
@@ -1380,6 +1480,28 @@ def main() -> int:
     engine_action_ades: list[float] = []
     engine_actionmean_abs: list[float] = []
 
+    pt_ref_for_trt = None
+    if trt_vision is not None:
+        pt_ref_for_trt, _, _ = run_inference_pytorch_groot(
+            model,
+            policy,
+            create_inputs_fn,
+            seed=args.seed,
+            device=device,
+            vision_module=trt_vision,
+        )
+
+    pt_ref_for_engine = None
+    if engine_vision is not None:
+        pt_ref_for_engine, _, _ = run_inference_pytorch_groot(
+            model,
+            policy,
+            create_inputs_fn,
+            seed=args.seed,
+            device=device,
+            vision_module=engine_vision,
+        )
+
     for i in range(args.num_iterations):
         print(f"\n=== iter {i} ===", flush=True)
 
@@ -1426,8 +1548,12 @@ def main() -> int:
             trt_elapsed = 1000 * (time.perf_counter() - t)
             trt_times.append(trt_elapsed)
 
-            if pred_actions_pt is not None:
-                trt_metrics = compute_groot_policy_action_metrics(pred_actions_trt, pred_actions_pt, policy)
+            if pt_ref_for_trt is not None:
+                trt_metrics = compute_groot_policy_action_metrics(
+                    pred_actions_trt,
+                    pt_ref_for_trt,
+                    policy,
+                )
                 action_ades.append(trt_metrics["action_ade"])
                 actionmean_abs.append(trt_metrics["mean_abs"])
                 print(f"  TRT Plugin : {trt_elapsed:7.1f} ms   actionADE={trt_metrics['action_ade']:.6f}  mean_abs={trt_metrics['mean_abs']:.6f}")
@@ -1457,8 +1583,12 @@ def main() -> int:
             engine_elapsed = 1000 * (time.perf_counter() - t)
             engine_times.append(engine_elapsed)
 
-            if pred_actions_pt is not None:
-                engine_metrics = compute_groot_policy_action_metrics(pred_actions_engine, pred_actions_pt, policy)
+            if pt_ref_for_engine is not None:
+                engine_metrics = compute_groot_policy_action_metrics(
+                    pred_actions_engine,
+                    pt_ref_for_engine,
+                    policy,
+                )
                 engine_action_ades.append(engine_metrics["action_ade"])
                 engine_actionmean_abs.append(engine_metrics["mean_abs"])
                 print(f"  Serialized : {engine_elapsed:7.1f} ms   actionADE={engine_metrics['action_ade']:.6f}  mean_abs={engine_metrics['mean_abs']:.6f}")

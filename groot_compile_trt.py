@@ -35,8 +35,6 @@ from trt.language import (
     compile_language_trt_with_plugin,
     language_head_dim,
     make_groot_language_context_wrapper,
-    make_prefill_kvcache_start_index,
-    make_prefill_last_token_ids,
 )
 from trt.rope import (
     make_dummy_rope_rotary_cos_sin,
@@ -418,11 +416,12 @@ def main() -> int:
         language_model=language_model,
         position_ids=eager_language_inputs.position_ids,
     )
-    eager_kvcache_start_index = make_prefill_kvcache_start_index(device)
-    eager_last_token_ids = make_prefill_last_token_ids(
-        int(eager_lm_inputs.shape[0]),
-        int(eager_lm_inputs.shape[1]),
-        device,
+    eager_kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
+    eager_last_token_ids = torch.full(
+        (int(eager_lm_inputs.shape[0]), 1),
+        int(eager_lm_inputs.shape[1]) - 1,
+        device=device,
+        dtype=torch.int64,
     )
     _, trt_context_from_eager_vision = trt_language_model(
         eager_lm_inputs,
@@ -476,11 +475,12 @@ def main() -> int:
         language_model=language_model,
         position_ids=trt_language_inputs.position_ids,
     )
-    trt_kvcache_start_index = make_prefill_kvcache_start_index(device)
-    trt_last_token_ids = make_prefill_last_token_ids(
-        int(trt_lm_inputs.shape[0]),
-        int(trt_lm_inputs.shape[1]),
-        device,
+    trt_kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
+    trt_last_token_ids = torch.full(
+        (int(trt_lm_inputs.shape[0]), 1),
+        int(trt_lm_inputs.shape[1]) - 1,
+        device=device,
+        dtype=torch.int64,
     )
     _, trt_context_embs = trt_language_model(
         trt_lm_inputs,

@@ -83,6 +83,7 @@ def save_trt_engine_module(
     example_output=None,
     extra_config=None,
     trt_settings=None,
+    dual_optimization_profiles=False,
 ):
     module = module.eval()
     sample_inputs = tuple(sample_inputs)
@@ -122,11 +123,23 @@ def save_trt_engine_module(
     if trt_settings:
         settings.update(trt_settings)
 
-    engine_bytes = torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(
-        exported,
-        inputs=input_specs,
-        **settings,
-    )
+    from torch_tensorrt.dynamo.conversion import _TRTInterpreter as trt_interpreter
+
+    prev_output_names = trt_interpreter.OUTPUT_NAMES_OVERRIDE
+    prev_dual_profiles = trt_interpreter.FORCE_DUAL_OPTIMIZATION_PROFILES
+    try:
+        trt_interpreter.OUTPUT_NAMES_OVERRIDE = (
+            list(output_names) if output_names else None
+        )
+        trt_interpreter.FORCE_DUAL_OPTIMIZATION_PROFILES = dual_optimization_profiles
+        engine_bytes = torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(
+            exported,
+            inputs=input_specs,
+            **settings,
+        )
+    finally:
+        trt_interpreter.OUTPUT_NAMES_OVERRIDE = prev_output_names
+        trt_interpreter.FORCE_DUAL_OPTIMIZATION_PROFILES = prev_dual_profiles
 
     engine_path.write_bytes(engine_bytes)
 
