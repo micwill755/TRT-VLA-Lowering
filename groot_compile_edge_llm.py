@@ -59,11 +59,11 @@ from trt.language import (
     GROOTLanguageContextWrapper,
     language_edge_llm_config,
     language_head_dim,
-    make_dummy_rope_rotary_cos_sin,
-    make_prefill_kvcache_start_index,
-    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
     FlatKVLanguageEngineWrapper
+)
+from trt.rope import (
+    make_rope_rotary_cos_sin,
 )
 from trt.measure import (
     mean,
@@ -407,8 +407,15 @@ def save_lm_engine_for_edge_llm(
     )
 
     wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
-    rope_rotary_cos_sin = make_dummy_rope_rotary_cos_sin(max_seq_len, head_dim, device)
-    kvcache_start_index = make_prefill_kvcache_start_index(device)
+    # Placeholder RoPE cache for export/compile tracing (values are ignored).
+    rope_rotary_cos_sin = torch.randn(
+        1,
+        int(max_seq_len),
+        int(head_dim),
+        dtype=torch.float32,
+        device=device,
+    )
+    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     sample_inputs = (
         input_embs,
         rope_rotary_cos_sin,
@@ -833,7 +840,7 @@ def compile_trt_with_plugin(
             language_model=language_model,
             position_ids=language_inputs.position_ids,
         )
-        kvcache_start_index = make_prefill_kvcache_start_index(device)
+        kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
         trt_context_embs = trt_lm(
             lm_inputs,
             rope_rotary_cos_sin,
@@ -1045,7 +1052,7 @@ def run_inference_trt_plugin(
         language_model=language_model,
         position_ids=language_inputs.position_ids,
     )
-    kvcache_start_index = make_prefill_kvcache_start_index(device)
+    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     context_embs = trt_lm(
         lm_inputs,
         rope_rotary_cos_sin,

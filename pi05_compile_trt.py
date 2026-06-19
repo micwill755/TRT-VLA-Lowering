@@ -28,12 +28,12 @@ from trt.vision import PI05VisualEmbed
 from trt.language import (
     compile_language_trt_with_plugin,
     language_head_dim,
-    make_prefill_kvcache_start_index,
-    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
+    make_prefill_kvcache_start_index,
     pi05_plugin_lm_smoke_check,
     run_prefix_language_eager
 )
+from trt.rope import make_rope_rotary_cos_sin
 from trt.plugin_utils import (
     load_plugin,
     patch_vision_attention,  

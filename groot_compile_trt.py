@@ -36,10 +36,12 @@ from trt.language import (
     GROOTContextProjectionWrapper,
     GROOTLanguageContextWrapper,
     language_head_dim,
-    make_dummy_rope_rotary_cos_sin,
-    make_prefill_kvcache_start_index,
-    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
+    make_prefill_kvcache_start_index,
+)
+from trt.rope import (
+    make_dummy_rope_rotary_cos_sin,
+    make_rope_rotary_cos_sin,
 )
 from trt.measure import (
     compare_full_groot_to_eager_actions,

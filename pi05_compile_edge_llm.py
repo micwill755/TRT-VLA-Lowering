@@ -30,12 +30,14 @@ from trt.language import (
     compile_language_trt_with_plugin,
     language_edge_llm_config,
     language_head_dim,
-    make_dummy_rope_rotary_cos_sin,
-    make_prefill_kvcache_start_index,
-    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
+    make_prefill_kvcache_start_index,
     pi05_plugin_lm_smoke_check,
     run_prefix_language_eager,
+)
+from trt.rope import (
+    make_dummy_rope_rotary_cos_sin,
+    make_rope_rotary_cos_sin,
 )
 from trt.measure import (
     compare_action_step,
