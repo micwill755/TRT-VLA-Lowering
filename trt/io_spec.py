@@ -19,7 +19,7 @@ class PipelineIOSpec:
 
     def language_input_names(self, num_kv_caches: int) -> list[str]:
         return list(self.language.input_names) + [
-            f"kv_cache_{i}" for i in range(num_kv_caches)
+            f"past_key_values_{i}" for i in range(num_kv_caches)
         ]
 
     def wire_lm_outputs_to_action(
@@ -54,7 +54,7 @@ GROOT_EDGE_IO = PipelineIOSpec(
         output_names=("visual_embeds",),
     ),
     language=ComponentIOSpec(
-        input_names=("inputs_embeds", "ctx_len"),
+        input_names=("inputs_embeds", "rope_rotary_cos_sin", "context_lengths", "kvcache_start_index"),
         output_names=("context_embs",),
     ),
     action=ComponentIOSpec(
@@ -76,7 +76,7 @@ PI05_EDGE_IO = PipelineIOSpec(
         output_names=("image_embeds",),
     ),
     language=ComponentIOSpec(
-        input_names=("inputs_embeds", "ctx_len"),
+        input_names=("inputs_embeds", "rope_rotary_cos_sin", "context_lengths", "kvcache_start_index"),
         output_names=("hidden_states", "prefix_k", "prefix_v"),
     ),
     action=ComponentIOSpec(

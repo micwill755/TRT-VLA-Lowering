@@ -28,7 +28,11 @@ from trt.diffusion import StaticActionVelocityStep, PI05PrefixKVStepEncoder
 from trt.language import (
     FlatKVLanguageEngineWrapper,
     compile_language_trt_with_plugin,
+    language_edge_llm_config,
     language_head_dim,
+    make_dummy_rope_rotary_cos_sin,
+    make_prefill_kvcache_start_index,
+    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
     pi05_plugin_lm_smoke_check,
     run_prefix_language_eager,
@@ -367,10 +371,17 @@ def save_lm_engine_for_edge_llm(
         dtype=torch.int32,
     )
 
+    rope_rotary_cos_sin = make_dummy_rope_rotary_cos_sin(
+        max_seq_len, language_head_dim(cfg), device
+    )
+    kvcache_start_index = make_prefill_kvcache_start_index(device)
+
     wrapper = FlatKVLanguageEngineWrapper(lm_wrapper).to(device=device).eval()
     sample_inputs = (
         prefix_embs,
+        rope_rotary_cos_sin,
         ctx_len.contiguous(),
+        kvcache_start_index,
         *[kv.contiguous() for kv in kv_caches],
     )
 
@@ -389,15 +400,11 @@ def save_lm_engine_for_edge_llm(
         input_names=input_names,
         output_names=list(io.language.output_names),
         example_output=example_output,
-        extra_config={
-            "max_seq_len": max_seq_len,
-            "batch_size": batch_size,
-            "num_layers": int(cfg.num_hidden_layers),
-            "hidden_size": int(cfg.hidden_size),
-            "num_attention_heads": int(cfg.num_attention_heads),
-            "num_key_value_heads": int(cfg.num_key_value_heads),
-            "head_dim": int(cfg.head_dim),
-        },
+        extra_config=language_edge_llm_config(
+            cfg,
+            max_seq_len=max_seq_len,
+            batch_size=batch_size,
+        ),
     )
 
 def save_action_diffusion_engine_for_edge_llm(
@@ -665,10 +672,20 @@ def compile_trt_with_plugin(
         device=device,
         dtype=torch.int32,
     )
+    trt_rope = make_rope_rotary_cos_sin(
+        cfg,
+        language_max_seq_len,
+        device,
+        language_model=lm,
+        position_ids=trt_prefix.position_ids,
+    )
+    trt_kvcache_start_index = make_prefill_kvcache_start_index(device)
     trt_hidden, trt_prefix_k, trt_prefix_v = trt_lm(
         trt_prefix_embs,
-        trt_kv_caches,
+        trt_rope,
         trt_ctx_len,
+        trt_kvcache_start_index,
+        trt_kv_caches,
     )
 
     if accuracy_check:
@@ -938,7 +955,8 @@ def run_inference_trt_plugin(
     )
 
     prefix_embs = prefix.inputs_embeds.to(device=device, dtype=torch.float16)
-    cfg = core.paligemma_with_expert.paligemma.model.language_model.config
+    lm = core.paligemma_with_expert.paligemma.model.language_model
+    cfg = lm.config
     kv_caches = [
         torch.zeros(
             int(prefix_embs.shape[0]),
@@ -957,7 +975,21 @@ def run_inference_trt_plugin(
         device=device,
         dtype=torch.int32,
     )
-    _, prefix_k, prefix_v = trt_lm(prefix_embs, kv_caches, ctx_len)
+    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+        cfg,
+        int(plugin_info["language_max_seq_len"]),
+        device,
+        language_model=lm,
+        position_ids=prefix.position_ids,
+    )
+    kvcache_start_index = make_prefill_kvcache_start_index(device)
+    _, prefix_k, prefix_v = trt_lm(
+        prefix_embs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        kv_caches,
+    )
 
     noise = make_pi05_noise(core, tokens.shape[0], device)
     actions = sample_actions_raw(

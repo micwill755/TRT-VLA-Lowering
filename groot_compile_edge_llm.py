@@ -57,7 +57,11 @@ from trt.language import (
     compile_language_trt_with_plugin,
     GROOTContextProjectionWrapper,
     GROOTLanguageContextWrapper,
+    language_edge_llm_config,
     language_head_dim,
+    make_dummy_rope_rotary_cos_sin,
+    make_prefill_kvcache_start_index,
+    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
     FlatKVLanguageEngineWrapper
 )
@@ -403,13 +407,15 @@ def save_lm_engine_for_edge_llm(
     )
 
     wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
-
+    rope_rotary_cos_sin = make_dummy_rope_rotary_cos_sin(max_seq_len, head_dim, device)
+    kvcache_start_index = make_prefill_kvcache_start_index(device)
     sample_inputs = (
-        input_embs.to(device=device, dtype=dtype).contiguous(),
-        ctx_len.contiguous(),
-        *[kv.contiguous() for kv in kv_caches],
+        input_embs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        *kv_caches,
     )
-
     input_names = io.language_input_names(len(kv_caches))
 
     return save_trt_engine_module(
@@ -421,15 +427,12 @@ def save_lm_engine_for_edge_llm(
         component="language",
         input_names=input_names,
         output_names=list(io.language.output_names),
-        extra_config={
-            "max_seq_len": max_seq_len,
-            "batch_size": batch_size,
-            "num_layers": len(kv_caches),
-            "hidden_size": cfg.hidden_size,
-            "num_attention_heads": cfg.num_attention_heads,
-            "num_key_value_heads": cfg.num_key_value_heads,
-            "head_dim": head_dim,
-        },
+        extra_config=language_edge_llm_config(
+            cfg,
+            max_seq_len=max_seq_len,
+            batch_size=batch_size,
+            num_layers=len(kv_caches),
+        ),
     )
 
 def save_action_diffusion_engine_for_edge_llm(
@@ -801,6 +804,7 @@ def compile_trt_with_plugin(
         max_seq_len=language_max_seq_len,
     )
     language_max_seq_len = int(trt_max_seq_len)
+    language_head_dim_val = language_head_dim(cfg)
 
     with torch.no_grad():
         lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
@@ -810,7 +814,7 @@ def compile_trt_with_plugin(
                 2,  # key + value
                 int(cfg.num_key_value_heads),
                 language_max_seq_len,
-                language_head_dim(cfg),
+                language_head_dim_val,
                 device=device,
                 dtype=lm_inputs.dtype,
             )
@@ -822,7 +826,21 @@ def compile_trt_with_plugin(
             device=device,
             dtype=torch.int32,
         )
-        trt_context_embs = trt_lm(lm_inputs, kv_caches, ctx_len).to(device=device, dtype=torch.float16)
+        rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+            cfg,
+            language_max_seq_len,
+            device,
+            language_model=language_model,
+            position_ids=language_inputs.position_ids,
+        )
+        kvcache_start_index = make_prefill_kvcache_start_index(device)
+        trt_context_embs = trt_lm(
+            lm_inputs,
+            rope_rotary_cos_sin,
+            ctx_len,
+            kvcache_start_index,
+            kv_caches,
+        ).to(device=device, dtype=torch.float16)
 
     # -------------------------
     # Action/diffusion engine
@@ -855,6 +873,7 @@ def compile_trt_with_plugin(
 
     plugin_info = {
         "language_max_seq_len": language_max_seq_len,
+        "language_head_dim": language_head_dim_val,
         "context_seq_len": int(trt_context_embs.shape[1]),
         "context_hidden_size": int(trt_context_embs.shape[2]),
         "state_shape": list(state.shape),
@@ -1019,7 +1038,21 @@ def run_inference_trt_plugin(
         device=device,
         dtype=torch.int32,
     )
-    context_embs = trt_lm(lm_inputs, kv_caches, ctx_len).to(device=device, dtype=torch.float16)
+    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+        cfg,
+        int(plugin_info["language_max_seq_len"]),
+        device,
+        language_model=language_model,
+        position_ids=language_inputs.position_ids,
+    )
+    kvcache_start_index = make_prefill_kvcache_start_index(device)
+    context_embs = trt_lm(
+        lm_inputs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        kv_caches,
+    ).to(device=device, dtype=torch.float16)
 
     noise = torch.randn(
         context_embs.shape[0],
@@ -1226,7 +1259,6 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--debug", action="store_true", help="Enable extra debug logging/checks.")
     parser.add_argument("--no-accuracy-check", action="store_true", help="Skip eager-vs-TRT accuracy checks.")
-    parser.add_argument("--skip-export", action="store_true", help="Skip Edge engine export.")
     parser.add_argument("--skip-pytorch", action="store_true", help="Skip eager PyTorch action rollout.")
     parser.add_argument("--skip-trt", action="store_true", help="Skip Python TRT plugin action rollout.")
     parser.add_argument("--skip-engine", action="store_true", help="Skip Python serialized .engine action rollout.")
@@ -1298,23 +1330,20 @@ def main() -> int:
         )
 
     if not args.skip_engine or not args.skip_edge:
-        if args.skip_export:
-            serialized_engine_info = {"engine_root": args.engine_dir}
-        else:
-            _, _, _, serialized_engine_info = save_edge_engines_for_edge_llm(
-                model,
-                policy,
-                device,
-                compile_inputs,
-                seed=args.seed,
-                max_generation_length=args.max_generation_length,
-                num_traj_samples=args.num_traj_samples,
-                max_seq_len=args.max_seq_len,
-                debug=args.debug,
-                accuracy_check=not args.no_accuracy_check,
-                engine_root=args.engine_dir,
-                io=GROOT_EDGE_IO,
-            )
+        _, _, _, serialized_engine_info = save_edge_engines_for_edge_llm(
+            model,
+            policy,
+            device,
+            compile_inputs,
+            seed=args.seed,
+            max_generation_length=args.max_generation_length,
+            num_traj_samples=args.num_traj_samples,
+            max_seq_len=args.max_seq_len,
+            debug=args.debug,
+            accuracy_check=not args.no_accuracy_check,
+            engine_root=args.engine_dir,
+            io=GROOT_EDGE_IO,
+        )
         edge_plugin_info = serialized_engine_info
 
     engine_vision = engine_lm = engine_diffusion = engine_info = None

@@ -36,6 +36,9 @@ from trt.language import (
     GROOTContextProjectionWrapper,
     GROOTLanguageContextWrapper,
     language_head_dim,
+    make_dummy_rope_rotary_cos_sin,
+    make_prefill_kvcache_start_index,
+    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
 )
 from trt.measure import (
@@ -396,6 +399,7 @@ def main() -> int:
         device=device,
         settings=TRT_SETTINGS,
     )
+    lm_head_dim = language_head_dim(language_model.config)
 
     # Run plugin LM/context with eager vision embeddings.
     eager_lm_inputs = eager_language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
@@ -417,10 +421,20 @@ def main() -> int:
         device=device,
         dtype=torch.int32,
     )
+    eager_rope = make_rope_rotary_cos_sin(
+        language_model.config,
+        trt_language_max_seq_len,
+        device,
+        language_model=language_model,
+        position_ids=eager_language_inputs.position_ids,
+    )
+    eager_kvcache_start_index = make_prefill_kvcache_start_index(device)
     trt_context_from_eager_vision = trt_language_model(
         eager_lm_inputs,
-        eager_kv_caches,
+        eager_rope,
         eager_ctx_len,
+        eager_kvcache_start_index,
+        eager_kv_caches,
     )
 
     compare_groot_context(
@@ -459,10 +473,20 @@ def main() -> int:
         device=device,
         dtype=torch.int32,
     )
+    trt_rope = make_rope_rotary_cos_sin(
+        language_model.config,
+        trt_language_max_seq_len,
+        device,
+        language_model=language_model,
+        position_ids=trt_language_inputs.position_ids,
+    )
+    trt_kvcache_start_index = make_prefill_kvcache_start_index(device)
     trt_context_embs = trt_language_model(
         trt_lm_inputs,
-        trt_kv_caches,
+        trt_rope,
         trt_ctx_len,
+        trt_kvcache_start_index,
+        trt_kv_caches,
     )
 
     compare_groot_context(

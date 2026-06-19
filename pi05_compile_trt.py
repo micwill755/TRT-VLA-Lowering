@@ -28,6 +28,8 @@ from trt.vision import PI05VisualEmbed
 from trt.language import (
     compile_language_trt_with_plugin,
     language_head_dim,
+    make_prefill_kvcache_start_index,
+    make_rope_rotary_cos_sin,
     make_plugin_lm_hidden_wrapper,
     pi05_plugin_lm_smoke_check,
     run_prefix_language_eager
@@ -249,10 +251,20 @@ def main() -> int:
         device=device,
         dtype=torch.int32,
     )
+    trt_rope = make_rope_rotary_cos_sin(
+        cfg,
+        trt_max_seq_len,
+        device,
+        language_model=lm,
+        position_ids=compact_trt_prefix_position_ids,
+    )
+    trt_kvcache_start_index = make_prefill_kvcache_start_index(device)
     trt_hidden, trt_prefix_k, trt_prefix_v = trt_language_model(
         trt_prefix_embs,
-        trt_kv_caches,
+        trt_rope,
         trt_ctx_len,
+        trt_kvcache_start_index,
+        trt_kv_caches,
     )
 
     # Smoke-check the plugin language output with logits and KV-cache comparisons.

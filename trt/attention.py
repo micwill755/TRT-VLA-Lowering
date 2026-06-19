@@ -1,7 +1,5 @@
-import os
 from typing import Any, Optional, Tuple
 
-import tensorrt as trt
 import torch
 import torch.nn as nn
 
@@ -22,7 +20,6 @@ class PluginAttention(nn.Module):
         original_attn: nn.Module,
         config: Any,
         layer_idx: int,
-        rope_cache: torch.Tensor,
         enable_bidirectional_prefill: int = 1,
     ):
         """
@@ -32,7 +29,7 @@ class PluginAttention(nn.Module):
             original_attn: The original attention module to wrap.
             config: Model configuration.
             layer_idx: Index of this layer in the model.
-            rope_cache: Pre-computed RoPE cache tensor.
+            enable_bidirectional_prefill: Whether to enable bidirectional prefill.
         """
         super().__init__()
         self.q_proj = original_attn.q_proj
@@ -58,15 +55,16 @@ class PluginAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.layer_idx = layer_idx
         self.enable_bidirectional_prefill = int(enable_bidirectional_prefill)
-        self.register_buffer("rope_cache", rope_cache)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         past_key_value: Optional[torch.Tensor] = None,
         ctx_len: Optional[torch.Tensor] = None,
+        kvcache_start_index: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -74,15 +72,26 @@ class PluginAttention(nn.Module):
 
         Args:
             hidden_states: Input tensor of shape [batch, seq_len, hidden_size].
+            rope_rotary_cos_sin: External RoPE cache of shape
+                [rope_batch, max_seq_len, rotary_dim] (float32). For standard
+                RoPE, rope_batch is typically 1 and the plugin broadcasts over
+                batch. Layout: cos in [:, :, :rotary_dim // 2], sin in
+                [:, :, rotary_dim // 2:]. Supplied at export as a graph input;
+                at runtime filled by LLMEngineRunner (not computed here).
             attention_mask: Unused (plugin handles masking internally).
-            position_ids: Position IDs (unused, plugin uses RoPE cache).
+            position_ids: Unused; RoPE lookup uses rope_rotary_cos_sin and ctx_len.
             past_key_value: KV cache tensor of shape [batch, 2, num_kv_heads, capacity, head_dim].
             ctx_len: Context length tensor for each batch item.
+            kvcache_start_index: External KV cache start indices. Empty tensor
+                ``[0]`` for fresh prefill; ``[batch]`` for decode/chunked prefill.
 
         Returns:
             Tuple of (output tensor, updated KV cache).
         """
         batch_size, seq_len, _ = hidden_states.shape
+
+        # Ensure rope embeddings are FP32
+        assert rope_rotary_cos_sin.dtype == torch.float32, "rope_rotary_cos_sin must be FP32"
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -108,22 +117,18 @@ class PluginAttention(nn.Module):
                 [seq_len], dtype=torch.int32, device=hidden_states.device
             ).expand(batch_size)
 
-        rope_fp32 = self.rope_cache.float()
-
         if past_key_value is None:
             raise ValueError("past_key_value (KV cache tensor) must be provided")
 
-        # Empty start indices signal normal prefill with no existing KV cache.
-        kv_cache_start_idx = torch.empty(
-            0, dtype=torch.int32, device=hidden_states.device
-        )
+        if kvcache_start_index is None:
+            raise ValueError("kvcache_start_index must be provided")
 
         attn_out, updated_kv = torch.ops.tensorrt_edge_llm.xqa_attn.default(
             qkv,
             past_key_value,
             ctx_len,
-            rope_fp32,
-            kv_cache_start_idx,
+            rope_rotary_cos_sin,
+            kvcache_start_index,
             self.num_heads,
             self.num_key_value_heads,
             self.head_dim,

@@ -210,14 +210,23 @@ class SerializedGrootLanguage:
         self.engine = engine
         self.max_seq_len = int(engine.config["max_seq_len"])
 
-    def __call__(self, input_embs, kv_caches, ctx_len):
+    def __call__(
+        self,
+        input_embs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        kv_caches,
+    ):
         inputs = {
             "inputs_embeds": input_embs,
-            "ctx_len": ctx_len,
+            "rope_rotary_cos_sin": rope_rotary_cos_sin,
+            "context_lengths": ctx_len,
+            "kvcache_start_index": kvcache_start_index,
         }
 
         for i, kv_cache in enumerate(kv_caches):
-            inputs[f"kv_cache_{i}"] = kv_cache
+            inputs[f"past_key_values_{i}"] = kv_cache
 
         return self.engine(inputs)[0]
 
@@ -272,14 +281,23 @@ class SerializedPI05Language:
         self.engine = engine
         self.max_seq_len = int(engine.config["max_seq_len"])
 
-    def __call__(self, input_embs, kv_caches, ctx_len):
+    def __call__(
+        self,
+        input_embs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        kv_caches,
+    ):
         inputs = {
             "inputs_embeds": input_embs,
-            "ctx_len": ctx_len,
+            "rope_rotary_cos_sin": rope_rotary_cos_sin,
+            "context_lengths": ctx_len,
+            "kvcache_start_index": kvcache_start_index,
         }
 
         for i, kv_cache in enumerate(kv_caches):
-            inputs[f"kv_cache_{i}"] = kv_cache
+            inputs[f"past_key_values_{i}"] = kv_cache
 
         return self.engine(inputs)
 
