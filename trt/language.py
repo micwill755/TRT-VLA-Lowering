@@ -1,3 +1,4 @@
+import copy
 import logging
 
 from typing import Any
@@ -12,7 +13,6 @@ from trt.plugin_utils import set_plugin_config_from_model
 from trt.rope import (
     export_rope_fields,
     language_head_dim,
-    make_dummy_rope_rotary_cos_sin,
     make_rope_rotary_cos_sin,
     config_to_dict,
 )
@@ -33,14 +33,117 @@ class FlatKVLanguageEngineWrapper(nn.Module):
         super().__init__()
         self.plugin_language = plugin_language
 
-    def forward(self, inputs_embeds, rope_rotary_cos_sin, ctx_len, kvcache_start_index, *kv_caches):
+    def forward(
+        self,
+        inputs_embeds,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        last_token_ids,
+        *kv_caches,
+    ):
         return self.plugin_language(
             inputs_embeds,
             rope_rotary_cos_sin,
             ctx_len,
             kvcache_start_index,
+            last_token_ids,
             list(kv_caches),
         )
+
+
+def gather_last_token_hidden(
+    hidden_states: torch.Tensor,
+    last_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Gather [B, S, H] at last_token_ids [B] or [B, 1] -> [B, H]."""
+    if last_token_ids.ndim == 1:
+        indices = last_token_ids
+    else:
+        indices = last_token_ids.squeeze(-1)
+    batch_idx = torch.arange(
+        hidden_states.shape[0],
+        device=hidden_states.device,
+        dtype=torch.long,
+    )
+    return hidden_states[batch_idx, indices]
+
+
+def make_prefill_kvcache_start_index(device: torch.device) -> torch.Tensor:
+    return torch.empty(0, dtype=torch.int32, device=device)
+
+
+def make_prefill_last_token_ids(
+    batch_size: int,
+    seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    return torch.full(
+        (batch_size, 1),
+        int(seq_len) - 1,
+        device=device,
+        dtype=torch.int64,
+    )
+
+
+class PluginLMForCausalLM(nn.Module):
+    """Edge-LLM-style causal LM: decoder loop -> logits + select-layer hidden + KV."""
+
+    def __init__(
+        self,
+        lm: nn.Module,
+        lm_head: nn.Module,
+        *,
+        select_layer: int = -1,
+    ):
+        super().__init__()
+        self.lm = lm
+        self.lm_head = lm_head
+        self.select_layer = int(select_layer)
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
+        context_lengths: torch.Tensor,
+        kvcache_start_index: torch.Tensor,
+        last_token_ids: torch.Tensor,
+        kv_caches: list[torch.Tensor],
+    ):
+        lm_dtype = next(self.lm.parameters()).dtype
+        hidden = _as_tensor(inputs_embeds).to(dtype=lm_dtype)
+        context_hidden = hidden if self.select_layer == 0 else None
+        new_kvs = []
+
+        for i, layer in enumerate(self.lm.layers):
+            residual = hidden
+            hidden = _as_tensor(layer.input_layernorm(hidden))
+            hidden, kv = layer.self_attn(
+                hidden_states=hidden,
+                rope_rotary_cos_sin=rope_rotary_cos_sin,
+                past_key_value=kv_caches[i],
+                ctx_len=context_lengths,
+                kvcache_start_index=kvcache_start_index,
+            )
+            hidden = _as_tensor(hidden)
+            hidden = residual + hidden
+
+            residual = hidden
+            hidden = _as_tensor(layer.post_attention_layernorm(hidden))
+            hidden = _as_tensor(layer.mlp(hidden))
+            hidden = residual + hidden
+            new_kvs.append(kv)
+
+            if self.select_layer > 0 and (i + 1) == self.select_layer:
+                context_hidden = hidden
+
+        hidden = _as_tensor(self.lm.norm(hidden))
+        if context_hidden is None:
+            context_hidden = hidden
+
+        last_hidden = gather_last_token_hidden(hidden, last_token_ids)
+        logits = self.lm_head(last_hidden).float()
+        return logits, context_hidden, new_kvs
 
 class PluginLMHiddenWrapper(nn.Module):
     """Shared plugin-attention LM prefill.
@@ -126,27 +229,38 @@ class GROOTContextProjectionWrapper(nn.Module):
         context_embs = self.vl_self_attention(context_embs)
         return context_embs
 
+
 class GROOTLanguageContextWrapper(nn.Module):
-    """Single exported engine: inputs_embeds -> LM -> GR00T context_embs."""
+    """Single exported engine: causal LM logits + GR00T context_embs."""
 
     def __init__(
         self,
-        lm_wrapper: PluginLMHiddenWrapper,
+        lm_wrapper: PluginLMForCausalLM,
         context_projection: GROOTContextProjectionWrapper,
     ):
         super().__init__()
         self.lm_wrapper = lm_wrapper
         self.context_projection = context_projection
 
-    def forward(self, inputs_embeds, rope_rotary_cos_sin, ctx_len, kvcache_start_index, kv_caches):
-        hidden, prefix_k, prefix_v = self.lm_wrapper(
+    def forward(
+        self,
+        inputs_embeds,
+        rope_rotary_cos_sin,
+        context_lengths,
+        kvcache_start_index,
+        last_token_ids,
+        kv_caches,
+    ):
+        logits, context_hidden, _new_kvs = self.lm_wrapper(
             inputs_embeds,
             rope_rotary_cos_sin,
-            ctx_len,
+            context_lengths,
             kvcache_start_index,
+            last_token_ids,
             kv_caches,
         )
-        return self.context_projection(hidden)
+        context_embs = self.context_projection(context_hidden)
+        return logits, context_embs
 
 def compile_language_trt_with_plugin(
     plugin_language: nn.Module,
@@ -177,8 +291,12 @@ def compile_language_trt_with_plugin(
         for _ in range(int(num_layers))
     ]
 
-    rope_rotary_cos_sin = make_dummy_rope_rotary_cos_sin(
-        max_seq_len, head_dim, device
+    rope_rotary_cos_sin = torch.randn(
+        1,
+        int(max_seq_len),
+        int(head_dim),
+        dtype=torch.float32,
+        device=device,
     )
 
     ctx_len = torch.full(
@@ -188,6 +306,7 @@ def compile_language_trt_with_plugin(
         dtype=torch.int32,
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
+    last_token_ids = make_prefill_last_token_ids(batch_size, ctx_seq_len, device)
 
     trt_language = compile_trt_module(
         plugin_language,
@@ -196,6 +315,7 @@ def compile_language_trt_with_plugin(
             rope_rotary_cos_sin,
             ctx_len,
             kvcache_start_index,
+            last_token_ids,
             kv_caches,
         ),
         settings,
@@ -422,6 +542,72 @@ def make_plugin_lm_hidden_wrapper(
     ).eval()
 
 
+def make_plugin_lm_causal_wrapper(
+    decoder: nn.Module,
+    config,
+    lm_head: nn.Module,
+    *,
+    select_layer: int = -1,
+    enable_bidirectional_prefill: int = 1,
+    log_prefix: str = "",
+) -> PluginLMForCausalLM:
+    head_dim = getattr(
+        config,
+        "head_dim",
+        config.hidden_size // config.num_attention_heads,
+    )
+
+    prefix = f"{log_prefix} " if log_prefix else ""
+    print(f"{prefix}head_dim:", head_dim)
+    print(f"{prefix}select_layer:", int(select_layer))
+
+    _install_plugin_attention(
+        decoder,
+        config,
+        enable_bidirectional_prefill=enable_bidirectional_prefill,
+    )
+
+    return PluginLMForCausalLM(
+        decoder,
+        lm_head,
+        select_layer=select_layer,
+    ).eval()
+
+
+def make_groot_language_context_wrapper(
+    core,
+    decoder: nn.Module,
+    config,
+    *,
+    device: torch.device,
+    dtype: torch.dtype = torch.float16,
+    enable_bidirectional_prefill: int = 0,
+    select_layer: int | None = None,
+) -> GROOTLanguageContextWrapper:
+    if select_layer is None:
+        # Eager GR00T reads hidden_states[backbone.select_layer] (pre-norm), but the
+        # plugin-attention manual decoder only matches that pipeline after final RMSNorm.
+        # select_layer=-1 keeps the legacy PluginLMHiddenWrapper context semantics.
+        select_layer = -1
+
+    language_model = core.backbone.eagle_model.language_model
+    lm_head = copy.deepcopy(language_model.lm_head).to(device=device, dtype=dtype).eval()
+    causal_lm = make_plugin_lm_causal_wrapper(
+        decoder,
+        config,
+        lm_head,
+        select_layer=select_layer,
+        enable_bidirectional_prefill=enable_bidirectional_prefill,
+        log_prefix="groot",
+    )
+    context = GROOTContextProjectionWrapper(
+        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=dtype).eval(),
+        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=dtype).eval(),
+        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=dtype).eval(),
+    )
+    return GROOTLanguageContextWrapper(causal_lm, context).eval()
+
+
 def language_edge_llm_config(
     config,
     *,
@@ -430,6 +616,7 @@ def language_edge_llm_config(
     num_layers: int | None = None,
     max_lora_rank: int = 0,
     trt_native_ops: bool = False,
+    context_hidden_size: int | None = None,
 ) -> dict:
     """Build language/config.json fields consumed by LLMEngineRunner at runtime."""
     config_dict = config_to_dict(config)
@@ -458,9 +645,12 @@ def language_edge_llm_config(
             "max_lora_rank": int(max_lora_rank),
             "eagle_base": False,
             "eagle_draft": False,
+            "context_emb": context_hidden_size is not None,
             "trt_native_ops": bool(trt_native_ops),
         },
     }
+    if context_hidden_size is not None:
+        edge_config["context_hidden_size"] = int(context_hidden_size)
     edge_config.update(export_rope_fields(config_dict))
 
     try:

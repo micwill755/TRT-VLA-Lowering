@@ -57,6 +57,19 @@ class SerializedTRTEngine:
             else:
                 self.input_name_map[config_name] = self.input_tensor_names[index]
 
+        self._zero_size_input_dummy: dict[torch.dtype, torch.Tensor] = {}
+
+    def _zero_size_input_binding(
+        self,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        dummy = self._zero_size_input_dummy.get(dtype)
+        if dummy is None or dummy.device != device:
+            dummy = torch.zeros(1, device=device, dtype=dtype)
+            self._zero_size_input_dummy[dtype] = dummy
+        return dummy
+
     def __call__(self, inputs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
         if not inputs:
             raise ValueError("SerializedTRTEngine requires at least one input tensor")
@@ -77,7 +90,13 @@ class SerializedTRTEngine:
                 raise RuntimeError(
                     f"Failed to set input shape for {actual_name}: {tuple(tensor.shape)}"
                 )
-            bound_inputs[actual_name] = tensor
+            if tensor.numel() == 0:
+                bound_inputs[actual_name] = self._zero_size_input_binding(
+                    tensor.dtype,
+                    device,
+                )
+            else:
+                bound_inputs[actual_name] = tensor
 
         outputs: list[torch.Tensor] = []
         for output_index, actual_name in enumerate(self.output_tensor_names):
@@ -216,6 +235,7 @@ class SerializedGrootLanguage:
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
+        last_token_ids,
         kv_caches,
     ):
         inputs = {
@@ -223,12 +243,23 @@ class SerializedGrootLanguage:
             "rope_rotary_cos_sin": rope_rotary_cos_sin,
             "context_lengths": ctx_len,
             "kvcache_start_index": kvcache_start_index,
+            "last_token_ids": last_token_ids,
         }
 
         for i, kv_cache in enumerate(kv_caches):
             inputs[f"past_key_values_{i}"] = kv_cache
 
-        return self.engine(inputs)[0]
+        outputs = self.engine(inputs)
+        if len(outputs) == 1:
+            return outputs[0]
+        return outputs[0], outputs[1]
+
+    @property
+    def context_output_index(self) -> int:
+        output_names = self.engine.config.get("output_names", [])
+        if "context_embs" in output_names:
+            return output_names.index("context_embs")
+        return 1
 
 class SerializedPositionalEngine:
     """Run a serialized TRT engine with positional tensor args matching config input_names."""

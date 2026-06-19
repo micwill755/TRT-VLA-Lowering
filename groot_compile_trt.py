@@ -33,11 +33,10 @@ from trt.packing import (
 from trt.vision import GROOTVisualEmbed
 from trt.language import (
     compile_language_trt_with_plugin,
-    GROOTContextProjectionWrapper,
-    GROOTLanguageContextWrapper,
     language_head_dim,
-    make_plugin_lm_hidden_wrapper,
+    make_groot_language_context_wrapper,
     make_prefill_kvcache_start_index,
+    make_prefill_last_token_ids,
 )
 from trt.rope import (
     make_dummy_rope_rotary_cos_sin,
@@ -373,25 +372,14 @@ def main() -> int:
         dtype=torch.float16,
     ).eval()
     decoder = getattr(language_model, "model", language_model)
-    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
+    plugin_language = make_groot_language_context_wrapper(
+        model,
         decoder,
         language_model.config,
-        max_seq_len=int(trt_language_inputs.inputs_embeds.shape[1]),
         device=device,
-        position_ids=None,
+        dtype=torch.float16,
         enable_bidirectional_prefill=0,
-        return_prefix_kv=False,
-        log_prefix="groot",
     )
-    context_projection = GROOTContextProjectionWrapper(
-        copy.deepcopy(model.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
-    )
-    plugin_language = GROOTLanguageContextWrapper(
-        hidden_lm_wrapper,
-        context_projection,
-    ).eval()
     trt_language_model, trt_language_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
         trt_language_inputs.inputs_embeds,
@@ -431,11 +419,17 @@ def main() -> int:
         position_ids=eager_language_inputs.position_ids,
     )
     eager_kvcache_start_index = make_prefill_kvcache_start_index(device)
-    trt_context_from_eager_vision = trt_language_model(
+    eager_last_token_ids = make_prefill_last_token_ids(
+        int(eager_lm_inputs.shape[0]),
+        int(eager_lm_inputs.shape[1]),
+        device,
+    )
+    _, trt_context_from_eager_vision = trt_language_model(
         eager_lm_inputs,
         eager_rope,
         eager_ctx_len,
         eager_kvcache_start_index,
+        eager_last_token_ids,
         eager_kv_caches,
     )
 
@@ -483,11 +477,17 @@ def main() -> int:
         position_ids=trt_language_inputs.position_ids,
     )
     trt_kvcache_start_index = make_prefill_kvcache_start_index(device)
-    trt_context_embs = trt_language_model(
+    trt_last_token_ids = make_prefill_last_token_ids(
+        int(trt_lm_inputs.shape[0]),
+        int(trt_lm_inputs.shape[1]),
+        device,
+    )
+    _, trt_context_embs = trt_language_model(
         trt_lm_inputs,
         trt_rope,
         trt_ctx_len,
         trt_kvcache_start_index,
+        trt_last_token_ids,
         trt_kv_caches,
     )
 

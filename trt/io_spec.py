@@ -54,8 +54,14 @@ GROOT_EDGE_IO = PipelineIOSpec(
         output_names=("visual_embeds",),
     ),
     language=ComponentIOSpec(
-        input_names=("inputs_embeds", "rope_rotary_cos_sin", "context_lengths", "kvcache_start_index"),
-        output_names=("context_embs",),
+        input_names=(
+            "inputs_embeds",
+            "rope_rotary_cos_sin",
+            "context_lengths",
+            "kvcache_start_index",
+            "last_token_ids",
+        ),
+        output_names=("logits", "context_embs"),
     ),
     action=ComponentIOSpec(
         input_names=(
@@ -67,7 +73,7 @@ GROOT_EDGE_IO = PipelineIOSpec(
         ),
         output_names=("pred_velocity",),
     ),
-    lm_to_action_slots=((0, 2),),
+    lm_to_action_slots=((1, 2),),
 )
 
 PI05_EDGE_IO = PipelineIOSpec(

@@ -59,7 +59,8 @@ from trt.language import (
     GROOTLanguageContextWrapper,
     language_edge_llm_config,
     language_head_dim,
-    make_plugin_lm_hidden_wrapper,
+    make_groot_language_context_wrapper,
+    make_prefill_last_token_ids,
     FlatKVLanguageEngineWrapper
 )
 from trt.rope import (
@@ -356,6 +357,7 @@ def save_lm_engine_for_edge_llm(
 ):
     max_seq_len = int(input_embs.shape[1])
     batch_size = int(input_embs.shape[0])
+    input_embs = input_embs.to(device=device, dtype=dtype).contiguous()
 
     language_model = copy.deepcopy(core.backbone.eagle_model.language_model).to(
         device=device,
@@ -365,26 +367,14 @@ def save_lm_engine_for_edge_llm(
     cfg = language_model.config
     head_dim = language_head_dim(cfg)
 
-    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
+    plugin_language = make_groot_language_context_wrapper(
+        core,
         decoder,
         cfg,
-        max_seq_len=max_seq_len,
         device=device,
-        position_ids=position_ids,
+        dtype=dtype,
         enable_bidirectional_prefill=0,
-        log_prefix="groot",
     )
-
-    context = GROOTContextProjectionWrapper(
-        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=dtype).eval(),
-    )
-
-    plugin_language = GROOTLanguageContextWrapper(
-        hidden_lm_wrapper,
-        context,
-    ).eval()
 
     kv_caches = [
         torch.zeros(
@@ -416,14 +406,19 @@ def save_lm_engine_for_edge_llm(
         device=device,
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
+    last_token_ids = make_prefill_last_token_ids(batch_size, max_seq_len, device)
     sample_inputs = (
         input_embs,
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
+        last_token_ids,
         *kv_caches,
     )
     input_names = io.language_input_names(len(kv_caches))
+
+    with torch.no_grad():
+        example_logits, example_context_embs = wrapper(*sample_inputs)
 
     return save_trt_engine_module(
         wrapper,
@@ -434,11 +429,13 @@ def save_lm_engine_for_edge_llm(
         component="language",
         input_names=input_names,
         output_names=list(io.language.output_names),
+        example_output=(example_logits, example_context_embs),
         extra_config=language_edge_llm_config(
             cfg,
             max_seq_len=max_seq_len,
             batch_size=batch_size,
             num_layers=len(kv_caches),
+            context_hidden_size=int(example_context_embs.shape[2]),
         ),
     )
 
@@ -779,26 +776,14 @@ def compile_trt_with_plugin(
     decoder = getattr(language_model, "model", language_model)
     cfg = language_model.config
 
-    hidden_lm_wrapper = make_plugin_lm_hidden_wrapper(
+    plugin_language = make_groot_language_context_wrapper(
+        model,
         decoder,
         cfg,
-        max_seq_len=language_max_seq_len,
         device=device,
-        position_ids=None,
+        dtype=torch.float16,
         enable_bidirectional_prefill=0,
-        log_prefix="groot",
     )
-
-    context = GROOTContextProjectionWrapper(
-        copy.deepcopy(model.backbone.eagle_linear).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vlln).to(device=device, dtype=torch.float16).eval(),
-        copy.deepcopy(model.action_head.vl_self_attention).to(device=device, dtype=torch.float16).eval(),
-    )
-
-    plugin_language = GROOTLanguageContextWrapper(
-        hidden_lm_wrapper,
-        context,
-    ).eval()
 
     trt_lm, trt_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
@@ -841,13 +826,20 @@ def compile_trt_with_plugin(
             position_ids=language_inputs.position_ids,
         )
         kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-        trt_context_embs = trt_lm(
+        last_token_ids = make_prefill_last_token_ids(
+            int(lm_inputs.shape[0]),
+            int(lm_inputs.shape[1]),
+            device,
+        )
+        _, trt_context_embs = trt_lm(
             lm_inputs,
             rope_rotary_cos_sin,
             ctx_len,
             kvcache_start_index,
+            last_token_ids,
             kv_caches,
-        ).to(device=device, dtype=torch.float16)
+        )
+        trt_context_embs = trt_context_embs.to(device=device, dtype=torch.float16)
 
     # -------------------------
     # Action/diffusion engine
@@ -1053,13 +1045,24 @@ def run_inference_trt_plugin(
         position_ids=language_inputs.position_ids,
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    context_embs = trt_lm(
+    last_token_ids = make_prefill_last_token_ids(
+        int(lm_inputs.shape[0]),
+        int(lm_inputs.shape[1]),
+        device,
+    )
+    lm_out = trt_lm(
         lm_inputs,
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
+        last_token_ids,
         kv_caches,
-    ).to(device=device, dtype=torch.float16)
+    )
+    if isinstance(lm_out, tuple):
+        context_embs = lm_out[1]
+    else:
+        context_embs = lm_out
+    context_embs = context_embs.to(device=device, dtype=torch.float16)
 
     noise = torch.randn(
         context_embs.shape[0],
@@ -1336,7 +1339,7 @@ def main() -> int:
             accuracy_check=not args.no_accuracy_check,
         )
 
-    if not args.skip_engine or not args.skip_edge:
+    if not args.skip_engine:
         _, _, _, serialized_engine_info = save_edge_engines_for_edge_llm(
             model,
             policy,
