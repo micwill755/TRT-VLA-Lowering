@@ -315,8 +315,8 @@ def save_visual_engine_for_edge_llm(
             extra_config={
                 "siglip_batch_size": batch_size,
                 "siglip_seq_len": seq_len,
-                "num_image_tokens": int(eager_output.shape[1]),
-                "hidden_size": int(eager_output.shape[2]),
+                "num_image_tokens": int(eager_output.shape[0]),
+                "hidden_size": int(eager_output.shape[1]),
             },
         )
     finally:

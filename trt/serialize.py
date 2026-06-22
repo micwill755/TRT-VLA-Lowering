@@ -220,9 +220,13 @@ class SerializedGrootVision:
         self.engine = engine
 
     def __call__(self, pixel_values):
-        return self.engine({
-            "pixel_values": pixel_values,
-        })[0]
+        from trt.vision import VIT_ENGINE_INPUT_NAME, is_nchw_pixel_values, nchw_to_hwc
+
+        images = nchw_to_hwc(pixel_values) if is_nchw_pixel_values(pixel_values) else pixel_values
+        input_name = VIT_ENGINE_INPUT_NAME
+        if input_name not in self.engine.config_input_names:
+            input_name = self.engine.config_input_names[0]
+        return self.engine({input_name: images})[0]
 
 class SerializedGrootLanguage:
     def __init__(self, engine):

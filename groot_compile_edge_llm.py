@@ -49,18 +49,25 @@ from trt.packing import (
     PromptTensorInputs,
 )
 from trt.vision import (
-    VisualFixedInput, 
-    PixelOnlyWrapper
+    VisualFixedInput,
+    PixelOnlyWrapper,
+    nchw_to_hwc,
+    vit_visual_edge_config,
+    VIT_ENGINE_INPUT_NAME,
+    VIT_ENGINE_OUTPUT_NAME,
 )
 
 from trt.language import (
     compile_language_trt_with_plugin,
     GROOTContextProjectionWrapper,
     GROOTLanguageContextWrapper,
+    compute_vit_expanded_seq_len,
     language_edge_llm_config,
     language_head_dim,
+    make_dummy_inputs_embeds,
     make_groot_language_context_wrapper,
-    FlatKVLanguageEngineWrapper
+    FlatKVLanguageEngineWrapper,
+    save_embedding_table,
 )
 from trt.rope import (
     make_rope_rotary_cos_sin,
@@ -299,26 +306,30 @@ def save_visual_engine_for_edge_llm(
     *,
     device="cuda",
     dtype=torch.float16,
-    model_type="vision",
     visual: nn.Module,
     io: PipelineIOSpec,
     trt_settings=None,
 ):
-    pixel_values = pixel_values.to(device=device, dtype=dtype).contiguous()
+    pixel_values_nchw = pixel_values.to(device=device, dtype=dtype).contiguous()
+    images_hwc = nchw_to_hwc(pixel_values_nchw)
+
+    eagle = model.backbone.eagle_model
+    image_token_id = getattr(eagle, "image_token_index", eagle.config.image_token_index)
+    vocab_size = eagle.language_model.config.vocab_size
 
     visual = make_visual_fixed_input(
         model,
-        pixel_values,
+        images_hwc,
         device=device,
         dtype=dtype,
     )
 
-    vision_model = model.backbone.eagle_model.vision_model.vision_model
+    vision_model = eagle.vision_model.vision_model
 
     with torch.no_grad():
-        eager_output = visual(pixel_values)
+        eager_output = visual(images_hwc)
 
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values_nchw)
 
     patched = []
     try:
@@ -331,18 +342,19 @@ def save_visual_engine_for_edge_llm(
 
         return save_trt_engine_module(
             visual,
-            (pixel_values,),
+            (images_hwc,),
             engine_dir,
             engine_file="visual.engine",
-            model_type=model_type,
+            model_type="vit",
             component="vision",
-            input_names=list(io.vision.input_names),
-            output_names=list(io.vision.output_names),
+            input_names=[VIT_ENGINE_INPUT_NAME],
+            output_names=[VIT_ENGINE_OUTPUT_NAME],
             example_output=eager_output,
-            extra_config={
-                "siglip_batch_size": batch_size,
-                "siglip_seq_len": seq_len,
-            },
+            extra_config=vit_visual_edge_config(
+                vocab_size=vocab_size,
+                image_token_id=image_token_id,
+                seq_len=seq_len,
+            ),
             trt_settings=trt_settings,
         )
 
@@ -352,19 +364,17 @@ def save_visual_engine_for_edge_llm(
 
 def save_lm_engine_for_edge_llm(
     core,
-    input_embs,
     engine_dir,
     *,
+    input_ids,
+    image_token_id,
+    seq_len_per_image,
     device,
     position_ids=None,
     dtype=torch.float16,
     model_type="language",
     io: PipelineIOSpec,
 ):
-    max_seq_len = int(input_embs.shape[1])
-    batch_size = int(input_embs.shape[0])
-    input_embs = input_embs.to(device=device, dtype=dtype).contiguous()
-
     language_model = copy.deepcopy(core.backbone.eagle_model.language_model).to(
         device=device,
         dtype=torch.float16,
@@ -372,6 +382,20 @@ def save_lm_engine_for_edge_llm(
     decoder = getattr(language_model, "model", language_model)
     cfg = language_model.config
     head_dim = language_head_dim(cfg)
+
+    max_seq_len = compute_vit_expanded_seq_len(
+        input_ids,
+        int(image_token_id),
+        int(seq_len_per_image),
+    )
+    batch_size = int(input_ids.shape[0])
+    input_embs = make_dummy_inputs_embeds(
+        batch_size,
+        max_seq_len,
+        int(cfg.hidden_size),
+        device=device,
+        dtype=dtype,
+    )
 
     plugin_language = make_groot_language_context_wrapper(
         core,
@@ -431,6 +455,8 @@ def save_lm_engine_for_edge_llm(
     with torch.no_grad():
         example_logits, example_context_embs = wrapper(*sample_inputs)
 
+    save_embedding_table(language_model, engine_dir)
+
     return save_trt_engine_module(
         wrapper,
         sample_inputs,
@@ -448,6 +474,7 @@ def save_lm_engine_for_edge_llm(
             batch_size=batch_size,
             num_layers=len(kv_caches),
             context_hidden_size=int(example_context_embs.shape[2]),
+            image_token_id=image_token_id,
         ),
     )
 
@@ -654,22 +681,29 @@ def save_edge_engines_for_edge_llm(
     # -------------------------
     print("compiling language")
 
+    eagle = model.backbone.eagle_model
+    image_token_id = getattr(eagle, "image_token_index", eagle.config.image_token_index)
+    vision_model = eagle.vision_model.vision_model
+    _, seq_len_per_image = infer_siglip_seq_len(vision_model, pixel_values)
+
+    language_engine_dir = str(pathlib.Path(engine_root) / "language")
+    save_lm_engine_for_edge_llm(
+        model,
+        language_engine_dir,
+        input_ids=input_ids,
+        image_token_id=image_token_id,
+        seq_len_per_image=seq_len_per_image,
+        device=device,
+        position_ids=None,
+        dtype=torch.float16,
+        io=io,
+    )
+
     language_inputs = build_language_inputs(
         model,
         trt_image_embs,
         input_ids,
         attention_mask,
-    )
-
-    language_engine_dir = str(pathlib.Path(engine_root) / "language")
-    save_lm_engine_for_edge_llm(
-        model,
-        language_inputs.inputs_embeds,
-        language_engine_dir,
-        device=device,
-        position_ids=None,
-        dtype=torch.float16,
-        io=io,
     )
 
     language_runner = SerializedGrootLanguage(SerializedTRTEngine(language_engine_dir))

@@ -11,6 +11,7 @@ PI0.5 / SmolVLA-style paths use ``PluginLMHiddenWrapper`` (hidden + prefix KV).
 """
 
 import copy
+import pathlib
 
 import torch
 import torch.nn as nn
@@ -637,6 +638,61 @@ def make_groot_language_context_wrapper(
 
 
 # ---------------------------------------------------------------------------
+# VitRunner-compatible token expansion / embedding export
+# ---------------------------------------------------------------------------
+
+def compute_vit_expanded_seq_len(
+    input_ids: torch.Tensor,
+    image_token_id: int,
+    seq_len_per_image: int,
+) -> int:
+    """Sequence length after VitRunner::textPreprocess placeholder expansion.
+
+    Handles both a single ``image_token_id`` placeholder per image (expanded to
+    ``seq_len_per_image`` slots) and prompts that already contain full image-token
+    runs (e.g. Eagle chat templates that repeat the image token in the string).
+    """
+    flat = input_ids.reshape(-1).tolist()
+    num_image_tokens = sum(1 for token_id in flat if token_id == image_token_id)
+    num_placeholders = 0
+    for idx, token_id in enumerate(flat):
+        if token_id == image_token_id and (idx == 0 or flat[idx - 1] != image_token_id):
+            num_placeholders += 1
+    return len(flat) - num_image_tokens + num_placeholders * int(seq_len_per_image)
+
+
+def make_dummy_inputs_embeds(
+    batch_size: int,
+    max_seq_len: int,
+    hidden_size: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Random inputs_embeds for TRT trace when runtime performs embedding lookup."""
+    return torch.randn(
+        int(batch_size),
+        int(max_seq_len),
+        int(hidden_size),
+        device=device,
+        dtype=dtype,
+    )
+
+
+def save_embedding_table(language_model: nn.Module, output_dir: str | pathlib.Path) -> None:
+    """Write embedding.safetensors for LLMInferenceRuntime embedding lookup."""
+    from pathlib import Path
+    from safetensors.torch import save_file
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    embed_tokens = language_model.get_input_embeddings()
+    embedding_weight = embed_tokens.weight.data.detach().cpu().half()
+    save_file({"embedding": embedding_weight}, output_dir / "embedding.safetensors")
+
+
+# ---------------------------------------------------------------------------
 # Edge-LLM engine config (language/config.json)
 # ---------------------------------------------------------------------------
 
@@ -649,6 +705,7 @@ def language_edge_llm_config(
     max_lora_rank: int = 0,
     trt_native_ops: bool = False,
     context_hidden_size: int | None = None,
+    image_token_id: int | None = None,
 ) -> dict:
     """Build language/config.json fields consumed by LLMEngineRunner at runtime."""
     config_dict = config_to_dict(config)
@@ -683,6 +740,8 @@ def language_edge_llm_config(
     }
     if context_hidden_size is not None:
         edge_config["context_hidden_size"] = int(context_hidden_size)
+    if image_token_id is not None:
+        edge_config["image_token_id"] = int(image_token_id)
     edge_config.update(export_rope_fields(config_dict))
 
     try:
