@@ -47,8 +47,7 @@ from trt.measure import (
     tensor_error_metrics,
 )
 from trt.plugin_utils import (
-    register_plugin_op,
-    load_plugin,
+    load_plugins_for_trt,
     patch_vision_attention,  
     restore_attention,
     infer_siglip_seq_len,
@@ -286,10 +285,7 @@ def main() -> int:
     # groot specifc inputs ------
 
     # Load the custom TensorRT plugin library before compiling plugin-backed modules.
-    register_plugin_op()
-    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
-
-    load_plugin()
+    load_plugins_for_trt()
 
     # -------------------------
     # Vision engine

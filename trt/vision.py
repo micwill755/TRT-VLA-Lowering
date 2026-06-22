@@ -15,20 +15,17 @@ logger = logging.getLogger(__name__)
 VIT_ENGINE_INPUT_NAME = "input"
 VIT_ENGINE_OUTPUT_NAME = "output"
 
-
 def nchw_to_hwc(pixel_values: torch.Tensor) -> torch.Tensor:
     """Convert processor-style NCHW pixel values to HWC for VisualFixedInput / VitRunner."""
     if pixel_values.ndim != 4:
         raise ValueError(f"Expected 4D pixel_values, got shape {tuple(pixel_values.shape)}")
     return pixel_values.permute(0, 2, 3, 1).contiguous()
 
-
 def hwc_to_nchw(images: torch.Tensor) -> torch.Tensor:
     """Convert HWC ``[batch, H, W, C]`` to NCHW for HuggingFace SigLIP vision models."""
     if images.ndim != 4:
         raise ValueError(f"Expected 4D images, got shape {tuple(images.shape)}")
     return images.permute(0, 3, 1, 2).contiguous()
-
 
 def is_nchw_pixel_values(pixel_values: torch.Tensor) -> bool:
     """True when channels are in dim 1 (processor-style NCHW)."""
@@ -37,7 +34,6 @@ def is_nchw_pixel_values(pixel_values: torch.Tensor) -> bool:
         and pixel_values.shape[1] in (1, 3, 4)
         and pixel_values.shape[-1] not in (1, 3, 4)
     )
-
 
 def vit_visual_edge_config(
     *,
@@ -175,8 +171,9 @@ class VisualFixedInput(nn.Module):
         # [batch, output_seq_len, shuffle_hidden]
         return x.reshape(n, -1, self.shuffle_hidden)
 
-    def forward(self, images):
-        # images: [batch, H, W, C]  preprocessed HWC, fixed shape for TRT
+    def forward(self, input):
+        # input: [batch, H, W, C]  preprocessed HWC, fixed shape for TRT (VitRunner binding: "input")
+        images = input
         out_dtype = images.dtype
         
         if self.force_float32_input and images.dtype != torch.float32:

@@ -2,9 +2,164 @@ import ctypes
 import json
 import os
 import pathlib
+from contextlib import contextmanager
 
 import torch
+import torch.nn as nn
 import torch_tensorrt
+
+from inspect import signature
+
+from torch.export import export
+from torch_tensorrt.dynamo._tracer import build_dim_registry, get_dynamic_shapes
+from torch_tensorrt.dynamo.utils import default_device, to_torch_device
+
+LANGUAGE_EDGE_LEADING_INPUT_COUNT = 5
+
+
+@contextmanager
+def patch_trt_interpreter_output_names(output_names: list[str] | tuple[str, ...] | None):
+    """Patch TRTInterpreter to use Edge-LLM output binding names (logits, context_embs)."""
+    if not output_names:
+        yield
+        return
+
+    import tensorrt as trt
+    from torch_tensorrt._enums import dtype
+    import torch_tensorrt.dynamo.conversion._TRTInterpreter as tri_module
+
+    original_output = tri_module.TRTInterpreter.output
+
+    def output(self, target, args, kwargs):
+        assert len(args) == 1
+        if isinstance(args[0], tuple):
+            outputs = args[0]
+        elif isinstance(args[0], list):
+            outputs = tuple(args[0])
+        else:
+            outputs = (args[0],)
+
+        for output_idx in range(len(outputs)):
+            output = outputs[output_idx]
+            if not isinstance(output, trt.ITensor):
+                from torch_tensorrt.dynamo.conversion.converter_utils import get_trt_tensor
+
+                new_output = get_trt_tensor(self.ctx, output, target)
+                outputs = (
+                    outputs[:output_idx] + (new_output,) + outputs[output_idx + 1 :]
+                )
+
+        if not all(isinstance(output, trt.ITensor) for output in outputs):
+            raise RuntimeError("TensorRT requires all outputs to be Tensor!")
+
+        if self.output_dtypes is not None and len(self.output_dtypes) != len(outputs):
+            raise RuntimeError(
+                f"Specified output dtypes ({len(self.output_dtypes)}) differ from number of outputs ({len(outputs)})"
+            )
+
+        marked_outputs_ids = []
+        for i, output in enumerate(outputs):
+            if id(output) in marked_outputs_ids:
+                continue
+            marked_outputs_ids.append(id(output))
+
+            name = output_names[i] if i < len(output_names) else f"output{i}"
+
+            if self.output_dtypes is not None:
+                output_dtype = self.output_dtypes[i]
+            elif any(
+                op_name in output.name.split("_")
+                for op_name in (
+                    "eq",
+                    "gt",
+                    "lt",
+                    "or",
+                    "xor",
+                    "and",
+                    "not",
+                    "ne",
+                    "isinf",
+                    "isnan",
+                    "any",
+                )
+            ):
+                output_dtype = dtype.b
+            else:
+                output_dtype = dtype.unknown
+
+            if output_dtype is not dtype.unknown:
+                output = self._cast_output_dtype(
+                    output,
+                    output_dtype.to(trt.DataType, use_default=True),
+                    name,
+                )
+
+            output.name = name
+            outputs = outputs[:i] + (output,) + outputs[i + 1 :]
+            self.ctx.net.mark_output(output)
+            self._output_names.append(name)
+
+        return list(outputs)
+
+    tri_module.TRTInterpreter.output = output
+    try:
+        yield
+    finally:
+        tri_module.TRTInterpreter.output = original_output
+
+def trace_language_for_edge_llm(
+    module: nn.Module,
+    flat_trace_tensors: tuple,
+    input_specs: tuple,
+    *,
+    device=None,
+):
+    """Export GR00T language module with multi-profile ``Input`` specs."""
+    if len(flat_trace_tensors) < LANGUAGE_EDGE_LEADING_INPUT_COUNT + 1:
+        raise ValueError(
+            "flat_trace_tensors must include leading bindings plus at least one KV cache"
+        )
+    if len(input_specs) < LANGUAGE_EDGE_LEADING_INPUT_COUNT:
+        raise ValueError(
+            f"Expected at least {LANGUAGE_EDGE_LEADING_INPUT_COUNT} flat input specs"
+        )
+
+    leading_specs = tuple(input_specs[:LANGUAGE_EDGE_LEADING_INPUT_COUNT])
+    kv_tensors = flat_trace_tensors[LANGUAGE_EDGE_LEADING_INPUT_COUNT:]
+
+    resolved_device = to_torch_device(device or default_device())
+    torch_arg_inputs = tuple(
+        t.to(resolved_device) if isinstance(t, torch.Tensor) else t
+        for t in flat_trace_tensors
+    )
+
+    dim_registry = build_dim_registry(leading_specs, {})
+    dynamic_shapes = {}
+    param_names = list(signature(module.forward).parameters.keys())
+    for spec, name in zip(leading_specs, param_names[: len(leading_specs)]):
+        if name == "inputs_embeds":
+            dynamic_shapes[name] = get_dynamic_shapes(spec, dim_registry)
+        else:
+            dynamic_shapes[name] = {}
+
+    var_pos_name = param_names[len(leading_specs)]
+    dynamic_shapes[var_pos_name] = tuple({} for _ in range(len(kv_tensors)))
+
+    export_kwargs = dict(
+        dynamic_shapes=dynamic_shapes,
+        strict=False,
+    )
+    try:
+        return export(module, torch_arg_inputs, **export_kwargs)
+    except Exception:
+        from torch.export._trace import _export
+
+        return _export(
+            module,
+            torch_arg_inputs,
+            prefer_deferred_runtime_asserts_over_guards=True,
+            **export_kwargs,
+        )
 
 def flatten_tensors(x):
     if isinstance(x, torch.Tensor):
@@ -70,6 +225,13 @@ def export_trt_module(module, sample_inputs):
         )
 
 
+def _infer_module_device(module):
+    try:
+        return next(module.parameters()).device
+    except StopIteration:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def save_trt_engine_module(
     module,
     sample_inputs,
@@ -83,10 +245,12 @@ def save_trt_engine_module(
     example_output=None,
     extra_config=None,
     trt_settings=None,
-    dual_optimization_profiles=False,
+    input_specs=None,
+    flat_tensors=None,
 ):
     module = module.eval()
     sample_inputs = tuple(sample_inputs)
+    flat_tensors = tuple(flat_tensors if flat_tensors is not None else sample_inputs)
 
     engine_dir = pathlib.Path(engine_dir)
     engine_dir.mkdir(parents=True, exist_ok=True)
@@ -98,17 +262,24 @@ def save_trt_engine_module(
         with torch.no_grad():
             example_output = module(*sample_inputs)
 
-    exported = export_trt_module(module, sample_inputs)
-
-    input_specs = tuple(
-        torch_tensorrt.Input(
-            shape=tuple(t.shape),
-            dtype=t.dtype,
-            format=torch.contiguous_format,
-            name=name,
+    if input_specs is not None:
+        exported = trace_language_for_edge_llm(
+            module,
+            flat_tensors,
+            input_specs,
+            device=_infer_module_device(module),
         )
-        for name, t in zip(input_names, sample_inputs)
-    )
+    else:
+        exported = export_trt_module(module, sample_inputs)
+        input_specs = tuple(
+            torch_tensorrt.Input(
+                shape=tuple(t.shape),
+                dtype=t.dtype,
+                format=torch.contiguous_format,
+                name=name,
+            )
+            for name, t in zip(input_names, flat_tensors)
+        )
 
     settings = {
         "disable_tf32": True,
@@ -123,23 +294,12 @@ def save_trt_engine_module(
     if trt_settings:
         settings.update(trt_settings)
 
-    from torch_tensorrt.dynamo.conversion import _TRTInterpreter as trt_interpreter
-
-    prev_output_names = trt_interpreter.OUTPUT_NAMES_OVERRIDE
-    prev_dual_profiles = trt_interpreter.FORCE_DUAL_OPTIMIZATION_PROFILES
-    try:
-        trt_interpreter.OUTPUT_NAMES_OVERRIDE = (
-            list(output_names) if output_names else None
-        )
-        trt_interpreter.FORCE_DUAL_OPTIMIZATION_PROFILES = dual_optimization_profiles
+    with patch_trt_interpreter_output_names(output_names):
         engine_bytes = torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(
             exported,
             inputs=input_specs,
             **settings,
         )
-    finally:
-        trt_interpreter.OUTPUT_NAMES_OVERRIDE = prev_output_names
-        trt_interpreter.FORCE_DUAL_OPTIMIZATION_PROFILES = prev_dual_profiles
 
     engine_path.write_bytes(engine_bytes)
 
@@ -151,7 +311,7 @@ def save_trt_engine_module(
         "input_names": list(input_names),
         "inputs": {
             name: tensor_meta(t)
-            for name, t in zip(input_names, sample_inputs)
+            for name, t in zip(input_names, flat_tensors)
         },
         "outputs": [
             tensor_meta(t)

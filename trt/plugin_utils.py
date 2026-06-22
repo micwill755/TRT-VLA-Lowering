@@ -1,90 +1,163 @@
 import os
+import ctypes
 
-from typing import Tuple,Any
+from typing import Any, Optional, Sequence, Tuple
 
 import tensorrt as trt
 import torch
 
-import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
+_PLUGIN_CONFIG: dict[str, Any] = {}
 
-def _register_plugin_op_impl() -> None:
-    """
-    Internal implementation to register the tensorrt_edge_llm::xqa_attn custom op for PyTorch.
 
-    The Python tracing op accepts 5 tensor inputs:
-    - qkv: [B, S, (Hq+Hk+Hv)*D] fused QKV tensor
-    - kv: [B, 2, Hkv, Capacity, D] KV cache tensor
-    - ctx_len: [B] context length per batch
-    - rope: [1, MaxSeqLen, RotaryDim] rotary position encoding
-    - kv_cache_start_idx: [B] starting index in KV cache
+def get_plugin_config() -> dict[str, Any]:
+    return _PLUGIN_CONFIG
 
-    The TensorRT converter slices qkv into the separate q, k, and v tensors
-    required by the C++ AttentionPlugin. Output KV shape matches the full KV-cache input: [B, 2, Hkv, Capacity, D].
-    """
 
-    @torch.library.custom_op("tensorrt_edge_llm::xqa_attn", mutates_args=())
-    def attn(
-        qkv: torch.Tensor,
-        kv: torch.Tensor,
-        ctx_len: torch.Tensor,
-        rope: torch.Tensor,
-        kv_cache_start_idx: torch.Tensor,
-        nq: int,
-        nkv: int,
-        d: int,
-        enable_bidirectional_prefill: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        batch_size = qkv.shape[0]
-        seq_len = qkv.shape[1]
-        attn_out = torch.zeros(
-            batch_size, seq_len, nq, d, dtype=qkv.dtype, device=qkv.device
-        )
-        updated_kv = torch.zeros_like(kv)
-        return attn_out, updated_kv
+def _has_torch_op(namespace: str, name: str) -> bool:
+    return hasattr(torch.ops, namespace) and hasattr(getattr(torch.ops, namespace), name)
 
-    @torch.library.register_fake("tensorrt_edge_llm::xqa_attn")
-    def _(qkv, kv, ctx_len, rope, kv_cache_start_idx, nq, nkv, d, enable_bidirectional_prefill):
-        batch_size = qkv.shape[0]
-        seq_len = qkv.shape[1]
-        attn_out = torch.empty(
-            batch_size, seq_len, nq, d, dtype=qkv.dtype, device=qkv.device
-        )
-        updated_kv = torch.empty_like(kv)
-        return attn_out, updated_kv
 
-def register_plugin_op() -> None:
-    """
-    Register the tensorrt_edge_llm::xqa_attn custom op for PyTorch.
-
-    This function is idempotent - safe to call multiple times.
-    """
-    if hasattr(torch.ops, "tensorrt_edge_llm") and hasattr(
-        torch.ops.tensorrt_edge_llm, "xqa_attn"
-    ):
+def _register_attention_plugin_op() -> None:
+    """Register ``trt::attention_plugin`` for export when edge_plugins is unavailable."""
+    if _has_torch_op("trt", "attention_plugin"):
         return
-    
-    '''if hasattr(torch.ops, "trt") and hasattr(
-        torch.ops.trt, "vit_attention_plugin"):
-        return'''
-    _register_plugin_op_impl()
+
+    @torch.library.custom_op("trt::attention_plugin", mutates_args=())
+    def attention_plugin(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        past_key_value: torch.Tensor,
+        context_lengths: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
+        kvcache_start_index: torch.Tensor,
+        num_q_heads: int,
+        num_kv_heads: int,
+        enable_tree_attention: bool,
+        head_size: int,
+        enable_fp8_kv_cache: bool,
+        sliding_window_size: int = -1,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        qkv_scales: Optional[Sequence[float]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        del k, v, context_lengths, rope_rotary_cos_sin, kvcache_start_index
+        del num_kv_heads, enable_tree_attention, enable_fp8_kv_cache
+        del sliding_window_size, attention_mask, position_ids, qkv_scales
+        batch_size, seq_len, _ = q.shape
+        attn_output = torch.zeros(
+            batch_size,
+            seq_len,
+            num_q_heads,
+            head_size,
+            dtype=q.dtype,
+            device=q.device,
+        )
+        return attn_output, past_key_value.clone()
+
+    @attention_plugin.register_fake
+    def _attention_plugin_fake(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        past_key_value: torch.Tensor,
+        context_lengths: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
+        kvcache_start_index: torch.Tensor,
+        num_q_heads: int,
+        num_kv_heads: int,
+        enable_tree_attention: bool,
+        head_size: int,
+        enable_fp8_kv_cache: bool,
+        sliding_window_size: int = -1,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        qkv_scales: Optional[Sequence[float]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        del k, v, context_lengths, rope_rotary_cos_sin, kvcache_start_index
+        del num_kv_heads, enable_tree_attention, enable_fp8_kv_cache
+        del sliding_window_size, attention_mask, position_ids, qkv_scales
+        batch_size, seq_len, _ = q.shape
+        attn_output = torch.empty(
+            batch_size,
+            seq_len,
+            num_q_heads,
+            head_size,
+            dtype=q.dtype,
+            device=q.device,
+        )
+        return attn_output, torch.empty_like(past_key_value)
+
+
+def _register_vit_attention_plugin_op() -> None:
+    if _has_torch_op("trt", "vit_attention_plugin"):
+        return
+
+    @torch.library.custom_op("trt::vit_attention_plugin", mutates_args=())
+    def vit_attention_plugin(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen_carrier: torch.Tensor,
+        num_heads: int,
+        head_size: int,
+    ) -> torch.Tensor:
+        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
+        return torch.zeros_like(q)
+
+    @vit_attention_plugin.register_fake
+    def _vit_attention_plugin_fake(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen_carrier: torch.Tensor,
+        num_heads: int,
+        head_size: int,
+    ) -> torch.Tensor:
+        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
+        return torch.empty_like(q)
+
+
+def get_trt_plugin_creator(
+    plugin_name: str,
+    version: str = "1",
+    namespace: str = "",
+):
+    """TRT 10: get_plugin_creator; TRT 11+: get_creator."""
+    registry = trt.get_plugin_registry()
+    if hasattr(registry, "get_plugin_creator"):
+        return registry.get_plugin_creator(plugin_name, version, namespace)
+    return registry.get_creator(plugin_name, version, namespace)
+
 
 def load_plugin():
     plugin_so = os.environ.get("EDGE_LLM_PLUGIN_SO") or os.environ.get("EDGELLM_TRT_PLUGIN_SO")
     if not plugin_so:
         raise RuntimeError("Set EDGE_LLM_PLUGIN_SO to libNvInfer_edgellm_plugin.so before running this script")
 
-    edge_plugins.load_edge_plugin(plugin_so)
+    try:
+        import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
+
+        edge_plugins.load_edge_plugin(plugin_so)
+    except ImportError:
+        ctypes.CDLL(plugin_so)
     trt.init_libnvinfer_plugins(None, "")
     return plugin_so
 
+
 def load_plugins_for_trt():
-    register_plugin_op()
-    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
+    _register_attention_plugin_op()
+    _register_vit_attention_plugin_op()
     load_plugin()
+    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
+
 
 def restore_attention(patched):
     for layer, original_attn in patched:
         layer.self_attn = original_attn
+
 
 def patch_vision_attention(
     vision_model,
@@ -111,10 +184,12 @@ def patch_vision_attention(
     print(f"patched {name} attention modules: {len(patched)}")
     return patched
 
+
 @torch.no_grad()
 def infer_siglip_seq_len(vision_model, image):
     hidden_states = vision_model.embeddings(image)
     return int(hidden_states.shape[0]), int(hidden_states.shape[1])
+
 
 @torch.no_grad()
 def infer_smolvlm_seq_len(vision_model, image):
@@ -132,23 +207,15 @@ def infer_smolvlm_seq_len(vision_model, image):
     )
     return int(hidden_states.shape[0]), int(hidden_states.shape[1])
 
+
 def set_plugin_config(
     num_attention_heads: int,
     num_key_value_heads: int,
     head_dim: int,
     max_seq_len: int = 2048,
     max_batch_size: int = 4,
+    enable_bidirectional_prefill: int = 0,
 ) -> None:
-    """
-    Set global configuration for the plugin converter.
-
-    Args:
-        num_attention_heads: Number of query attention heads.
-        num_key_value_heads: Number of key/value attention heads (for GQA).
-        head_dim: Dimension of each attention head.
-        max_seq_len: Maximum sequence length for KV cache.
-        max_batch_size: Maximum batch size.
-    """
     global _PLUGIN_CONFIG
     _PLUGIN_CONFIG = {
         "num_attention_heads": num_attention_heads,
@@ -156,17 +223,15 @@ def set_plugin_config(
         "head_dim": head_dim,
         "max_seq_len": max_seq_len,
         "max_batch_size": max_batch_size,
+        "enable_bidirectional_prefill": int(enable_bidirectional_prefill),
     }
 
-def set_plugin_config_from_model(model_config: Any, max_seq_len: int = 2048) -> None:
-    """
-    Set plugin configuration from a HuggingFace model config.
 
-    Args:
-        model_config: HuggingFace model configuration object.
-        max_seq_len: Maximum sequence length for KV cache.
-    """
-    # Qwen3 has explicit head_dim in config that differs from hidden_size // num_attention_heads
+def set_plugin_config_from_model(
+    model_config: Any,
+    max_seq_len: int = 2048,
+    enable_bidirectional_prefill: int = 0,
+) -> None:
     if hasattr(model_config, "head_dim") and model_config.head_dim is not None:
         head_dim = model_config.head_dim
     else:
@@ -177,4 +242,5 @@ def set_plugin_config_from_model(model_config: Any, max_seq_len: int = 2048) -> 
         num_key_value_heads=model_config.num_key_value_heads,
         head_dim=head_dim,
         max_seq_len=max_seq_len,
+        enable_bidirectional_prefill=enable_bidirectional_prefill,
     )

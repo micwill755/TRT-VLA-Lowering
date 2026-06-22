@@ -1,111 +1,145 @@
 """
 TensorRT converter for Edge-LLM attention plugin ops.
 
-This module contains the TensorRT converter for the tensorrt_edge_llm::xqa_attn
-custom op. It is kept in a separate file from plugin_utils.py for maintainability.
+Overrides the stock ``trt.attention_plugin`` converter to pass separate Q/K/V
+tensors directly to AttentionPlugin (no fused-qkv slice) and to honor GROOT's
+``enable_bidirectional_prefill`` plugin field.
 """
-import torch
 import numpy as np
 import tensorrt as trt
-from trt.plugin_utils import register_plugin_op
-from torch_tensorrt.dynamo.conversion import (
-    ConversionContext,
-    dynamo_tensorrt_converter,
-)
+import torch
+from torch_tensorrt.dynamo.conversion import ConversionContext, dynamo_tensorrt_converter
+from torch_tensorrt.dynamo.conversion._ConverterRegistry import ConverterPriority
 from torch_tensorrt.dynamo.conversion.converter_utils import get_trt_tensor
 
-def _slice_qkv_for_attention_plugin(
-    ctx: ConversionContext,
-    qkv: trt.ITensor,
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    name: str,
-) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
-    q_width = int(num_q_heads) * int(head_size)
-    kv_width = int(num_kv_heads) * int(head_size)
-    batch_dim = qkv.shape[0]
-    seq_dim = qkv.shape[1]
-
-    q_layer = ctx.net.add_slice(qkv, (0, 0, 0), (batch_dim, seq_dim, q_width), (1, 1, 1))
-    q_layer.name = f"{name}_q_slice"
-    q = q_layer.get_output(0)
-
-    k_layer = ctx.net.add_slice(qkv, (0, 0, q_width), (batch_dim, seq_dim, kv_width), (1, 1, 1))
-    k_layer.name = f"{name}_k_slice"
-    k = k_layer.get_output(0)
-
-    v_layer = ctx.net.add_slice(qkv, (0, 0, q_width + kv_width), (batch_dim, seq_dim, kv_width), (1, 1, 1))
-    v_layer.name = f"{name}_v_slice"
-    v = v_layer.get_output(0)
-
-    return q, k, v
+from trt.plugin_utils import get_plugin_config, get_trt_plugin_creator
 
 
 @dynamo_tensorrt_converter(
-    torch.ops.tensorrt_edge_llm.xqa_attn.default, supports_dynamic_shapes=True
+    torch.ops.trt.attention_plugin.default,
+    supports_dynamic_shapes=True,
+    priority=ConverterPriority.HIGH,
 )
-def convert_attn(ctx: ConversionContext, target, args, kwargs, name):
-    """
-    Convert tensorrt_edge_llm::xqa_attn op to TensorRT AttentionPlugin.
-
-    The Python op takes fused qkv for tracing compatibility. The current C++
-    AttentionPlugin expects separate q, k, and v tensors, so this converter
-    slices qkv before creating the plugin layer.
-    """
+def convert_llm_attention_plugin(ctx: ConversionContext, target, args, kwargs, name):
     del target, kwargs
+    args = list(args)
+    q, k, v, kv, ctx_len, rope, kv_cache_start_idx = args[:7]
+    num_q_heads = args[7]
+    num_kv_heads = args[8]
+    enable_tree_attention = args[9]
+    head_size = args[10]
+    enable_fp8_kv_cache = args[11]
+    sliding_window_size = args[12] if len(args) > 12 else -1
+    attention_mask = args[13] if len(args) > 13 else None
+    position_ids = args[14] if len(args) > 14 else None
+    qkv_scales = args[15] if len(args) > 15 else None
 
-    qkv, kv, ctx_len, rope, kv_cache_start_idx, nq, nkv, d, enable_bidirectional_prefill = list(args)[:9]
-    nq = int(nq)
-    nkv = int(nkv)
-    d = int(d)
-    enable_bidirectional_prefill = int(enable_bidirectional_prefill)
+    config = get_plugin_config() or {}
+    enable_bidirectional_prefill = int(
+        config.get("enable_bidirectional_prefill", 0)
+    )
 
-    creator = trt.get_plugin_registry().get_plugin_creator("AttentionPlugin", "1", "")
+    creator = get_trt_plugin_creator("AttentionPlugin", "1", "")
     if creator is None:
         raise RuntimeError("AttentionPlugin not found in TensorRT plugin registry")
 
     field_list = [
         trt.PluginField(
-            field_name, np.array([field_val], dtype=np.int32), trt.PluginFieldType.INT32
+            field_name,
+            np.array([field_val], dtype=np.int32),
+            trt.PluginFieldType.INT32,
         )
         for field_name, field_val in [
-            ("num_q_heads", nq),
-            ("num_kv_heads", nkv),
-            ("head_size", d),
-            ("enable_tree_attention", 0),
-            ("enable_fp8_kv_cache", 0),
-            ("sliding_window_size", -1),
+            ("num_q_heads", int(num_q_heads)),
+            ("num_kv_heads", int(num_kv_heads)),
+            ("head_size", int(head_size)),
+            ("enable_tree_attention", int(enable_tree_attention)),
+            ("enable_fp8_kv_cache", int(enable_fp8_kv_cache)),
+            ("sliding_window_size", int(sliding_window_size)),
             ("enable_bidirectional_prefill", enable_bidirectional_prefill),
         ]
     ]
+    if bool(enable_fp8_kv_cache) and qkv_scales is not None:
+        field_list.append(
+            trt.PluginField(
+                "qkv_scales",
+                np.array(list(qkv_scales), dtype=np.float32),
+                trt.PluginFieldType.FLOAT32,
+            )
+        )
 
     plugin = creator.create_plugin(name, trt.PluginFieldCollection(field_list))
     if plugin is None:
-        raise RuntimeError("Failed to create TensorRT AttentionPlugin")
+        raise RuntimeError("Failed to create AttentionPlugin")
 
-    qkv = get_trt_tensor(ctx, qkv, f"{name}_qkv") if not isinstance(qkv, trt.ITensor) else qkv
-    q, k, v = _slice_qkv_for_attention_plugin(ctx, qkv, nq, nkv, d, name)
     plugin_inputs = [q, k, v, kv, ctx_len, rope, kv_cache_start_idx]
+    if bool(enable_tree_attention):
+        plugin_inputs.extend([attention_mask, position_ids])
+
     inputs = [
-        (
-            get_trt_tensor(ctx, tensor, f"{name}_i{idx}")
-            if not isinstance(tensor, trt.ITensor)
-            else tensor
-        )
+        get_trt_tensor(ctx, tensor, f"{name}_i{idx}")
+        if not isinstance(tensor, trt.ITensor)
+        else tensor
         for idx, tensor in enumerate(plugin_inputs)
     ]
 
-    if len(inputs[4].shape) == 2 and inputs[4].shape[1] == 1:
-        shuffle_layer = ctx.net.add_shuffle(inputs[4])
-        shuffle_layer.reshape_dims = (inputs[4].shape[0],)
-        inputs[4] = shuffle_layer.get_output(0)
-
-    if len(inputs[6].shape) == 2 and inputs[6].shape[1] == 1:
-        shuffle_layer = ctx.net.add_shuffle(inputs[6])
-        shuffle_layer.reshape_dims = (inputs[6].shape[0],)
-        inputs[6] = shuffle_layer.get_output(0)
+    kv_cache_start_idx_input_idx = 6
+    if (
+        len(inputs[kv_cache_start_idx_input_idx].shape) == 2
+        and inputs[kv_cache_start_idx_input_idx].shape[1] == 1
+    ):
+        shuffle_layer = ctx.net.add_shuffle(inputs[kv_cache_start_idx_input_idx])
+        shuffle_layer.reshape_dims = (inputs[kv_cache_start_idx_input_idx].shape[0],)
+        inputs[kv_cache_start_idx_input_idx] = shuffle_layer.get_output(0)
 
     layer = ctx.net.add_plugin_v2(inputs, plugin)
     layer.name = name
     return layer.get_output(0), layer.get_output(1)
+
+
+@dynamo_tensorrt_converter(
+    torch.ops.trt.vit_attention_plugin.default,
+    supports_dynamic_shapes=True,
+    priority=ConverterPriority.HIGH,
+)
+def convert_vit_attention_plugin(ctx: ConversionContext, target, args, kwargs, name):
+    del target, kwargs
+    args = list(args)
+    q, k, v, cu_seqlens, max_seqlen_carrier = args[:5]
+    num_heads = args[5]
+    head_size = args[6]
+
+    creator = get_trt_plugin_creator("ViTAttentionPlugin", "1", "")
+    if creator is None:
+        raise RuntimeError("ViTAttentionPlugin not found in TensorRT plugin registry")
+
+    field_list = [
+        trt.PluginField(
+            "num_heads", np.array([int(num_heads)], dtype=np.int32), trt.PluginFieldType.INT32
+        ),
+        trt.PluginField(
+            "head_size", np.array([int(head_size)], dtype=np.int32), trt.PluginFieldType.INT32
+        ),
+    ]
+    plugin = creator.create_plugin(name, trt.PluginFieldCollection(field_list))
+    if plugin is None:
+        raise RuntimeError("Failed to create ViTAttentionPlugin")
+
+    inputs = []
+    for idx, tensor in enumerate([q, k, v, cu_seqlens, max_seqlen_carrier]):
+        tensor_name = f"{name}_i{idx}"
+        trt_tensor = (
+            get_trt_tensor(ctx, tensor, tensor_name)
+            if not isinstance(tensor, trt.ITensor)
+            else tensor
+        )
+        if not trt_tensor.name:
+            trt_tensor.name = tensor_name
+        inputs.append(trt_tensor)
+
+    layer = ctx.net.add_plugin_v2(inputs, plugin)
+    layer.name = name
+    output = layer.get_output(0)
+    if not output.name:
+        output.name = f"{name}_output"
+    return output

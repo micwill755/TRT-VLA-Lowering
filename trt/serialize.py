@@ -183,6 +183,10 @@ def load_serialized_modules(
     specs: tuple[SerializedModuleSpec, ...],
     plugin_info_aliases: dict[str, tuple[str, str]] | None = None,
 ):
+    from trt.plugin_utils import load_plugins_for_trt
+
+    load_plugins_for_trt()
+
     engine_root = pathlib.Path(engine_root)
 
     engines: dict[str, SerializedTRTEngine] = {}

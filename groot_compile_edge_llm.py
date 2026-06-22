@@ -63,9 +63,11 @@ from trt.language import (
     GROOTLanguageContextWrapper,
     compute_vit_expanded_seq_len,
     language_edge_llm_config,
+    language_edge_trt_settings,
     language_head_dim,
     make_dummy_inputs_embeds,
     make_groot_language_context_wrapper,
+    make_language_edge_input_specs,
     FlatKVLanguageEngineWrapper,
     save_embedding_table,
 )
@@ -82,7 +84,6 @@ from trt.measure import (
 
 )
 from trt.plugin_utils import (
-    register_plugin_op,
     load_plugin,
     patch_vision_attention,  
     restore_attention,
@@ -130,7 +131,8 @@ VISION_TRT_SETTINGS = {
 MODEL_ID = "nvidia/GR00T-N1.5-3B"
 SEED = 42
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_GROOT_RUNTIME_BIN = WORKSPACE_ROOT / "gitlab/TensorRT-Edge-LLM/build-plugin-trt10/examples/groot/groot_runtime_smoke"
+DEFAULT_GROOT_RUNTIME_BIN = WORKSPACE_ROOT / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/examples/groot/groot_runtime_smoke"
+DEFAULT_EDGE_LLM_PLUGIN_SO = WORKSPACE_ROOT / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/libNvInfer_edgellm_plugin.so"
 
 GROOT_EMBODIMENT_MAPPING = {
     "new_embodiment": 31,
@@ -374,6 +376,7 @@ def save_lm_engine_for_edge_llm(
     dtype=torch.float16,
     model_type="language",
     io: PipelineIOSpec,
+    tokenizer=None,
 ):
     language_model = copy.deepcopy(core.backbone.eagle_model.language_model).to(
         device=device,
@@ -425,6 +428,7 @@ def save_lm_engine_for_edge_llm(
         device=device,
         dtype=torch.int32,
     )
+    context_lengths = ctx_len
 
     wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
     # Placeholder RoPE cache for export/compile tracing (values are ignored).
@@ -442,32 +446,44 @@ def save_lm_engine_for_edge_llm(
         device=device,
         dtype=torch.int64,
     )
-    sample_inputs = (
+    flat_tensors = (
         input_embs,
         rope_rotary_cos_sin,
-        ctx_len,
+        context_lengths,
         kvcache_start_index,
         last_token_ids,
         *kv_caches,
     )
     input_names = io.language_input_names(len(kv_caches))
+    input_specs = make_language_edge_input_specs(
+        input_names,
+        flat_tensors,
+        batch_size=batch_size,
+        max_seq_len=max_seq_len,
+    )
 
     with torch.no_grad():
-        example_logits, example_context_embs = wrapper(*sample_inputs)
+        example_logits, example_context_embs = wrapper(*flat_tensors)
 
     save_embedding_table(language_model, engine_dir)
+    if tokenizer is not None:
+        from trt.edge_llm_runtime import save_tokenizer_for_edge_llm
+
+        save_tokenizer_for_edge_llm("", engine_dir, tokenizer=tokenizer)
 
     return save_trt_engine_module(
         wrapper,
-        sample_inputs,
+        flat_tensors,
         engine_dir,
         engine_file="language.engine",
         model_type=model_type,
         component="language",
         input_names=input_names,
         output_names=list(io.language.output_names),
-        dual_optimization_profiles=True,
         example_output=(example_logits, example_context_embs),
+        input_specs=input_specs,
+        flat_tensors=flat_tensors,
+        trt_settings=language_edge_trt_settings(),
         extra_config=language_edge_llm_config(
             cfg,
             max_seq_len=max_seq_len,
@@ -616,6 +632,7 @@ def save_edge_engines_for_edge_llm(
     accuracy_check: bool = True,
     engine_root: str,
     io: PipelineIOSpec,
+    tokenizer=None,
 ) -> tuple[nn.Module | None, nn.Module | None, nn.Module | None, dict]:
     engine_root = str(pathlib.Path(engine_root))
     tokenized_data = model_inputs['tokenized_data']
@@ -697,6 +714,7 @@ def save_edge_engines_for_edge_llm(
         position_ids=None,
         dtype=torch.float16,
         io=io,
+        tokenizer=tokenizer,
     )
 
     language_inputs = build_language_inputs(
@@ -1389,7 +1407,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vision-engine-dir", type=str, default=None, help="Optional override for the vision engine directory.")
     parser.add_argument("--language-engine-dir", type=str, default=None, help="Optional override for the language engine directory.")
 
-    parser.add_argument("--plugin-so", type=str, default=os.environ.get("EDGELLM_TRT_PLUGIN_SO") or os.environ.get("EDGE_LLM_PLUGIN_SO"), help="Path to libNvInfer_edgellm_plugin.so.")
+    parser.add_argument(
+        "--plugin-so",
+        type=str,
+        default=os.environ.get("EDGELLM_TRT_PLUGIN_SO")
+        or os.environ.get("EDGE_LLM_PLUGIN_SO")
+        or str(DEFAULT_EDGE_LLM_PLUGIN_SO),
+        help="Path to libNvInfer_edgellm_plugin.so.",
+    )
     parser.add_argument("--device", type=str, default="cuda", help="Compile device.")
 
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed used for compile/test tensors.")
@@ -1406,6 +1431,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-pytorch", action="store_true", help="Skip eager PyTorch action rollout.")
     parser.add_argument("--skip-trt", action="store_true", help="Skip Python TRT plugin action rollout.")
     parser.add_argument("--skip-engine", action="store_true", help="Skip Python serialized .engine action rollout.")
+    parser.add_argument(
+        "--skip-export",
+        action="store_true",
+        help="Skip TensorRT .engine export and load existing engines from --engine-dir.",
+    )
     parser.add_argument("--no-stage-parity", action="store_true", help="Skip staged C++ vs eager parity diagnostics.")
     parser.add_argument("--num-iterations", type=int, default=12, help="Total timing iterations including warmup.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations to exclude from summary.")
@@ -1474,20 +1504,24 @@ def main() -> int:
         )
 
     if not args.skip_engine:
-        _, _, _, serialized_engine_info = save_edge_engines_for_edge_llm(
-            model,
-            policy,
-            device,
-            compile_inputs,
-            seed=args.seed,
-            max_generation_length=args.max_generation_length,
-            num_traj_samples=args.num_traj_samples,
-            max_seq_len=args.max_seq_len,
-            debug=args.debug,
-            accuracy_check=not args.no_accuracy_check,
-            engine_root=args.engine_dir,
-            io=GROOT_EDGE_IO,
-        )
+        if args.skip_export:
+            serialized_engine_info = {"engine_root": args.engine_dir}
+        else:
+            _, _, _, serialized_engine_info = save_edge_engines_for_edge_llm(
+                model,
+                policy,
+                device,
+                compile_inputs,
+                seed=args.seed,
+                max_generation_length=args.max_generation_length,
+                num_traj_samples=args.num_traj_samples,
+                max_seq_len=args.max_seq_len,
+                debug=args.debug,
+                accuracy_check=not args.no_accuracy_check,
+                engine_root=args.engine_dir,
+                io=GROOT_EDGE_IO,
+                tokenizer=getattr(processor, "tokenizer", processor),
+            )
         edge_plugin_info = serialized_engine_info
 
     engine_vision = engine_lm = engine_diffusion = engine_info = None

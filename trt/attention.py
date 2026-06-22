@@ -8,7 +8,8 @@ class PluginAttention(nn.Module):
     Model-agnostic Plugin Attention module that replaces standard attention.
 
     This module wraps the projection layers from the original attention module
-    and uses the tensorrt_edge_llm::xqa_attn plugin op for the attention computation.
+    and uses ``trt.attention_plugin`` with separate Q/K/V tensors for the
+    attention computation.
 
     Supports:
     - Qwen2.5, Llama: Standard attention
@@ -110,8 +111,6 @@ class PluginAttention(nn.Module):
             k = self.k_norm(k)
             k = k.view(batch_size, seq_len, -1)
 
-        qkv = torch.cat([q, k, v], dim=-1)
-
         if ctx_len is None:
             ctx_len = torch.tensor(
                 [seq_len], dtype=torch.int32, device=hidden_states.device
@@ -123,20 +122,29 @@ class PluginAttention(nn.Module):
         if kvcache_start_index is None:
             raise ValueError("kvcache_start_index must be provided")
 
-        attn_out, updated_kv = torch.ops.tensorrt_edge_llm.xqa_attn.default(
-            qkv,
+        dtype = q.dtype
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
+
+        attn_out, updated_kv = torch.ops.trt.attention_plugin.default(
+            q,
+            k,
+            v,
             past_key_value,
             ctx_len,
             rope_rotary_cos_sin,
             kvcache_start_index,
             self.num_heads,
             self.num_key_value_heads,
+            False,
             self.head_dim,
-            self.enable_bidirectional_prefill,
+            False,
+            -1,
         )
 
         # Use attn_hidden_size for reshape (may differ from hidden_size in Qwen3)
-        attn_out = attn_out.reshape(batch_size, seq_len, self.attn_hidden_size)
+        attn_out = attn_out.reshape(batch_size, seq_len, self.attn_hidden_size).to(dtype)
         output = self.o_proj(attn_out)
         return output, updated_kv
 

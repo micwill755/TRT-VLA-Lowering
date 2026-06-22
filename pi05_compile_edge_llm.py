@@ -26,7 +26,7 @@ from trt.io_spec import (
 from trt.data import make_batch
 from trt.diffusion import StaticActionVelocityStep, PI05PrefixKVStepEncoder
 from trt.language import (
-    FlatKVLanguageEngineWrapper,
+    FlatKVLMHiddenWrapper,
     compile_language_trt_with_plugin,
     language_edge_llm_config,
     language_head_dim,
@@ -52,7 +52,6 @@ from trt.plugin_utils import (
     infer_siglip_seq_len,
     load_plugin,
     patch_vision_attention,
-    register_plugin_op,
     restore_attention,
     load_plugins_for_trt
 )
@@ -377,7 +376,7 @@ def save_lm_engine_for_edge_llm(
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
 
-    wrapper = FlatKVLanguageEngineWrapper(lm_wrapper).to(device=device).eval()
+    wrapper = FlatKVLMHiddenWrapper(lm_wrapper).to(device=device).eval()
     sample_inputs = (
         prefix_embs,
         rope_rotary_cos_sin,
@@ -400,7 +399,6 @@ def save_lm_engine_for_edge_llm(
         component="language",
         input_names=input_names,
         output_names=list(io.language.output_names),
-        dual_optimization_profiles=True,
         example_output=example_output,
         extra_config=language_edge_llm_config(
             cfg,

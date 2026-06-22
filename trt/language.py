@@ -1,6 +1,6 @@
 """Plugin-attention language models for TensorRT export and Edge-LLM runtime.
 
-This module wraps HuggingFace decoder stacks with ``PluginAttention`` (xqa_attn)
+This module wraps HuggingFace decoder stacks with ``PluginAttention`` (trt attention plugin)
 and manual layer loops so graphs match ``LLMEngineRunner`` I/O:
 
   inputs_embeds, rope_rotary_cos_sin, context_lengths, kvcache_start_index,
@@ -15,6 +15,7 @@ import pathlib
 
 import torch
 import torch.nn as nn
+import torch_tensorrt
 
 from trt.attention import PluginAttention
 from trt.compile import compile_trt_module
@@ -60,6 +61,12 @@ def _install_plugin_attention(
     enable_bidirectional_prefill: int = 1,
 ) -> None:
     """Replace each decoder layer's self_attn with PluginAttention."""
+    from trt.plugin_utils import set_plugin_config_from_model
+
+    set_plugin_config_from_model(
+        config,
+        enable_bidirectional_prefill=enable_bidirectional_prefill,
+    )
     for i, layer in enumerate(lm.layers):
         layer.self_attn = PluginAttention(
             layer.self_attn,
@@ -74,7 +81,12 @@ def _install_plugin_attention(
 # ---------------------------------------------------------------------------
 
 class FlatKVLanguageEngineWrapper(nn.Module):
-    """Expose list-style KV caches as variadic TensorRT engine inputs."""
+    """GR00T language export wrapper: flat variadic KV inputs for TRT bindings.
+
+    Forward parameter names must match ``LLMEngineRunner`` bindings
+    (``context_lengths``, ``past_key_values_*``) so Torch-TRT preserves
+    them in the serialized engine.
+    """
 
     def __init__(self, plugin_language: nn.Module):
         super().__init__()
@@ -84,18 +96,42 @@ class FlatKVLanguageEngineWrapper(nn.Module):
         self,
         inputs_embeds,
         rope_rotary_cos_sin,
-        ctx_len,
+        context_lengths,
         kvcache_start_index,
         last_token_ids,
-        *kv_caches,
+        *past_key_values,
     ):
         return self.plugin_language(
             inputs_embeds,
             rope_rotary_cos_sin,
-            ctx_len,
+            context_lengths,
             kvcache_start_index,
             last_token_ids,
-            list(kv_caches),
+            list(past_key_values),
+        )
+
+
+class FlatKVLMHiddenWrapper(nn.Module):
+    """PI0.5-style LM export wrapper: flat variadic KV inputs (static export)."""
+
+    def __init__(self, plugin_language: nn.Module):
+        super().__init__()
+        self.plugin_language = plugin_language
+
+    def forward(
+        self,
+        inputs_embeds,
+        rope_rotary_cos_sin,
+        context_lengths,
+        kvcache_start_index,
+        *past_key_values,
+    ):
+        return self.plugin_language(
+            inputs_embeds,
+            rope_rotary_cos_sin,
+            context_lengths,
+            kvcache_start_index,
+            list(past_key_values),
         )
 
 
@@ -690,6 +726,128 @@ def save_embedding_table(language_model: nn.Module, output_dir: str | pathlib.Pa
     embed_tokens = language_model.get_input_embeddings()
     embedding_weight = embed_tokens.weight.data.detach().cpu().half()
     save_file({"embedding": embedding_weight}, output_dir / "embedding.safetensors")
+
+
+# ---------------------------------------------------------------------------
+# Edge-LLM TRT input specs (PR #4325 multi-profile)
+# ---------------------------------------------------------------------------
+
+def make_language_edge_input_specs(
+    input_names,
+    sample_inputs,
+    *,
+    batch_size: int,
+    max_seq_len: int,
+):
+    """Build ``torch_tensorrt.Input`` specs for Edge-LLM language engine export.
+
+    Profile 0 is prefill (context); profile 1 is decode (generation). Shapes
+    follow ``LLMBuilder::setupVanillaProfiles()`` / Edge-LLM ONNX export.
+
+    ``inputs_embeds`` declares disjoint optimization profiles with a shared
+    ``seq_len`` export symbol. ``kvcache_start_index`` uses a single dynamic
+    range (min=0) on both profiles because ``Input.profiles`` rejects min=0.
+    All other bindings reuse static trace shapes on every profile.
+    """
+    batch_size = int(batch_size)
+    max_seq_len = int(max_seq_len)
+    opt_prefill_seq = max(max_seq_len // 2, 1)
+    hidden_size = int(sample_inputs[0].shape[2])
+
+    prefill_profile = {
+        "min": (1, 1, hidden_size),
+        "opt": (batch_size, opt_prefill_seq, hidden_size),
+        "max": (batch_size, max_seq_len, hidden_size),
+    }
+    decode_profile = {
+        "min": (1, 1, hidden_size),
+        "opt": (batch_size, 1, hidden_size),
+        "max": (batch_size, 1, hidden_size),
+    }
+
+    kv_template = next(
+        (tensor for name, tensor in zip(input_names, sample_inputs) if name.startswith("past_key_values_")),
+        None,
+    )
+    kv_cache_profile = None
+    if kv_template is not None:
+        kv_cache_profile = {
+            "min": (1, 2, int(kv_template.shape[2]), 1, int(kv_template.shape[4])),
+            "opt": (
+                batch_size,
+                2,
+                int(kv_template.shape[2]),
+                max_seq_len,
+                int(kv_template.shape[4]),
+            ),
+            "max": (
+                batch_size,
+                2,
+                int(kv_template.shape[2]),
+                max_seq_len,
+                int(kv_template.shape[4]),
+            ),
+        }
+
+    specs = []
+    for name, tensor in zip(input_names, sample_inputs):
+        if name == "inputs_embeds":
+            specs.append(
+                torch_tensorrt.Input(
+                    profiles=[prefill_profile, decode_profile],
+                    shared_dims={1: "seq_len"},
+                    dtype=tensor.dtype,
+                    format=torch.contiguous_format,
+                    name=name,
+                )
+            )
+        elif name == "kvcache_start_index":
+            specs.append(
+                torch_tensorrt.Input(
+                    min_shape=(0,),
+                    opt_shape=(1,),
+                    max_shape=(max(batch_size, 1),),
+                    dtype=tensor.dtype,
+                    format=torch.contiguous_format,
+                    name=name,
+                )
+            )
+        elif name.startswith("past_key_values_"):
+            if kv_cache_profile is None:
+                raise ValueError("past_key_values_* inputs require a KV cache template tensor")
+            specs.append(
+                torch_tensorrt.Input(
+                    profiles=[kv_cache_profile, kv_cache_profile],
+                    dtype=tensor.dtype,
+                    format=torch.contiguous_format,
+                    name=name,
+                )
+            )
+        else:
+            specs.append(
+                torch_tensorrt.Input(
+                    shape=tuple(tensor.shape),
+                    dtype=tensor.dtype,
+                    format=torch.contiguous_format,
+                    name=name,
+                )
+            )
+    return tuple(specs)
+
+def language_edge_trt_settings(**overrides):
+    """Compile kwargs for Edge-LLM language engines (dynamic seq + AttentionPlugin).
+
+    Pass the returned dict as ``trt_settings`` to ``save_trt_engine_module``.
+    Base settings (TF32, workspace, ``require_full_compilation``, etc.) still
+    come from ``compile.py``; this adds only language-specific overrides for
+    PR #4325 multi-profile + plugin attention conversion.
+    """
+    settings = {
+        "assume_dynamic_shape_support": True,
+        "use_explicit_typing": False,
+    }
+    settings.update(overrides)
+    return settings
 
 
 # ---------------------------------------------------------------------------
