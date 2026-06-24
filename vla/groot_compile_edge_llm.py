@@ -9,7 +9,7 @@ import json
 import logging
 import time
 
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -38,9 +38,10 @@ from trt.helper import (
     get_processor
 )
 from trt.data import (
+    create_pil_messages,
     load_test_data,
     prepare_model_inputs,
-    pack_state
+    pack_state,
 )
 from trt.packing import (
     MultimodalPromptProcessor,
@@ -1270,7 +1271,7 @@ def compile_trt_with_plugin(
 def run_inference_pytorch_groot(
     model,
     policy,
-    create_inputs_fn: Callable[[], dict],
+    model_inputs: dict[str, Any],
     *,
     seed: int,
     device: torch.device,
@@ -1280,7 +1281,6 @@ def run_inference_pytorch_groot(
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
 
-    model_inputs = create_inputs_fn()
     tokenized_data = model_inputs["tokenized_data"]
     input_ids = tokenized_data["input_ids"]
     attention_mask = tokenized_data["attention_mask"]
@@ -1367,7 +1367,7 @@ def run_inference_pytorch_groot(
 def run_inference_trt_plugin(
     model,
     policy,
-    create_inputs_fn: Callable[[], dict],
+    model_inputs: dict[str, Any],
     *,
     trt_vision,
     trt_lm,
@@ -1381,7 +1381,6 @@ def run_inference_trt_plugin(
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
 
-    model_inputs = create_inputs_fn()
     tokenized_data = model_inputs["tokenized_data"]
     input_ids = tokenized_data["input_ids"]
     attention_mask = tokenized_data["attention_mask"]
@@ -1635,19 +1634,6 @@ def compute_groot_policy_action_metrics(
 
     return compute_action_parity_metrics(pred_actions, target_actions)
 
-def make_create_inputs_fn(processor, data, messages, device):
-    def create_inputs():
-        return prepare_model_inputs(
-            processor,
-            processor.process_vision_info,
-            {"add_generation_prompt": True},
-            {"images_kwargs": {"min_dynamic_tiles": 1, "max_dynamic_tiles": 1, "use_thumbnail": False}},
-            data,
-            messages,
-            device,
-        )
-    return create_inputs
-    
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export GR00T TensorRT engines for TensorRT-Edge-LLM")
 
@@ -1661,14 +1647,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vision-engine-dir", type=str, default=None, help="Optional override for the vision engine directory.")
     parser.add_argument("--language-engine-dir", type=str, default=None, help="Optional override for the language engine directory.")
 
-    parser.add_argument(
-        "--plugin-so",
-        type=str,
-        default=os.environ.get("EDGELLM_TRT_PLUGIN_SO")
-        or os.environ.get("EDGE_LLM_PLUGIN_SO")
-        or str(DEFAULT_EDGE_LLM_PLUGIN_SO),
-        help="Path to libNvInfer_edgellm_plugin.so.",
-    )
     parser.add_argument("--device", type=str, default="cuda", help="Compile device.")
 
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed used for compile/test tensors.")
@@ -1702,18 +1680,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    if args.plugin_so:
-        os.environ["EDGELLM_TRT_PLUGIN_SO"] = args.plugin_so
-
     # load in episode 0, frame 0 using lerobot/libero dataset, frame 0 has 2 cameras (data is 2 still images)
-    data, messages = load_test_data(
+    data = load_test_data(
         dataset_id=args.dataset_id,
         episode_index=args.episode_index,
         frame_index=args.frame_index,
     )
+    # Eagle processor doesn’t take LeRobot tensors directly. Its API is chat-shaped
+    # GR00T needs an extra step between raw data and prepare_model_inputs
+    pil_messages = create_pil_messages(data)
 
     cache_dir = HF_LEROBOT_HOME / DEFAULT_TOKENIZER_ASSETS_REPO
     processor = get_processor(
@@ -1729,14 +1706,15 @@ def main() -> int:
 
     # TODO: right now we are using the same episode 0 and frame 0
     # each iteration should use a different frame
-    create_inputs_fn = make_create_inputs_fn(
+    compile_inputs = prepare_model_inputs(
         processor,
+        processor.process_vision_info,
+        {"add_generation_prompt": True},
+        {"images_kwargs": {"min_dynamic_tiles": 1, "max_dynamic_tiles": 1, "use_thumbnail": False}},
         data,
-        messages,
+        pil_messages,
         device,
     )
-
-    compile_inputs = create_inputs_fn()
 
     print(
         f"dataset={args.dataset_id}  episode={args.episode_index}  frame={args.frame_index}  "
@@ -1812,7 +1790,7 @@ def main() -> int:
         pt_ref_for_trt, _, _ = run_inference_pytorch_groot(
             model,
             policy,
-            create_inputs_fn,
+            compile_inputs,
             seed=args.seed,
             device=device,
             vision_module=trt_vision,
@@ -1823,7 +1801,7 @@ def main() -> int:
         pt_ref_for_engine, _, _ = run_inference_pytorch_groot(
             model,
             policy,
-            create_inputs_fn,
+            compile_inputs,
             seed=args.seed,
             device=device,
             vision_module=engine_vision,
@@ -1843,7 +1821,7 @@ def main() -> int:
             pred_actions_pt, extra_pt, _ = run_inference_pytorch_groot(
                 model,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 seed=args.seed,
                 device=device,
             )
@@ -1862,7 +1840,7 @@ def main() -> int:
             pred_actions_trt, extra_trt, _ = run_inference_trt_plugin(
                 model,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 trt_vision=trt_vision,
                 trt_lm=trt_lm,
                 trt_diffusion=trt_diffusion,
@@ -1897,7 +1875,7 @@ def main() -> int:
             pred_actions_engine, extra_engine, _ = run_inference_trt_plugin(
                 model,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 trt_vision=engine_vision,
                 trt_lm=engine_lm,
                 trt_diffusion=engine_diffusion,

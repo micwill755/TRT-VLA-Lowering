@@ -5,7 +5,6 @@ import json
 import os
 import pathlib
 import time
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -25,7 +24,7 @@ from trt.io_spec import (
     PipelineIOSpec,
     action_rollout_extra_config,
 )
-from trt.data import make_batch
+from trt.data import load_test_data, prepare_policy_batch
 from trt.diffusion import StaticActionVelocityStep, PI05PrefixKVStepEncoder
 from trt.language import (
     compile_language_trt_with_plugin,
@@ -132,14 +131,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episode-index", type=int, default=0, help="Dataset episode index used for the compile sample.")
     parser.add_argument("--frame-index", type=int, default=0, help="Dataset frame index used for the compile sample.")
     parser.add_argument("--engine-dir", type=str, default="/tmp/pi05_edge_llm", help="Root directory for exported PI0.5 engines.")
-    parser.add_argument(
-        "--plugin-so",
-        type=str,
-        default=os.environ.get("EDGELLM_TRT_PLUGIN_SO")
-        or os.environ.get("EDGE_LLM_PLUGIN_SO")
-        or str(DEFAULT_EDGE_LLM_PLUGIN_SO),
-        help="Path to libNvInfer_edgellm_plugin.so.",
-    )
     parser.add_argument("--device", type=str, default="cuda", help="Compile device.")
     parser.add_argument(
         "--llm-inference-bin",
@@ -448,25 +439,6 @@ def compare_pi05_edge_pipeline_to_eager(
         f"full rollout action_ade={metrics['action_ade']:.6f}  "
         f"mean_abs={metrics['mean_abs']:.6f}"
     )
-
-
-def load_pi05_batch(policy: Any, args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
-    return make_batch(
-        policy,
-        args.model_id,
-        device,
-        fill_missing=True,
-        dataset_id=args.dataset_id,
-        episode_index=args.episode_index,
-        frame_index=args.frame_index,
-    )
-
-
-def make_pi05_create_inputs_fn(batch: dict[str, Any]) -> Callable[[], dict[str, Any]]:
-    def create_inputs() -> dict[str, Any]:
-        return batch
-
-    return create_inputs
 
 
 def action_output_dim(policy: Any) -> int:
@@ -1327,13 +1299,12 @@ def save_edge_engines_for_edge_llm(
 def run_inference_pytorch_pi05(
     core,
     policy,
-    create_inputs_fn: Callable[[], dict[str, Any]],
+    batch: dict[str, Any],
     *,
     seed: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, dict, float]:
     set_reproducible_seed(seed, device)
-    batch = create_inputs_fn()
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
 
     start_time = time.perf_counter()
@@ -1387,7 +1358,7 @@ def run_inference_pytorch_pi05(
 def run_inference_trt_plugin(
     core,
     policy,
-    create_inputs_fn: Callable[[], dict[str, Any]],
+    batch: dict[str, Any],
     *,
     trt_vision,
     trt_lm,
@@ -1397,7 +1368,6 @@ def run_inference_trt_plugin(
     device: torch.device,
 ) -> tuple[torch.Tensor, dict, float]:
     set_reproducible_seed(seed, device)
-    batch = create_inputs_fn()
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
 
     start_time = time.perf_counter()
@@ -1490,16 +1460,23 @@ def main() -> int:
     args = parse_args()
     configure_torch_runtime()
 
-    if args.plugin_so:
-        os.environ["EDGELLM_TRT_PLUGIN_SO"] = args.plugin_so
-
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    data = load_test_data(
+        dataset_id=args.dataset_id,
+        episode_index=args.episode_index,
+        frame_index=args.frame_index,
+    )
 
     policy = load_policy(PI05Policy, args.model_id, device).to(device).eval()
     core = policy.model.to(device).eval()
-    batch = load_pi05_batch(policy, args, device)
-    create_inputs_fn = make_pi05_create_inputs_fn(batch)
-    compile_inputs = create_inputs_fn()
+    compile_inputs = prepare_policy_batch(
+        policy,
+        data,
+        device,
+        args.model_id,
+        fill_missing=True,
+    )
 
     print(
         f"model={args.model_id}  dataset={args.dataset_id}  "
@@ -1569,7 +1546,6 @@ def main() -> int:
             engine_root=args.engine_dir,
             input_file=smoke_input,
             llm_inference_bin=args.llm_inference_bin,
-            plugin_so=args.plugin_so,
             max_generate_length=0,
             dump_output=True,
         )
@@ -1623,7 +1599,7 @@ def main() -> int:
             pred_actions_pt, _, _ = run_inference_pytorch_pi05(
                 core,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 seed=args.seed,
                 device=device,
             )
@@ -1640,7 +1616,7 @@ def main() -> int:
             pred_actions_trt, _, _ = run_inference_trt_plugin(
                 core,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 trt_vision=trt_vision,
                 trt_lm=trt_lm,
                 trt_diffusion=trt_diffusion,
@@ -1668,7 +1644,7 @@ def main() -> int:
             pred_actions_engine, _, _ = run_inference_trt_plugin(
                 core,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 trt_vision=engine_vision,
                 trt_lm=engine_lm,
                 trt_diffusion=engine_diffusion,

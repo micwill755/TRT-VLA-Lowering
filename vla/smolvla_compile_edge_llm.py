@@ -22,7 +22,6 @@ import math
 import os
 import pathlib
 import time
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -36,7 +35,7 @@ from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LAN
 
 from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
 from trt.compile import dump_edge_fixture, save_trt_engine_module
-from trt.data import make_batch
+from trt.data import load_test_data, prepare_policy_batch
 from trt.diffusion import SmolVLAPrefixKVStepEncoder, StaticActionVelocityStep
 from trt.io_spec import (
     PI05_ACTION_ROLLOUT,
@@ -120,7 +119,6 @@ ACTION_TRT_SETTINGS = {
     **VISION_TRT_SETTINGS,
 }
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export SmolVLA TensorRT engines for TensorRT-Edge-LLM")
 
@@ -129,14 +127,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episode-index", type=int, default=0, help="Dataset episode index used for the compile sample.")
     parser.add_argument("--frame-index", type=int, default=0, help="Dataset frame index used for the compile sample.")
     parser.add_argument("--engine-dir", type=str, default="/tmp/smolvla_edge_llm", help="Root directory for exported SmolVLA engines.")
-    parser.add_argument(
-        "--plugin-so",
-        type=str,
-        default=os.environ.get("EDGELLM_TRT_PLUGIN_SO")
-        or os.environ.get("EDGE_LLM_PLUGIN_SO")
-        or str(DEFAULT_EDGE_LLM_PLUGIN_SO),
-        help="Path to libNvInfer_edgellm_plugin.so.",
-    )
     parser.add_argument("--device", type=str, default="cuda", help="Compile device.")
     parser.add_argument(
         "--llm-inference-bin",
@@ -188,25 +178,6 @@ def configure_torch_runtime() -> None:
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.set_float32_matmul_precision("highest")
-
-
-def load_smolvla_batch(policy: Any, args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
-    return make_batch(
-        policy,
-        args.model_id,
-        device,
-        fill_missing=True,
-        dataset_id=args.dataset_id,
-        episode_index=args.episode_index,
-        frame_index=args.frame_index,
-    )
-
-
-def make_smolvla_create_inputs_fn(batch: dict[str, Any]) -> Callable[[], dict[str, Any]]:
-    def create_inputs() -> dict[str, Any]:
-        return batch
-
-    return create_inputs
 
 
 def action_output_dim(policy: Any) -> int:
@@ -1170,13 +1141,12 @@ def save_edge_engines_for_edge_llm(
 def run_inference_pytorch_smolvla(
     core,
     policy,
-    create_inputs_fn: Callable[[], dict[str, Any]],
+    batch: dict[str, Any],
     *,
     seed: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, dict, float]:
     set_reproducible_seed(seed, device)
-    batch = create_inputs_fn()
     images, img_masks, tokens, masks, state = prepare_smolvla_batch(policy, batch, device)
 
     start_time = time.perf_counter()
@@ -1202,7 +1172,7 @@ def run_inference_pytorch_smolvla(
 def run_inference_smolvla_engines(
     core,
     policy,
-    create_inputs_fn: Callable[[], dict[str, Any]],
+    batch: dict[str, Any],
     *,
     vision_runner,
     language_runner: SerializedPI05Language,
@@ -1212,7 +1182,6 @@ def run_inference_smolvla_engines(
     device: torch.device,
 ) -> tuple[torch.Tensor, dict, float]:
     set_reproducible_seed(seed, device)
-    batch = create_inputs_fn()
     images, img_masks, tokens, masks, state = prepare_smolvla_batch(policy, batch, device)
 
     start_time = time.perf_counter()
@@ -1265,16 +1234,23 @@ def main() -> int:
     args = parse_args()
     configure_torch_runtime()
 
-    if args.plugin_so:
-        os.environ["EDGELLM_TRT_PLUGIN_SO"] = args.plugin_so
-
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    data = load_test_data(
+        dataset_id=args.dataset_id,
+        episode_index=args.episode_index,
+        frame_index=args.frame_index,
+    )
 
     policy = load_policy(SmolVLAPolicy, args.model_id, device).to(device).eval()
     core = policy.model.to(device).eval()
-    batch = load_smolvla_batch(policy, args, device)
-    create_inputs_fn = make_smolvla_create_inputs_fn(batch)
-    compile_inputs = create_inputs_fn()
+    compile_inputs = prepare_policy_batch(
+        policy,
+        data,
+        device,
+        args.model_id,
+        fill_missing=True,
+    )
 
     print(
         f"model={args.model_id}  dataset={args.dataset_id}  "
@@ -1324,7 +1300,6 @@ def main() -> int:
             engine_root=args.engine_dir,
             input_file=smoke_input,
             llm_inference_bin=args.llm_inference_bin,
-            plugin_so=args.plugin_so,
             max_generate_length=0,
             dump_output=True,
         )
@@ -1378,7 +1353,7 @@ def main() -> int:
             pred_actions_pt, _, _ = run_inference_pytorch_smolvla(
                 core,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 seed=args.seed,
                 device=device,
             )
@@ -1395,7 +1370,7 @@ def main() -> int:
             pred_actions_trt, _, _ = run_inference_smolvla_engines(
                 core,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 vision_runner=trt_vision,
                 language_runner=trt_lm,
                 diffusion_runner=trt_diffusion,
@@ -1427,7 +1402,7 @@ def main() -> int:
             pred_actions_engine, _, _ = run_inference_smolvla_engines(
                 core,
                 policy,
-                create_inputs_fn,
+                compile_inputs,
                 vision_runner=engine_vision,
                 language_runner=engine_lm,
                 diffusion_runner=engine_diffusion,
@@ -1486,7 +1461,6 @@ def main() -> int:
         print(f"  Speedup (Engine vs PyTorch): {speedup:5.2f}x   ({pt_avg:.1f} -> {engine_avg:.1f} ms)")
 
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

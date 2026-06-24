@@ -15,7 +15,7 @@ from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TO
 
 from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module
-from trt.data import make_batch
+from trt.data import DEFAULT_DATASET_ID, load_test_data, prepare_policy_batch
 from trt.diffusion import SmolVLAPrefixKVStepEncoder, StaticActionVelocityStep
 from trt.measure import (
     compare_action_rollout_to_eager,
@@ -315,12 +315,13 @@ def main() -> int:
     policy = load_policy(SmolVLAPolicy, MODEL_ID, device).eval()
     policy = policy.to(device=device, dtype=torch.float32).eval()
 
-    batch = make_batch(
+    data = load_test_data(dataset_id=DATASET_ID or DEFAULT_DATASET_ID)
+    batch = prepare_policy_batch(
         policy,
-        MODEL_ID,
+        data,
         device,
+        MODEL_ID,
         fill_missing=True,
-        dataset_id=DATASET_ID,
     )
 
     core = policy.model.to(device=device, dtype=torch.float32).eval()

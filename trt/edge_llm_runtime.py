@@ -179,7 +179,6 @@ def run_llm_inference_runtime_smoke(
     engine_root: str | pathlib.Path,
     input_file: str | pathlib.Path,
     llm_inference_bin: str | pathlib.Path,
-    plugin_so: str | pathlib.Path | None = None,
     output_file: str | pathlib.Path | None = None,
     max_generate_length: int | None = None,
     dump_output: bool = True,
@@ -203,10 +202,6 @@ def run_llm_inference_runtime_smoke(
         raise FileNotFoundError(f"Missing visual engine under {engine_root / 'visual'}")
 
     env = os.environ.copy()
-    if plugin_so is not None:
-        plugin_so = pathlib.Path(plugin_so)
-        if plugin_so.exists():
-            env["EDGELLM_PLUGIN_PATH"] = str(plugin_so.resolve())
 
     trt_lib = os.environ.get("TRT_PACKAGE_DIR")
     if trt_lib:

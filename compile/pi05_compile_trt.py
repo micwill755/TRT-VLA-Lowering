@@ -22,7 +22,7 @@ from trt.utils import (
     prepare_policy_inputs, 
     make_suffix_position_and_mask
 )
-from trt.data import make_batch
+from trt.data import load_test_data, prepare_policy_batch
 from trt.packing import compact_packed_language_inputs
 from trt.vision import PI05VisualEmbed
 from trt.language import (
@@ -98,7 +98,14 @@ def main() -> int:
     # Load the pretrained PI0.5 policy.
     policy = load_policy(PI05Policy, MODEL_ID, device, False).to(device).eval()
     # Build one representative batch for compilation and metric checks.
-    batch = make_batch(policy, MODEL_ID, device, fill_missing=True)
+    data = load_test_data()
+    batch = prepare_policy_batch(
+        policy,
+        data,
+        device,
+        MODEL_ID,
+        fill_missing=True,
+    )
     # The core model owns the vision, language, and action modules used below.
     core = policy.model.to(device).eval()
 

@@ -19,10 +19,11 @@ from trt.helper import (
     get_processor
 )
 from trt.data import (
+    create_pil_messages,
     load_test_data,
     prepare_model_inputs,
     make_batch,
-    pack_state
+    pack_state,
 )
 from trt.packing import (
     MultimodalPromptProcessor,
@@ -226,11 +227,12 @@ def main() -> int:
     # The core model owns the vision, language/context, and action modules used below.
     model = policy._groot_model.to(device).eval()
 
-    data, messages = load_test_data(
+    data = load_test_data(
         dataset_id="lerobot/libero",
         episode_index=0,
         frame_index=0,
     )
+    messages = create_pil_messages(data)
 
     # create processor and get tokenizer ----
     cache_dir = HF_LEROBOT_HOME / DEFAULT_TOKENIZER_ASSETS_REPO

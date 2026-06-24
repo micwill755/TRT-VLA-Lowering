@@ -1,3 +1,13 @@
+"""Dataset loading and model-specific input preparation for VLA Edge-LLM export.
+
+Shared entry point is ``load_test_data`` (raw LeRobot frame). Each policy family
+then runs its own prepare step:
+
+- PI0.5 / SmolVLA: ``prepare_policy_batch`` (LeRobot preprocessor → token batch)
+- GR00T: ``create_pil_messages`` + ``prepare_model_inputs`` (Eagle processor)
+- GROOT action head: ``pack_state`` (pad state to ``max_state_dim``)
+"""
+
 import torch
 
 from PIL import Image
@@ -11,66 +21,78 @@ from lerobot.utils.constants import OBS_STATE
 
 from trt import helper
 
+# Camera keys read from a LeRobot dataset frame (libero provides image + image2).
 IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
 DEFAULT_DATASET_ID = "lerobot/libero"
 
-# TODO: deprecate this function
-def make_batch(policy, model_id, device, fill_missing=False, dataset_id=DEFAULT_DATASET_ID, episode_index=0, frame_index=0):
-    preprocess, _ = make_pre_post_processors(
-        policy.config,
-        model_id,
-        preprocessor_overrides={"device_processor": {"device": str(device)}},
-    )
 
-    # Load only first episode
-    dataset = LeRobotDataset(dataset_id, episodes=[episode_index])
-    current_frame = dataset[frame_index]
+def _frame_from_test_data(
+    data: dict[str, Any],
+    policy,
+    *,
+    fill_missing: bool = False,
+) -> dict[str, Any]:
+    """Flatten ``load_test_data`` output into a LeRobot observation dict.
 
-    # Extract images and state from the current frame
-    current_images = {
-        key: current_frame[key]
-        for key in IMAGE_KEYS
-        if key in current_frame
-    }
+    ``load_test_data`` nests cameras under ``data["images"]``; the policy
+    preprocessor expects flat keys like ``observation.images.image`` alongside
+    ``observation.state`` and ``task``. When ``fill_missing=True``, zero tensors
+    are inserted for any camera keys declared in ``policy.config.input_features``
+    but absent from the dataset frame (PI0.5 / SmolVLA multi-camera configs).
+    """
+    frame = dict(data["images"])
+    frame[OBS_STATE] = data["state"]
+    frame["task"] = data.get("task", "")
 
-    # frame = raw LeRobot observation dict with images, state, and task (if available)
-    frame = dict(current_images)
-    frame[OBS_STATE] = current_frame[OBS_STATE]
-    frame["task"] = current_frame.get("task", "")
-
-    # Ensure all expected image keys are present, filling in zeros for any missing ones.
     if fill_missing:
         for key, feature in policy.config.input_features.items():
             if key.startswith("observation.images.") and key not in frame:
                 frame[key] = torch.zeros(feature.shape, dtype=torch.float32)
 
+    return frame
+
+
+def prepare_policy_batch(
+    policy,
+    data: dict[str, Any],
+    device: str | torch.device,
+    model_id: str,
+    *,
+    fill_missing: bool = False,
+) -> dict[str, Any]:
+    """Run LeRobot policy preprocessors on raw ``load_test_data`` output.
+
+    Returns a batch dict with policy-specific keys such as ``OBS_LANGUAGE_TOKENS``,
+    ``OBS_LANGUAGE_ATTENTION_MASK``, and normalized image tensors. Used by PI0.5
+    and SmolVLA export paths — not by GR00T or MolmoAct2 (they use their own
+    processor APIs).
+    """
+    preprocess, _ = make_pre_post_processors(
+        policy.config,
+        model_id,
+        preprocessor_overrides={"device_processor": {"device": str(device)}},
+    )
+    frame = _frame_from_test_data(data, policy, fill_missing=fill_missing)
     return preprocess(frame)
 
-def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
-    """
-    Convert a LeRobot image tensor into a PIL image.
-
-    GROOT's Eagle processor expects chat message image entries like:
-        {"type": "image", "image": <PIL.Image.Image>}
-    rather than raw CHW torch tensors.
-    """
-    img = img.detach().cpu()
-
-    if img.dtype.is_floating_point:
-        img = (img.clamp(0, 1) * 255).to(torch.uint8)
-
-    # LeRobot images are usually CHW.
-    if img.ndim == 3 and img.shape[0] in (1, 3):
-        img = img.permute(1, 2, 0)
-
-    return Image.fromarray(img.numpy())
 
 def load_test_data(
     dataset_id: str = DEFAULT_DATASET_ID,
     *,
     episode_index: int = 0,
     frame_index: int = 0,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> dict[str, Any]:
+    """Load one raw observation from a LeRobot dataset (no policy preprocessing).
+
+    Returns a model-agnostic dict:
+
+    - ``images``: ``{observation.images.*: float32 [3, H, W] in [0, 1]}``
+    - ``state``: proprio vector from the frame
+    - ``task``: language instruction string (defaults to ``"Perform the task."``)
+
+    Downstream prepare functions (``prepare_policy_batch``, ``create_pil_messages``,
+    etc.) convert this into model-specific tensors.
+    """
     dataset = LeRobotDataset(dataset_id, episodes=[episode_index])
     frame = dataset[frame_index]
 
@@ -78,28 +100,35 @@ def load_test_data(
         key: frame[key] for key in IMAGE_KEYS if key in frame
     }
 
-    data = {
+    return {
         "images": images,
         "state": frame[OBS_STATE],
         "task": frame.get("task", "") or "Perform the task.",
     }
+
+
+def create_pil_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build HF chat messages with PIL images for Eagle-style processors (GR00T).
+
+    Eagle's ``apply_chat_template`` / ``process_vision_info`` expect message content
+    like ``{"type": "image", "image": <PIL.Image>}``, not raw CHW tensors.
+    Images are sorted by key so camera order is stable across runs.
+    """
+    images = data["images"]
+    task = str(data.get("task", "") or "Perform the task.")
 
     image_content = [
         {"type": "image", "image": _tensor_image_to_pil(img)}
         for _, img in sorted(images.items())
     ]
 
-    messages = [
+    return [
         {
             "role": "user",
-            "content": image_content
-            + [{"type": "text", "text": str([data["task"]])}],
+            "content": image_content + [{"type": "text", "text": str([task])}],
         }
     ]
 
-    return data, messages
-
-# prepare model inputs will be different per model using processor
 def prepare_model_inputs(
     processor,
     vision_info_fn: Callable,
@@ -109,6 +138,13 @@ def prepare_model_inputs(
     messages: list[dict[str, Any]],
     device: str | torch.device = "cuda",
 ) -> dict[str, Any]:
+    """Tokenize chat messages + images via the Eagle (or similar) HF processor.
+
+    Applies the chat template, extracts vision inputs from ``messages``, and runs
+    the processor to produce ``input_ids``, ``attention_mask``, and
+    ``pixel_values``. Passes through ``state`` and ``task`` from ``data`` for the
+    action head. Used by GR00T export after ``create_pil_messages``.
+    """
     text = processor.apply_chat_template(
         messages,
         tokenize=False,
@@ -117,13 +153,6 @@ def prepare_model_inputs(
 
     image_inputs, video_inputs = vision_info_fn(messages)
 
-    '''
-    processor(... does not return combined text+image embeddings yet. It returns processor outputs like:
-
-    input_ids          text token IDs, including image placeholder tokens
-    attention_mask     text mask
-    pixel_values       processed image tensor ~= [2, 3, 224, 224]
-    '''
     tokenized_data = processor(
         text=[text],
         images=image_inputs,
@@ -132,22 +161,22 @@ def prepare_model_inputs(
         padding=True,
         **processor_args,
     )
-    
+
     model_inputs = {
         "tokenized_data": tokenized_data,
         "state": data["state"],
-        "task": data["task"]
+        "task": data["task"],
     }
 
     return helper.to_device(model_inputs, device)
+
 
 def pack_state(
     state: torch.Tensor,
     max_state_dim: int,
     device: str | torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Adapt a raw LeRobot state vector to the fixed GROOT action-head shape.
+    """Pad or truncate a LeRobot state vector to GROOT's fixed action-head width.
 
     Raw dataset frames often provide a small state vector shaped (D,). GROOT's
     state encoder is trained with input_dim=max_state_dim and consumes a
@@ -162,19 +191,15 @@ def pack_state(
     """
     state = torch.as_tensor(state, dtype=torch.float32, device=device)
 
-    # Dataset gives (D,), while model/runtime calls are batched.
     if state.ndim == 1:
         state = state.unsqueeze(0)
 
-    # Treat the current frame as a one-step state history/token.
     if state.ndim == 2:
         state = state.unsqueeze(1)
 
     bsz, _, state_dim = state.shape
     used_dim = min(state_dim, max_state_dim)
 
-    # The state_encoder's linear weights are sized for max_state_dim, so the
-    # last dimension must be fixed even when this robot has fewer state values.
     if state_dim > max_state_dim:
         state = state[:, :, :max_state_dim]
     elif state_dim < max_state_dim:
@@ -197,3 +222,16 @@ def pack_state(
     state_mask[:, :, :used_dim] = True
 
     return state, state_mask
+
+
+def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
+    """Convert a LeRobot CHW float tensor in [0, 1] to an RGB PIL image."""
+    img = img.detach().cpu()
+
+    if img.dtype.is_floating_point:
+        img = (img.clamp(0, 1) * 255).to(torch.uint8)
+
+    if img.ndim == 3 and img.shape[0] in (1, 3):
+        img = img.permute(1, 2, 0)
+
+    return Image.fromarray(img.numpy())
