@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch_tensorrt
 
 from lerobot.policies.pi05 import PI05Policy
-from trt.action_rollout import ActionRolloutContext, PI05ActionAdapter, sample_actions_raw
+from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module
 from trt.measure import (
     compare_action_step,
@@ -28,9 +28,10 @@ from trt.vision import PI05VisualEmbed
 from trt.language import (
     compile_language_trt_with_plugin,
     language_head_dim,
-    make_plugin_lm_hidden_wrapper,
+    make_plugin_lm_causal_wrapper,
     pi05_plugin_lm_smoke_check,
-    run_prefix_language_eager
+    run_prefix_language_eager,
+    unpack_vla_prefix_language_outputs,
 )
 from trt.rope import make_rope_rotary_cos_sin
 from trt.plugin_utils import (
@@ -212,13 +213,13 @@ def main() -> int:
     ).to(device=device, dtype=torch.float16).eval()
     decoder = getattr(lm, "model", lm)
     cfg = lm.config
-    plugin_language = make_plugin_lm_hidden_wrapper(
+    plugin_language = make_plugin_lm_causal_wrapper(
         decoder,
         cfg,
-        max_seq_len=int(compact_trt_prefix_embs.shape[1]),
-        device=device,
-        position_ids=compact_trt_prefix_position_ids,
-        return_prefix_kv=True,
+        copy.deepcopy(core.paligemma_with_expert.paligemma.lm_head).to(
+            device=device,
+            dtype=torch.float16,
+        ).eval(),
     )
     trt_language_model, trt_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
@@ -258,12 +259,21 @@ def main() -> int:
         position_ids=compact_trt_prefix_position_ids,
     )
     trt_kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    trt_hidden, trt_prefix_k, trt_prefix_v = trt_language_model(
-        trt_prefix_embs,
-        trt_rope,
-        trt_ctx_len,
-        trt_kvcache_start_index,
-        trt_kv_caches,
+    trt_last_token_ids = torch.full(
+        (trt_prefix_embs.shape[0], 1),
+        trt_prefix_embs.shape[1] - 1,
+        device=device,
+        dtype=torch.int64,
+    )
+    _, trt_hidden, trt_prefix_k, trt_prefix_v = unpack_vla_prefix_language_outputs(
+        trt_language_model(
+            trt_prefix_embs,
+            trt_rope,
+            trt_ctx_len,
+            trt_kvcache_start_index,
+            trt_last_token_ids,
+            *trt_kv_caches,
+        )
     )
 
     # Smoke-check the plugin language output with logits and KV-cache comparisons.
@@ -320,7 +330,7 @@ def main() -> int:
     eager_actions = sample_actions_raw(
         action_module,
         eager_action_context,
-        PI05ActionAdapter(core, num_steps),
+        PrefixKVFlowActionAdapter(core, num_steps),
     )
 
     # -------------------------

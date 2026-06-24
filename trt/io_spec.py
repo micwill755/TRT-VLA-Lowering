@@ -15,7 +15,10 @@ class PipelineIOSpec:
     vision: ComponentIOSpec
     language: ComponentIOSpec
     action: ComponentIOSpec
+    action_context: ComponentIOSpec | None = None
     lm_to_action_slots: tuple[tuple[int, int], ...] = field(default_factory=tuple)
+    lm_to_action_context_slots: tuple[tuple[int, int], ...] = field(default_factory=tuple)
+    context_to_action_slots: tuple[tuple[int, int], ...] = field(default_factory=tuple)
 
     def language_input_names(self, num_kv_caches: int) -> list[str]:
         return list(self.language.input_names) + [
@@ -33,11 +36,33 @@ class PipelineIOSpec:
             wired[action_slot] = lm_outputs[lm_slot]
         return tuple(wired)
 
+    def wire_lm_outputs_to_action_context(
+        self,
+        lm_outputs: tuple[Any, ...],
+        context_inputs: tuple[Any, ...],
+    ) -> tuple[Any, ...]:
+        wired = list(context_inputs)
+        for lm_slot, context_slot in self.lm_to_action_context_slots:
+            wired[context_slot] = lm_outputs[lm_slot]
+        return tuple(wired)
+
+    def wire_context_outputs_to_action(
+        self,
+        context_outputs: tuple[Any, ...],
+        action_inputs: tuple[Any, ...],
+    ) -> tuple[Any, ...]:
+        wired = list(action_inputs)
+        for context_slot, action_slot in self.context_to_action_slots:
+            wired[action_slot] = context_outputs[context_slot]
+        return tuple(wired)
+
     def action_context_input_indices(self) -> tuple[int, ...]:
+        if self.lm_to_action_context_slots:
+            return tuple(context_slot for _, context_slot in self.lm_to_action_context_slots)
         return tuple(action_slot for _, action_slot in self.lm_to_action_slots)
 
     def to_plugin_info(self) -> dict[str, Any]:
-        return {
+        info = {
             "vision_input_names": list(self.vision.input_names),
             "vision_output_names": list(self.vision.output_names),
             "language_input_names": list(self.language.input_names),
@@ -46,22 +71,47 @@ class PipelineIOSpec:
             "action_output_names": list(self.action.output_names),
             "lm_to_action_slots": [list(pair) for pair in self.lm_to_action_slots],
         }
+        if self.action_context is not None:
+            info["action_context_input_names"] = list(self.action_context.input_names)
+            info["action_context_output_names"] = list(self.action_context.output_names)
+            info["lm_to_action_context_slots"] = [
+                list(pair) for pair in self.lm_to_action_context_slots
+            ]
+            info["context_to_action_slots"] = [
+                list(pair) for pair in self.context_to_action_slots
+            ]
+        return info
+
+
+VLA_VISION_INPUT_NAMES = ("pixel_values",)
+VLA_VISION_OUTPUT_NAMES = ("visual_embeds",)
+VLA_LANGUAGE_INPUT_NAMES = (
+    "inputs_embeds",
+    "rope_rotary_cos_sin",
+    "context_lengths",
+    "kvcache_start_index",
+    "last_token_ids",
+)
+VLA_LANGUAGE_OUTPUT_NAMES = ("logits", "lm_hidden_states", "prefix_k", "prefix_v")
+VLA_LANGUAGE_LEADING_INPUT_COUNT = len(VLA_LANGUAGE_INPUT_NAMES)
+VLA_ACTION_OUTPUT_NAMES = ("velocity",)
+
+VLA_VISION_IO = ComponentIOSpec(
+    input_names=VLA_VISION_INPUT_NAMES,
+    output_names=VLA_VISION_OUTPUT_NAMES,
+)
+VLA_LANGUAGE_IO = ComponentIOSpec(
+    input_names=VLA_LANGUAGE_INPUT_NAMES,
+    output_names=VLA_LANGUAGE_OUTPUT_NAMES,
+)
 
 
 GROOT_EDGE_IO = PipelineIOSpec(
-    vision=ComponentIOSpec(
-        input_names=("pixel_values",),
-        output_names=("visual_embeds",),
-    ),
-    language=ComponentIOSpec(
-        input_names=(
-            "inputs_embeds",
-            "rope_rotary_cos_sin",
-            "context_lengths",
-            "kvcache_start_index",
-            "last_token_ids",
-        ),
-        output_names=("logits", "context_embs"),
+    vision=VLA_VISION_IO,
+    language=VLA_LANGUAGE_IO,
+    action_context=ComponentIOSpec(
+        input_names=("lm_hidden_states",),
+        output_names=("vl_embs",),
     ),
     action=ComponentIOSpec(
         input_names=(
@@ -71,20 +121,15 @@ GROOT_EDGE_IO = PipelineIOSpec(
             "state",
             "embodiment_id",
         ),
-        output_names=("pred_velocity",),
+        output_names=VLA_ACTION_OUTPUT_NAMES,
     ),
-    lm_to_action_slots=((1, 2),),
+    lm_to_action_context_slots=((1, 0),),
+    context_to_action_slots=((0, 2),),
 )
 
 PI05_EDGE_IO = PipelineIOSpec(
-    vision=ComponentIOSpec(
-        input_names=("pixel_values",),
-        output_names=("image_embeds",),
-    ),
-    language=ComponentIOSpec(
-        input_names=("inputs_embeds", "rope_rotary_cos_sin", "context_lengths", "kvcache_start_index"),
-        output_names=("hidden_states", "prefix_k", "prefix_v"),
-    ),
+    vision=VLA_VISION_IO,
+    language=VLA_LANGUAGE_IO,
     action=ComponentIOSpec(
         input_names=(
             "x_t",
@@ -94,7 +139,7 @@ PI05_EDGE_IO = PipelineIOSpec(
             "position_ids",
             "attention_mask",
         ),
-        output_names=("velocity",),
+        output_names=VLA_ACTION_OUTPUT_NAMES,
     ),
     lm_to_action_slots=((1, 2), (2, 3)),
 )
@@ -132,6 +177,14 @@ def action_rollout_extra_config(
         "rollout_dt_sign": rollout.rollout_dt_sign,
         "lm_to_action_slots": [list(pair) for pair in io.lm_to_action_slots],
     }
+    if io.context_to_action_slots:
+        config["context_to_action_slots"] = [
+            list(pair) for pair in io.context_to_action_slots
+        ]
+    if io.lm_to_action_context_slots:
+        config["lm_to_action_context_slots"] = [
+            list(pair) for pair in io.lm_to_action_context_slots
+        ]
     if rollout.timestep_schedule == "discrete_buckets":
         config["num_inference_timesteps"] = int(num_steps)
         config["num_timestep_buckets"] = int(num_timestep_buckets or 1)

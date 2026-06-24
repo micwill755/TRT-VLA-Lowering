@@ -3,18 +3,98 @@ import json
 import os
 import pathlib
 from contextlib import contextmanager
+from inspect import Parameter, signature
 
 import torch
 import torch.nn as nn
 import torch_tensorrt
 
-from inspect import signature
-
 from torch.export import export
 from torch_tensorrt.dynamo._tracer import build_dim_registry, get_dynamic_shapes
 from torch_tensorrt.dynamo.utils import default_device, to_torch_device
 
-LANGUAGE_EDGE_LEADING_INPUT_COUNT = 5
+from trt.io_spec import VLA_LANGUAGE_LEADING_INPUT_COUNT
+
+LANGUAGE_EDGE_LEADING_INPUT_COUNT = VLA_LANGUAGE_LEADING_INPUT_COUNT
+
+
+def count_leading_language_inputs(input_names: list[str] | tuple[str, ...]) -> int:
+    """Count fixed language bindings before ``past_key_values_*`` tensors."""
+    count = 0
+    for name in input_names:
+        if name.startswith("past_key_values"):
+            break
+        count += 1
+    return count
+
+
+def trace_language_for_edge_llm(
+    module: nn.Module,
+    flat_trace_tensors: tuple,
+    input_specs: tuple,
+    *,
+    device=None,
+    leading_input_count: int | None = None,
+):
+    """Export Edge-LLM language module with multi-profile ``Input`` specs."""
+    if leading_input_count is None:
+        leading_input_count = LANGUAGE_EDGE_LEADING_INPUT_COUNT
+    leading_input_count = int(leading_input_count)
+
+    if len(flat_trace_tensors) < leading_input_count + 1:
+        raise ValueError(
+            "flat_trace_tensors must include leading bindings plus at least one KV cache"
+        )
+    if len(input_specs) < leading_input_count:
+        raise ValueError(
+            f"Expected at least {leading_input_count} flat input specs"
+        )
+
+    leading_specs = tuple(input_specs[:leading_input_count])
+    kv_tensors = flat_trace_tensors[leading_input_count:]
+
+    resolved_device = to_torch_device(device or default_device())
+    torch_arg_inputs = tuple(
+        t.to(resolved_device) if isinstance(t, torch.Tensor) else t
+        for t in flat_trace_tensors
+    )
+
+    dim_registry = build_dim_registry(leading_specs, {})
+    dynamic_shapes = {}
+
+    positional_names: list[str] = []
+    var_pos_name: str | None = None
+    for param in signature(module.forward).parameters.values():
+        if param.kind == Parameter.VAR_POSITIONAL:
+            var_pos_name = param.name
+            break
+        if param.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD):
+            positional_names.append(param.name)
+
+    for spec, name in zip(leading_specs, positional_names[:leading_input_count]):
+        if name == "inputs_embeds":
+            dynamic_shapes[name] = get_dynamic_shapes(spec, dim_registry)
+        else:
+            dynamic_shapes[name] = {}
+
+    if var_pos_name is not None:
+        dynamic_shapes[var_pos_name] = tuple({} for _ in range(len(kv_tensors)))
+
+    export_kwargs = dict(
+        dynamic_shapes=dynamic_shapes,
+        strict=False,
+    )
+    try:
+        return export(module, torch_arg_inputs, **export_kwargs)
+    except Exception:
+        from torch.export._trace import _export
+
+        return _export(
+            module,
+            torch_arg_inputs,
+            prefer_deferred_runtime_asserts_over_guards=True,
+            **export_kwargs,
+        )
 
 
 @contextmanager
@@ -107,59 +187,6 @@ def patch_trt_interpreter_output_names(output_names: list[str] | tuple[str, ...]
     finally:
         tri_module.TRTInterpreter.output = original_output
 
-def trace_language_for_edge_llm(
-    module: nn.Module,
-    flat_trace_tensors: tuple,
-    input_specs: tuple,
-    *,
-    device=None,
-):
-    """Export GR00T language module with multi-profile ``Input`` specs."""
-    if len(flat_trace_tensors) < LANGUAGE_EDGE_LEADING_INPUT_COUNT + 1:
-        raise ValueError(
-            "flat_trace_tensors must include leading bindings plus at least one KV cache"
-        )
-    if len(input_specs) < LANGUAGE_EDGE_LEADING_INPUT_COUNT:
-        raise ValueError(
-            f"Expected at least {LANGUAGE_EDGE_LEADING_INPUT_COUNT} flat input specs"
-        )
-
-    leading_specs = tuple(input_specs[:LANGUAGE_EDGE_LEADING_INPUT_COUNT])
-    kv_tensors = flat_trace_tensors[LANGUAGE_EDGE_LEADING_INPUT_COUNT:]
-
-    resolved_device = to_torch_device(device or default_device())
-    torch_arg_inputs = tuple(
-        t.to(resolved_device) if isinstance(t, torch.Tensor) else t
-        for t in flat_trace_tensors
-    )
-
-    dim_registry = build_dim_registry(leading_specs, {})
-    dynamic_shapes = {}
-    param_names = list(signature(module.forward).parameters.keys())
-    for spec, name in zip(leading_specs, param_names[: len(leading_specs)]):
-        if name == "inputs_embeds":
-            dynamic_shapes[name] = get_dynamic_shapes(spec, dim_registry)
-        else:
-            dynamic_shapes[name] = {}
-
-    var_pos_name = param_names[len(leading_specs)]
-    dynamic_shapes[var_pos_name] = tuple({} for _ in range(len(kv_tensors)))
-
-    export_kwargs = dict(
-        dynamic_shapes=dynamic_shapes,
-        strict=False,
-    )
-    try:
-        return export(module, torch_arg_inputs, **export_kwargs)
-    except Exception:
-        from torch.export._trace import _export
-
-        return _export(
-            module,
-            torch_arg_inputs,
-            prefer_deferred_runtime_asserts_over_guards=True,
-            **export_kwargs,
-        )
 
 def flatten_tensors(x):
     if isinstance(x, torch.Tensor):
@@ -268,6 +295,7 @@ def save_trt_engine_module(
             flat_tensors,
             input_specs,
             device=_infer_module_device(module),
+            leading_input_count=count_leading_language_inputs(input_names),
         )
     else:
         exported = export_trt_module(module, sample_inputs)
@@ -347,7 +375,7 @@ def dump_edge_fixture(
     *,
     fixture_subdir: str | None = None,
 ) -> pathlib.Path:
-    """Write named tensor blobs for generic_run_inference under engine_root/fixtures/."""
+    """Write named tensor blobs under engine_root/fixtures/."""
     subdir = fixture_subdir or f"pid_{os.getpid()}"
     fixture_dir = pathlib.Path(engine_root) / "fixtures" / subdir
     for name, tensor in tensors.items():

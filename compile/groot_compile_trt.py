@@ -425,7 +425,7 @@ def main() -> int:
         eager_ctx_len,
         eager_kvcache_start_index,
         eager_last_token_ids,
-        eager_kv_caches,
+        *eager_kv_caches,
     )
 
     compare_groot_context(
@@ -484,7 +484,7 @@ def main() -> int:
         trt_ctx_len,
         trt_kvcache_start_index,
         trt_last_token_ids,
-        trt_kv_caches,
+        *trt_kv_caches,
     )
 
     compare_groot_context(

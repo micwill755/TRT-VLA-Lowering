@@ -50,7 +50,6 @@ from trt.packing import (
 )
 from trt.vision import (
     VisualFixedInput,
-    PixelOnlyWrapper,
     nchw_to_hwc,
     vit_visual_edge_config,
     VIT_ENGINE_INPUT_NAME,
@@ -59,16 +58,16 @@ from trt.vision import (
 
 from trt.language import (
     compile_language_trt_with_plugin,
-    GROOTContextProjectionWrapper,
-    GROOTLanguageContextWrapper,
     compute_vit_expanded_seq_len,
     language_edge_llm_config,
     language_edge_trt_settings,
     language_head_dim,
     make_dummy_inputs_embeds,
+    make_groot_action_context_module,
     make_groot_language_context_wrapper,
+    make_plugin_lm_causal_wrapper,
     make_language_edge_input_specs,
-    FlatKVLanguageEngineWrapper,
+    language_edge_output_names,
     save_embedding_table,
 )
 from trt.rope import (
@@ -104,6 +103,7 @@ from trt.serialize import (
     SerializedGrootVision,
     SerializedGrootLanguage,
     SerializedGrootAction,
+    SerializedGrootActionContext,
 )
 
 TRT_SETTINGS = {
@@ -217,6 +217,20 @@ def build_language_inputs(core, vit_embs, input_ids, attention_mask=None) -> Pac
             image_embs=vit_embs,
         )
     )
+
+@torch.no_grad()
+def build_lm_hidden_from_language_inputs(core, packed: PackedLanguageInputs):
+    eagle = core.backbone.eagle_model
+
+    out = eagle.language_model(
+        inputs_embeds=packed.inputs_embeds,
+        attention_mask=packed.attention_mask,
+        output_hidden_states=True,
+        return_dict=True,
+    )
+
+    return out.hidden_states[core.backbone.select_layer]
+
 
 @torch.no_grad()
 def build_context_from_language_inputs(core, packed: PackedLanguageInputs):
@@ -349,8 +363,8 @@ def save_visual_engine_for_edge_llm(
             engine_file="visual.engine",
             model_type="vit",
             component="vision",
-            input_names=[VIT_ENGINE_INPUT_NAME],
-            output_names=[VIT_ENGINE_OUTPUT_NAME],
+            input_names=list(io.vision.input_names),
+            output_names=list(io.vision.output_names),
             example_output=eager_output,
             extra_config=vit_visual_edge_config(
                 vocab_size=vocab_size,
@@ -400,15 +414,6 @@ def save_lm_engine_for_edge_llm(
         dtype=dtype,
     )
 
-    plugin_language = make_groot_language_context_wrapper(
-        core,
-        decoder,
-        cfg,
-        device=device,
-        dtype=dtype,
-        enable_bidirectional_prefill=0,
-    )
-
     kv_caches = [
         torch.zeros(
             batch_size,
@@ -430,7 +435,14 @@ def save_lm_engine_for_edge_llm(
     )
     context_lengths = ctx_len
 
-    wrapper = FlatKVLanguageEngineWrapper(plugin_language).to(device=device).eval()
+    plugin_language = make_plugin_lm_causal_wrapper(
+        decoder,
+        cfg,
+        copy.deepcopy(language_model.lm_head).to(device=device, dtype=dtype).eval(),
+        select_layer=-1,
+        enable_bidirectional_prefill=0,
+        log_prefix="groot",
+    ).to(device=device)
     # Placeholder RoPE cache for export/compile tracing (values are ignored).
     rope_rotary_cos_sin = torch.randn(
         1,
@@ -463,7 +475,7 @@ def save_lm_engine_for_edge_llm(
     )
 
     with torch.no_grad():
-        example_logits, example_context_embs = wrapper(*flat_tensors)
+        example_output = plugin_language(*flat_tensors)
 
     save_embedding_table(language_model, engine_dir)
     if tokenizer is not None:
@@ -471,16 +483,18 @@ def save_lm_engine_for_edge_llm(
 
         save_tokenizer_for_edge_llm("", engine_dir, tokenizer=tokenizer)
 
+    output_names = language_edge_output_names(io.language.output_names, len(kv_caches))
+
     return save_trt_engine_module(
-        wrapper,
+        plugin_language,
         flat_tensors,
         engine_dir,
         engine_file="language.engine",
         model_type=model_type,
         component="language",
         input_names=input_names,
-        output_names=list(io.language.output_names),
-        example_output=(example_logits, example_context_embs),
+        output_names=output_names,
+        example_output=example_output,
         input_specs=input_specs,
         flat_tensors=flat_tensors,
         trt_settings=language_edge_trt_settings(),
@@ -489,10 +503,54 @@ def save_lm_engine_for_edge_llm(
             max_seq_len=max_seq_len,
             batch_size=batch_size,
             num_layers=len(kv_caches),
-            context_hidden_size=int(example_context_embs.shape[2]),
+            context_hidden_size=None,
             image_token_id=image_token_id,
         ),
     )
+
+def save_action_context_engine_for_edge_llm(
+    core,
+    lm_hidden_states,
+    engine_dir,
+    *,
+    device,
+    dtype=torch.float16,
+    model_type="action_context",
+    io: PipelineIOSpec,
+    trt_settings=None,
+):
+    if io.action_context is None:
+        raise ValueError("Pipeline IOSpec missing action_context component")
+
+    action_context_module = make_groot_action_context_module(
+        core,
+        device=device,
+        dtype=dtype,
+    )
+    lm_hidden_states = lm_hidden_states.to(device=device, dtype=dtype).contiguous()
+    sample_inputs = (lm_hidden_states,)
+
+    with torch.no_grad():
+        eager_output = action_context_module(lm_hidden_states)
+
+    return save_trt_engine_module(
+        action_context_module,
+        sample_inputs,
+        engine_dir,
+        engine_file="action_context.engine",
+        model_type=model_type,
+        component="action_context",
+        input_names=list(io.action_context.input_names),
+        output_names=list(io.action_context.output_names),
+        example_output=eager_output,
+        trt_settings=trt_settings or ACTION_TRT_SETTINGS,
+        extra_config={
+            "engine_role": "preprocess_action_input",
+            "context_seq_len": int(lm_hidden_states.shape[1]),
+            "context_hidden_size": int(eager_output.shape[2]),
+        },
+    )
+
 
 def save_action_diffusion_engine_for_edge_llm(
     core,
@@ -565,7 +623,7 @@ def run_serialized_groot_language(
     language_inputs: PackedLanguageInputs,
     device: torch.device,
 ) -> torch.Tensor:
-    """Run an exported language.engine and return context_embs."""
+    """Run an exported language.engine and return lm_hidden_states."""
     lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
     language_model = model.backbone.eagle_model.language_model
     decoder = getattr(language_model, "model", language_model)
@@ -616,6 +674,138 @@ def run_serialized_groot_language(
     if isinstance(lm_out, tuple):
         return lm_out[1]
     return lm_out
+
+@torch.no_grad()
+def compare_groot_edge_pipeline_to_eager(
+    model: nn.Module,
+    policy: Any,
+    *,
+    pixel_values: torch.Tensor,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    language_inputs: PackedLanguageInputs,
+    state: torch.Tensor,
+    embodiment_id: torch.Tensor,
+    trt_image_embs: torch.Tensor,
+    lm_hidden_states: torch.Tensor,
+    context_embs: torch.Tensor,
+    trt_diffusion: nn.Module,
+    device: torch.device,
+    seed: int,
+    visual: nn.Module,
+) -> None:
+    """Stage-by-stage TRT vs eager checks for the 3-engine Edge-LLM export path."""
+    print("\n=== Edge engine parity vs eager ===")
+
+    with torch.no_grad():
+        eager_image_embs = visual(pixel_values)
+    tensor_error_metrics(
+        "vision",
+        trt_image_embs.to(device=device, dtype=torch.float16),
+        eager_image_embs.to(device=device, dtype=torch.float16),
+    )
+
+    with torch.no_grad():
+        eager_lm_hidden = build_lm_hidden_from_language_inputs(model, language_inputs)
+    tensor_error_metrics(
+        "language lm_hidden_states",
+        lm_hidden_states.to(device=device, dtype=torch.float16),
+        eager_lm_hidden.to(device=device, dtype=torch.float16),
+    )
+
+    with torch.no_grad():
+        eager_context_embs = build_context_from_language_inputs(model, language_inputs)
+    tensor_error_metrics(
+        "action_context vl_embs",
+        context_embs.to(device=device, dtype=torch.float16),
+        eager_context_embs.to(device=device, dtype=torch.float16),
+    )
+
+    state_fp16 = state.to(device=device, dtype=torch.float16).contiguous()
+    embodiment_id = embodiment_id.to(device=device).contiguous()
+    context_fp16 = context_embs.to(device=device, dtype=torch.float16).contiguous()
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    noise = torch.randn(
+        context_fp16.shape[0],
+        model.action_head.config.action_horizon,
+        model.action_head.config.action_dim,
+        device=device,
+        dtype=context_fp16.dtype,
+        generator=generator,
+    )
+    timestep = torch.zeros(context_fp16.shape[0], device=device, dtype=torch.long)
+
+    eager_action_module = make_static_action_module(
+        model.action_head,
+        device,
+        torch.float16,
+        embodiment_id,
+    )
+    with torch.no_grad():
+        eager_velocity = eager_action_module(
+            noise,
+            timestep,
+            context_fp16,
+            state_fp16,
+            embodiment_id,
+        )
+        trt_velocity = trt_diffusion(
+            noise,
+            timestep,
+            context_fp16,
+            state_fp16,
+            embodiment_id,
+        )
+    tensor_error_metrics(
+        "diffusion velocity",
+        trt_velocity.to(device=device, dtype=torch.float16),
+        eager_velocity.to(device=device, dtype=torch.float16),
+    )
+
+    with torch.no_grad():
+        eager_actions = sample_actions_raw(
+            eager_action_module,
+            ActionRolloutContext(
+                noise=noise,
+                device=device,
+                context_embs=context_fp16,
+                state=state_fp16,
+                embodiment_id=embodiment_id,
+            ),
+            GROOTActionAdapter(model.action_head),
+        )
+        trt_actions = sample_actions_raw(
+            trt_diffusion,
+            ActionRolloutContext(
+                noise=noise,
+                device=device,
+                context_embs=context_fp16,
+                state=state_fp16,
+                embodiment_id=embodiment_id,
+            ),
+            GROOTActionAdapter(model.action_head),
+        )
+    action_metrics = compute_groot_policy_action_metrics(
+        trt_actions,
+        eager_actions,
+        policy,
+    )
+    print(
+        "full action rollout:",
+        f"action_ade={action_metrics['action_ade']:.6f}",
+        f"mean_abs={action_metrics['mean_abs']:.6f}",
+    )
+
+
+@torch.no_grad()
+def run_serialized_groot_action_context(
+    engine_context: SerializedGrootActionContext,
+    lm_hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    """Run an exported action_context.engine and return vl_embs."""
+    return engine_context(lm_hidden_states.to(dtype=torch.float16).contiguous())
 
 def save_edge_engines_for_edge_llm(
     model: nn.Module,
@@ -694,7 +884,7 @@ def save_edge_engines_for_edge_llm(
         trt_image_embs = vision_runner(pixel_values)
 
     # -------------------------
-    # Language/context engine
+    # Language engine (logits + lm_hidden_states)
     # -------------------------
     print("compiling language")
 
@@ -726,11 +916,36 @@ def save_edge_engines_for_edge_llm(
 
     language_runner = SerializedGrootLanguage(SerializedTRTEngine(language_engine_dir))
     with torch.no_grad():
-        context_embs = run_serialized_groot_language(
+        lm_hidden_states = run_serialized_groot_language(
             language_runner,
             model,
             language_inputs,
             torch.device(device),
+        )
+
+    # -------------------------
+    # Action context engine (lm_hidden_states -> vl_embs)
+    # -------------------------
+    print("compiling action context")
+
+    action_context_engine_dir = str(pathlib.Path(engine_root) / "action_context")
+    save_action_context_engine_for_edge_llm(
+        model,
+        lm_hidden_states,
+        action_context_engine_dir,
+        device=device,
+        dtype=torch.float16,
+        io=io,
+        trt_settings=ACTION_TRT_SETTINGS,
+    )
+
+    action_context_runner = SerializedGrootActionContext(
+        SerializedTRTEngine(action_context_engine_dir)
+    )
+    with torch.no_grad():
+        context_embs = run_serialized_groot_action_context(
+            action_context_runner,
+            lm_hidden_states,
         )
 
     # -------------------------
@@ -739,7 +954,7 @@ def save_edge_engines_for_edge_llm(
     print("compiling action diffusion")
 
     action_engine_dir = str(pathlib.Path(engine_root) / "action")
-    trt_diffusion = save_action_diffusion_engine_for_edge_llm(
+    save_action_diffusion_engine_for_edge_llm(
         model,
         context_embs,
         state,
@@ -749,6 +964,27 @@ def save_edge_engines_for_edge_llm(
         dtype=torch.float16,
         io=io,
     )
+
+    action_runner = SerializedGrootAction(SerializedTRTEngine(action_engine_dir))
+
+    if accuracy_check:
+        compare_groot_edge_pipeline_to_eager(
+            model,
+            policy,
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            language_inputs=language_inputs,
+            state=state,
+            embodiment_id=embodiment_id,
+            trt_image_embs=trt_image_embs,
+            lm_hidden_states=lm_hidden_states,
+            context_embs=context_embs,
+            trt_diffusion=action_runner,
+            device=torch.device(device),
+            seed=seed,
+            visual=visual,
+        )
 
     fixture_dir = _dump_groot_edge_fixture(
         engine_root=engine_root,
@@ -769,20 +1005,24 @@ def save_edge_engines_for_edge_llm(
         "engine_root": engine_root,
         "vision_engine_dir": str(pathlib.Path(engine_root) / "visual"),
         "language_engine_dir": language_engine_dir,
+        "action_context_engine_dir": action_context_engine_dir,
         "action_engine_dir": action_engine_dir,
         "vision_engine": str(pathlib.Path(engine_dir) / "visual.engine"),
         "language_engine": str(pathlib.Path(language_engine_dir) / "language.engine"),
+        "action_context_engine": str(pathlib.Path(action_context_engine_dir) / "action_context.engine"),
         "diffusion_engine": str(pathlib.Path(action_engine_dir) / "diffusion.engine"),
         "language_seq_len": int(language_inputs.inputs_embeds.shape[1]),
+        "language_max_seq_len": int(language_inputs.inputs_embeds.shape[1]),
         "context_seq_len": int(context_embs.shape[1]),
         "context_hidden_size": int(context_embs.shape[2]),
+        "lm_hidden_size": int(lm_hidden_states.shape[2]),
         "state_shape": list(state.shape),
         "embodiment_id": embodiment_id.detach().cpu().tolist(),
         "fixture_dir": str(fixture_dir),
         **io.to_plugin_info(),
     }
 
-    return None, None, trt_diffusion, plugin_info
+    return None, None, action_runner, plugin_info
 
 
 def compile_trt_with_plugin(
@@ -969,7 +1209,7 @@ def compile_trt_with_plugin(
             ctx_len,
             kvcache_start_index,
             last_token_ids,
-            kv_caches,
+            *kv_caches,
         )
         trt_context_embs = trt_context_embs.to(device=device, dtype=torch.float16)
 
@@ -1135,6 +1375,7 @@ def run_inference_trt_plugin(
     plugin_info: dict,
     seed: int,
     device: torch.device,
+    trt_action_context=None,
 ) -> tuple[torch.Tensor, dict, float]:
     torch.manual_seed(seed)
     if device.type == "cuda":
@@ -1165,55 +1406,68 @@ def run_inference_trt_plugin(
         attention_mask,
     )
 
-    lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
-    language_model = model.backbone.eagle_model.language_model
-    decoder = getattr(language_model, "model", language_model)
-    cfg = language_model.config
-    kv_caches = [
-        torch.zeros(
-            int(lm_inputs.shape[0]),
-            2,  # key + value
-            int(cfg.num_key_value_heads),
-            int(plugin_info["language_max_seq_len"]),
-            language_head_dim(cfg),
-            device=device,
-            dtype=lm_inputs.dtype,
+    if isinstance(trt_lm, SerializedGrootLanguage):
+        lm_hidden = run_serialized_groot_language(
+            trt_lm,
+            model,
+            language_inputs,
+            device,
         )
-        for _ in range(len(decoder.layers))
-    ]
-    ctx_len = torch.full(
-        (lm_inputs.shape[0],),
-        lm_inputs.shape[1],
-        device=device,
-        dtype=torch.int32,
-    )
-    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
-        cfg,
-        int(plugin_info["language_max_seq_len"]),
-        device,
-        language_model=language_model,
-        position_ids=language_inputs.position_ids,
-    )
-    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    last_token_ids = torch.full(
-        (int(lm_inputs.shape[0]), 1),
-        int(lm_inputs.shape[1]) - 1,
-        device=device,
-        dtype=torch.int64,
-    )
-
-    lm_out = trt_lm(
-        lm_inputs,
-        rope_rotary_cos_sin,
-        ctx_len,
-        kvcache_start_index,
-        last_token_ids,
-        kv_caches,
-    )
-    if isinstance(lm_out, tuple):
-        context_embs = lm_out[1]
     else:
-        context_embs = lm_out
+        lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+        language_model = model.backbone.eagle_model.language_model
+        decoder = getattr(language_model, "model", language_model)
+        cfg = language_model.config
+        kv_caches = [
+            torch.zeros(
+                int(lm_inputs.shape[0]),
+                2,  # key + value
+                int(cfg.num_key_value_heads),
+                int(plugin_info["language_max_seq_len"]),
+                language_head_dim(cfg),
+                device=device,
+                dtype=lm_inputs.dtype,
+            )
+            for _ in range(len(decoder.layers))
+        ]
+        ctx_len = torch.full(
+            (lm_inputs.shape[0],),
+            lm_inputs.shape[1],
+            device=device,
+            dtype=torch.int32,
+        )
+        rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+            cfg,
+            int(plugin_info["language_max_seq_len"]),
+            device,
+            language_model=language_model,
+            position_ids=language_inputs.position_ids,
+        )
+        kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
+        last_token_ids = torch.full(
+            (int(lm_inputs.shape[0]), 1),
+            int(lm_inputs.shape[1]) - 1,
+            device=device,
+            dtype=torch.int64,
+        )
+
+        lm_out = trt_lm(
+            lm_inputs,
+            rope_rotary_cos_sin,
+            ctx_len,
+            kvcache_start_index,
+            last_token_ids,
+            *kv_caches,
+        )
+        if isinstance(lm_out, tuple):
+            lm_hidden = lm_out[1]
+        else:
+            lm_hidden = lm_out
+
+    if trt_action_context is not None:
+        context_embs = trt_action_context(lm_hidden)
+    else:
+        context_embs = lm_hidden
     context_embs = context_embs.to(device=device, dtype=torch.float16)
 
     noise = torch.randn(
@@ -1295,7 +1549,7 @@ def _dump_groot_edge_fixture(
         torch.float16,
         embodiment_id,
     )
-    pred_velocity = action_module(
+    velocity = action_module(
         initial_actions,
         timestep,
         context_embs,
@@ -1330,7 +1584,7 @@ def _dump_groot_edge_fixture(
             "embodiment_id": embodiment_id,
             "initial_actions": initial_actions,
             "timestep": timestep,
-            "pred_velocity": pred_velocity.to(device=device, dtype=torch.float16),
+            "velocity": velocity.to(device=device, dtype=torch.float16),
             "actions_out": actions_out.to(device=device, dtype=torch.float16),
         },
     )
@@ -1422,7 +1676,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-generation-length", type=int, default=256, help="Max language generation length for GR00T checks.")
     parser.add_argument("--max-seq-len", type=int, default=None, help="Optional static language sequence length override.")
 
-    parser.add_argument("--skip-vision", action="store_true", help="Skip visual.engine export.")
+    parser.add_argument(
+        "--export-only",
+        action="store_true",
+        help="Export serialized .engine files and run parity checks; skip in-memory TRT plugin compile.",
+    )
     parser.add_argument("--skip-language", action="store_true", help="Skip language.engine export.")
     parser.add_argument("--skip-action", action="store_true", help="Skip action/diffusion engine export if enabled later.")
 
@@ -1489,7 +1747,7 @@ def main() -> int:
     serialized_engine_info = None
     edge_plugin_info = None
 
-    if not args.skip_trt:
+    if not args.skip_trt and not args.export_only:
         trt_vision, trt_lm, trt_diffusion, plugin_info = compile_trt_with_plugin(
             model,
             policy,
@@ -1524,13 +1782,14 @@ def main() -> int:
             )
         edge_plugin_info = serialized_engine_info
 
-    engine_vision = engine_lm = engine_diffusion = engine_info = None
+    engine_vision = engine_lm = engine_action_context = engine_diffusion = engine_info = None
     if not args.skip_engine:
-        engine_vision, engine_lm, engine_diffusion, engine_info = load_serialized_modules(
+        engine_vision, engine_lm, engine_action_context, engine_diffusion, engine_info = load_serialized_modules(
             serialized_engine_info["engine_root"],
             specs=(
                 SerializedModuleSpec("vision", "visual", SerializedGrootVision),
                 SerializedModuleSpec("language", "language", SerializedGrootLanguage),
+                SerializedModuleSpec("action_context", "action_context", SerializedGrootActionContext),
                 SerializedModuleSpec("action", "action", SerializedGrootAction),
             ),
             plugin_info_aliases={
@@ -1642,6 +1901,7 @@ def main() -> int:
                 trt_vision=engine_vision,
                 trt_lm=engine_lm,
                 trt_diffusion=engine_diffusion,
+                trt_action_context=engine_action_context,
                 plugin_info=engine_info,
                 seed=args.seed,
                 device=device,

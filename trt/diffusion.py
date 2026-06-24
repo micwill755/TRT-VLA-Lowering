@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from lerobot.policies.pi05.modeling_pi05 import get_safe_dtype
-from trt.prefix_cache import PrefixKVCache
+from trt.prefix_cache import PrefixKVCache, SmolVLAPrefixPastLayers
 
 def create_sinusoidal_pos_embedding(  # see openpi `create_sinusoidal_pos_embedding` (exact copy)
     time: torch.Tensor, dimension: int, min_period: float, max_period: float, device="cpu"
@@ -365,12 +365,15 @@ class SmolVLAPrefixKVStepEncoder(ActionStepEncoder):
         suffix_embs = torch.cat([action_emb, time_emb], dim=-1)
         suffix_embs = self.action_time_mlp_out(F.silu(self.action_time_mlp_in(suffix_embs)))
 
+        if attention_mask.dtype != torch.bool:
+            attention_mask = attention_mask == 0
+
         expert_kwargs = {
             "inputs_embeds": [None, suffix_embs],
             "position_ids": position_ids,
             "attention_mask": attention_mask,
-            "past_key_values": PrefixKVCache(prefix_k, prefix_v),
-            "use_cache": False,
+            "past_key_values": SmolVLAPrefixPastLayers(prefix_k, prefix_v),
+            "use_cache": True,
             "fill_kv_cache": False,
         }
         return (), expert_kwargs, (), {}

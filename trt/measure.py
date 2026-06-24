@@ -3,7 +3,7 @@ from lerobot.utils.constants import ACTION
 from trt.action_rollout import (
     ActionRolloutContext,
     GROOTActionAdapter,
-    PI05ActionAdapter,
+    PrefixKVFlowActionAdapter,
     sample_actions_raw,
 )
 from trt.utils import prepare_policy_inputs, make_runner_inputs, build_prefix_inputs, compact_prefix_inputs
@@ -220,7 +220,7 @@ def compare_full_vla_to_eager_actions(
         action_runner,
         eager_actions,
         context,
-        PI05ActionAdapter(core, num_steps),
+        PrefixKVFlowActionAdapter(core, num_steps),
         action_dim=policy.config.output_features[ACTION].shape[0],
     )
 

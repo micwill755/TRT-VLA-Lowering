@@ -265,9 +265,15 @@ class SerializedGrootLanguage:
     @property
     def context_output_index(self) -> int:
         output_names = self.engine.config.get("output_names", [])
-        if "context_embs" in output_names:
-            return output_names.index("context_embs")
+        for name in ("context_embs", "lm_hidden_states", "vl_embs"):
+            if name in output_names:
+                return output_names.index(name)
         return 1
+
+    @property
+    def lm_hidden_output_index(self) -> int:
+        return self.context_output_index
+
 
 class SerializedPositionalEngine:
     """Run a serialized TRT engine with positional tensor args matching config input_names."""
@@ -291,6 +297,11 @@ class SerializedPositionalEngine:
 
     def forward_one(self, *args) -> torch.Tensor:
         return self(*args)[0]
+
+
+class SerializedGrootActionContext(SerializedPositionalEngine):
+    def __call__(self, lm_hidden_states: torch.Tensor) -> torch.Tensor:
+        return super().__call__(lm_hidden_states)[0]
 
 
 class SerializedGrootAction(SerializedPositionalEngine):
@@ -326,6 +337,7 @@ class SerializedPI05Language:
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
+        last_token_ids,
         kv_caches,
     ):
         inputs = {
@@ -333,12 +345,14 @@ class SerializedPI05Language:
             "rope_rotary_cos_sin": rope_rotary_cos_sin,
             "context_lengths": ctx_len,
             "kvcache_start_index": kvcache_start_index,
+            "last_token_ids": last_token_ids,
         }
 
         for i, kv_cache in enumerate(kv_caches):
             inputs[f"past_key_values_{i}"] = kv_cache
 
-        return self.engine(inputs)
+        outputs = self.engine(inputs)
+        return outputs[1], outputs[2], outputs[3]
 
 class SerializedPI05Action:
     def __init__(self, engine):

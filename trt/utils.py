@@ -1,7 +1,9 @@
+import copy
+import gc
+from typing import Any
+
 import torch
 import torch.nn as nn
-
-from typing import Any
 
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
@@ -155,4 +157,114 @@ def make_runner_inputs(core, prefix_pad_masks, prefix_k, prefix_v, x_t, timestep
         attention_mask,
     )
 
+
+_OPENPI_ATTENTION_MASK_NEG = -2.3819763e38
+
+
+def bool_attention_mask_to_pi05_float(mask: torch.Tensor) -> torch.Tensor:
+    """Convert bool [B, Q, K] masks to PI0.5 / Edge-LLM float additive masks."""
+    return torch.where(
+        mask,
+        torch.zeros((), dtype=torch.float32, device=mask.device),
+        torch.tensor(_OPENPI_ATTENTION_MASK_NEG, dtype=torch.float32, device=mask.device),
+    )
+
+
+def make_smolvla_suffix_position_and_mask(prefix_pad_masks, x_t, device, *, edge_llm: bool = False):
+    """Suffix position/mask wiring matching SmolVLA ``denoise_step``."""
+    from lerobot.policies.smolvla.modeling_smolvla import make_att_2d_masks
+
+    batch_size, suffix_len = x_t.shape[:2]
+    prefix_pad_masks = prefix_pad_masks.to(device=device)
+    prefix_len = prefix_pad_masks.shape[1]
+
+    suffix_pad_masks = torch.ones(batch_size, suffix_len, dtype=torch.bool, device=device)
+    suffix_att_masks = torch.ones(batch_size, suffix_len, dtype=torch.bool, device=device)
+
+    prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
+    suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+    attention_mask = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+    if edge_llm:
+        attention_mask = bool_attention_mask_to_pi05_float(attention_mask)
+
+    prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+    position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+    return position_ids, attention_mask
+
+
+def make_smolvla_runner_inputs(
+    core,
+    prefix_pad_masks,
+    prefix_k,
+    prefix_v,
+    x_t,
+    timestep,
+    device,
+    *,
+    edge_llm: bool = False,
+):
+    action_dtype = next(core.action_in_proj.parameters()).dtype
+    position_ids, attention_mask = make_smolvla_suffix_position_and_mask(
+        prefix_pad_masks, x_t, device, edge_llm=edge_llm
+    )
+
+    return (
+        x_t.to(device=device, dtype=action_dtype),
+        timestep.to(device=device),
+        prefix_k.to(device=device, dtype=action_dtype),
+        prefix_v.to(device=device, dtype=action_dtype),
+        position_ids,
+        attention_mask,
+    )
+
 # pi05 utils ----
+
+def free_cuda_memory(*objs: object) -> None:
+    """Drop references and return cached GPU memory to the allocator."""
+    for obj in objs:
+        del obj
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def clone_hf_module_for_export(
+    module: nn.Module,
+    device: torch.device,
+    *,
+    dtype: torch.dtype | None = None,
+    config: Any | None = None,
+) -> nn.Module:
+    """Rebuild a module without a GPU ``deepcopy`` peak."""
+    cpu_state = {k: v.detach().cpu() for k, v in module.state_dict().items()}
+    free_cuda_memory()
+    init_config = config if config is not None else getattr(module, "config", None)
+    if init_config is not None:
+        clone = module.__class__(init_config)
+        clone.load_state_dict(cpu_state, assign=True)
+    else:
+        clone = copy.deepcopy(module)
+        clone.load_state_dict(cpu_state, assign=True)
+        clone = clone.cpu()
+    del cpu_state
+    if dtype is not None:
+        return clone.to(device=device, dtype=dtype).eval()
+    return clone.to(device=device).eval()
+
+
+def ensure_pi05_paligemma_on_device(core: nn.Module, device: torch.device) -> None:
+    """Move PaliGemma weights back to GPU after TRT export/offload touched shared modules."""
+    paligemma = core.paligemma_with_expert.paligemma.model
+    paligemma.vision_tower.to(device=device)
+    paligemma.multi_modal_projector.to(device=device)
+    paligemma.language_model.to(device=device)
+
+
+def ensure_smolvla_on_device(core: nn.Module, device: torch.device) -> None:
+    """Move SmolVLA weights back to GPU after TRT export/offload touched shared modules."""
+    core.vlm_with_expert.to(device=device)
+    core.state_proj.to(device=device)
+    core.action_in_proj.to(device=device)
+    core.action_time_mlp_in.to(device=device)
+    core.action_time_mlp_out.to(device=device)
+    core.action_out_proj.to(device=device)

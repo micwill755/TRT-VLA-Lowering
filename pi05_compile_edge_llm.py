@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import copy
 import argparse
-import ctypes
+import json
 import os
 import pathlib
 import time
@@ -11,12 +10,15 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from PIL import Image
+from transformers import AutoTokenizer
 
 from lerobot.policies.pi05 import PI05Policy
 from lerobot.utils.constants import ACTION
 
-from trt.action_rollout import ActionRolloutContext, PI05ActionAdapter, sample_actions_raw
+from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module, dump_edge_fixture, save_trt_engine_module
+from trt.edge_llm_runtime import run_llm_inference_runtime_smoke, save_tokenizer_for_edge_llm
 from trt.io_spec import (
     PI05_ACTION_ROLLOUT,
     PI05_EDGE_IO,
@@ -26,13 +28,17 @@ from trt.io_spec import (
 from trt.data import make_batch
 from trt.diffusion import StaticActionVelocityStep, PI05PrefixKVStepEncoder
 from trt.language import (
-    FlatKVLMHiddenWrapper,
     compile_language_trt_with_plugin,
     language_edge_llm_config,
+    language_edge_output_names,
     language_head_dim,
-    make_plugin_lm_hidden_wrapper,
+    make_language_edge_flat_tensors,
+    make_language_edge_input_specs,
+    make_plugin_lm_causal_wrapper,
     pi05_plugin_lm_smoke_check,
     run_prefix_language_eager,
+    save_embedding_table,
+    unpack_vla_prefix_language_outputs,
 )
 from trt.rope import (
     make_dummy_rope_rotary_cos_sin,
@@ -46,29 +52,39 @@ from trt.measure import (
     mean,
     print_action_metrics,
     print_timing,
+    tensor_error_metrics,
 )
 from trt.packing import PackedLanguageInputs, compact_packed_language_inputs
 from trt.plugin_utils import (
     infer_siglip_seq_len,
-    load_plugin,
     patch_vision_attention,
     restore_attention,
-    load_plugins_for_trt
+    load_plugins_for_trt,
 )
 from trt.serialize import (
     SerializedModuleSpec,
     SerializedPI05Action,
     SerializedPI05Language,
-    SerializedPI05Vision,
+    SerializedTRTEngine,
     load_serialized_modules,
 )
 from trt.utils import (
     build_packed_prefix_inputs,
+    clone_hf_module_for_export,
+    ensure_pi05_paligemma_on_device,
+    free_cuda_memory,
     load_policy,
     make_suffix_position_and_mask,
     prepare_policy_inputs,
 )
-from trt.vision import VisualFixedInput
+from trt.vision import (
+    VisualFixedInput,
+    VIT_ENGINE_INPUT_NAME,
+    VIT_ENGINE_OUTPUT_NAME,
+    nchw_to_hwc,
+    run_trt_vision_nchw,
+    vit_visual_edge_config,
+)
 
 TRT_SETTINGS = {
     "disable_tf32": True,
@@ -83,10 +99,30 @@ TRT_SETTINGS = {
 ACTION_TRT_SETTINGS = {
     **TRT_SETTINGS,
     "offload_module_to_cpu": True,
+    "use_fp32_acc": True,
+}
+
+VISION_TRT_SETTINGS = {
+    **TRT_SETTINGS,
+    "use_fp32_acc": True,
+    "offload_module_to_cpu": True,
+}
+
+LANGUAGE_TRT_SETTINGS = {
+    **TRT_SETTINGS,
+    "offload_module_to_cpu": True,
 }
 
 MODEL_ID = "lerobot/pi05_libero"
+PALIGEMMA_TOKENIZER_ID = "google/paligemma-3b-pt-224"
 SEED = 42
+WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[1]
+DEFAULT_LLM_INFERENCE_BIN = (
+    WORKSPACE_ROOT / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/examples/llm/llm_inference"
+)
+DEFAULT_EDGE_LLM_PLUGIN_SO = (
+    WORKSPACE_ROOT / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/libNvInfer_edgellm_plugin.so"
+)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export PI0.5 TensorRT engines for TensorRT-Edge-LLM")
@@ -96,16 +132,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episode-index", type=int, default=0, help="Dataset episode index used for the compile sample.")
     parser.add_argument("--frame-index", type=int, default=0, help="Dataset frame index used for the compile sample.")
     parser.add_argument("--engine-dir", type=str, default="/tmp/pi05_edge_llm", help="Root directory for exported PI0.5 engines.")
-    parser.add_argument("--plugin-so", type=str, default=os.environ.get("EDGELLM_TRT_PLUGIN_SO") or os.environ.get("EDGE_LLM_PLUGIN_SO"), help="Path to libNvInfer_edgellm_plugin.so.")
+    parser.add_argument(
+        "--plugin-so",
+        type=str,
+        default=os.environ.get("EDGELLM_TRT_PLUGIN_SO")
+        or os.environ.get("EDGE_LLM_PLUGIN_SO")
+        or str(DEFAULT_EDGE_LLM_PLUGIN_SO),
+        help="Path to libNvInfer_edgellm_plugin.so.",
+    )
     parser.add_argument("--device", type=str, default="cuda", help="Compile device.")
+    parser.add_argument(
+        "--llm-inference-bin",
+        type=str,
+        default=str(DEFAULT_LLM_INFERENCE_BIN),
+        help="Path to TensorRT-Edge-LLM llm_inference binary for C++ smoke tests.",
+    )
 
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed used for compile/test tensors.")
     parser.add_argument("--max-seq-len", type=int, default=None, help="Static language length override. For PI0.5 this must match the compact prefix length.")
     parser.add_argument("--num-traj-samples", type=int, default=1, help="Compatibility flag; PI0.5 uses one sampled action rollout.")
     parser.add_argument("--max-generation-length", type=int, default=256, help="Compatibility flag; PI0.5 prefix prefill does not generate tokens.")
 
+    parser.add_argument(
+        "--export-only",
+        action="store_true",
+        help="Export serialized .engine files and run parity checks; skip in-memory TRT plugin compile.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable extra debug logging/checks.")
     parser.add_argument("--no-accuracy-check", action="store_true", help="Skip eager-vs-TRT accuracy checks.")
+    parser.add_argument(
+        "--no-stage-parity",
+        action="store_true",
+        help="Skip staged Edge export vs eager parity diagnostics.",
+    )
+    parser.add_argument(
+        "--run-cpp-smoke",
+        action="store_true",
+        help="After export, run llm_inference on runtime_smoke/input.json.",
+    )
     parser.add_argument("--skip-export", action="store_true", help="Skip TensorRT .engine export and load existing engines from --engine-dir.")
     parser.add_argument("--skip-pytorch", action="store_true", help="Skip eager PyTorch action rollout.")
     parser.add_argument("--skip-trt", action="store_true", help="Skip Python TRT plugin action rollout.")
@@ -127,6 +191,263 @@ def configure_torch_runtime() -> None:
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.set_float32_matmul_precision("highest")
+
+
+def get_pi05_tokenizer() -> AutoTokenizer:
+    return AutoTokenizer.from_pretrained(PALIGEMMA_TOKENIZER_ID)
+
+
+def build_pi05_vitrunner_chat_template(*, image_format: str = "<image>") -> dict[str, Any]:
+    """Minimal processed_chat_template.json for VitRunner image placeholder expansion."""
+    return {
+        "model_path": "pi05-vitrunner",
+        "roles": {
+            "user": {"prefix": "", "suffix": ""},
+        },
+        "content_types": {
+            "image": {"format": image_format},
+        },
+        "generation_prompt": "",
+        "default_system_prompt": "",
+    }
+
+
+def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
+    img = img.detach().cpu()
+    if img.dtype.is_floating_point:
+        img = (img.clamp(0, 1) * 255).to(torch.uint8)
+    if img.ndim == 4:
+        img = img[0]
+    if img.ndim == 3 and img.shape[0] in (1, 3):
+        img = img.permute(1, 2, 0)
+    if img.ndim == 3 and img.shape[-1] == 1:
+        img = img.squeeze(-1)
+    return Image.fromarray(img.numpy())
+
+
+def write_pi05_runtime_smoke_case(
+    engine_root: str | pathlib.Path,
+    *,
+    task_text: str,
+    image: torch.Tensor,
+    max_generate_length: int = 0,
+) -> pathlib.Path:
+    """Write llm_inference JSON + PNG under runtime_smoke/."""
+    engine_root = pathlib.Path(engine_root)
+    smoke_dir = engine_root / "runtime_smoke"
+    image_path = smoke_dir / "camera_0.png"
+    smoke_dir.mkdir(parents=True, exist_ok=True)
+    _tensor_image_to_pil(image).save(image_path)
+
+    payload = {
+        "batch_size": 1,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 50,
+        "max_generate_length": int(max_generate_length),
+        "requests": [
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": str(image_path.resolve())},
+                            {"type": "text", "text": task_text},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    input_path = smoke_dir / "input.json"
+    input_path.write_text(json.dumps(payload, indent=2) + "\n")
+    return input_path
+
+
+class PI05VisionEngineAdapter:
+    """Serialized VitRunner wrapper: NCHW policy tensors -> HWC engine binding `input`."""
+
+    def __init__(self, engine: SerializedTRTEngine):
+        self.engine = engine
+
+    def __call__(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        hwc = nchw_to_hwc(pixel_values.to(device=pixel_values.device).contiguous())
+        return self.engine({VIT_ENGINE_INPUT_NAME: hwc})[0]
+
+
+def _run_serialized_pi05_language(
+    language_runner: SerializedPI05Language,
+    prefix_embs: torch.Tensor,
+    *,
+    max_seq_len: int,
+    device: torch.device,
+    position_ids: torch.Tensor | None,
+    cfg,
+    language_model=None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    prefix_embs = prefix_embs.to(device=device, dtype=torch.float16).contiguous()
+    batch_size = int(prefix_embs.shape[0])
+    kv_caches = [
+        torch.zeros(
+            batch_size,
+            2,
+            int(cfg.num_key_value_heads),
+            int(max_seq_len),
+            language_head_dim(cfg),
+            device=device,
+            dtype=prefix_embs.dtype,
+        )
+        for _ in range(int(cfg.num_hidden_layers))
+    ]
+    ctx_len = torch.full((batch_size,), prefix_embs.shape[1], device=device, dtype=torch.int32)
+    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+        cfg,
+        int(max_seq_len),
+        device,
+        language_model=language_model,
+        position_ids=position_ids,
+    )
+    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
+    last_token_ids = torch.full(
+        (batch_size, 1),
+        int(prefix_embs.shape[1]) - 1,
+        device=device,
+        dtype=torch.int64,
+    )
+    return language_runner(
+        prefix_embs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        last_token_ids,
+        kv_caches,
+    )
+
+
+@torch.no_grad()
+def compare_pi05_edge_pipeline_to_eager(
+    core,
+    policy,
+    *,
+    images: list[torch.Tensor],
+    img_masks,
+    tokens,
+    masks,
+    trt_image_embs: torch.Tensor | list[torch.Tensor],
+    trt_hidden: torch.Tensor,
+    trt_prefix_k: torch.Tensor,
+    trt_prefix_v: torch.Tensor,
+    trt_diffusion: nn.Module,
+    device: torch.device,
+    seed: int,
+) -> None:
+    """Stage-by-stage TRT vs eager checks for the PI0.5 Edge-LLM export path."""
+    print("\n=== PI0.5 Edge engine parity vs eager ===")
+
+    ensure_pi05_paligemma_on_device(core, device)
+    eager_image_embs = [
+        core.paligemma_with_expert.embed_image(image)
+        for image in images
+    ]
+    trt_embs = trt_image_embs if isinstance(trt_image_embs, list) else [trt_image_embs]
+    for idx, (trt_emb, eager_emb) in enumerate(zip(trt_embs, eager_image_embs)):
+        tensor_error_metrics(
+            f"vision[{idx}]",
+            trt_emb.to(device=device, dtype=torch.float16),
+            eager_emb.to(device=device, dtype=torch.float16),
+        )
+
+    compact_prefix = prepare_compact_prefix(
+        core,
+        eager_image_embs,
+        img_masks,
+        tokens,
+        masks,
+    )
+    eager_hidden, eager_prefix_k, eager_prefix_v = run_prefix_language_eager(
+        core.paligemma_with_expert.paligemma.model.language_model,
+        compact_prefix.inputs_embeds,
+        compact_prefix.attention_mask,
+        compact_prefix.position_ids,
+    )
+    tensor_error_metrics(
+        "language lm_hidden_states",
+        trt_hidden.to(device=device, dtype=torch.float16),
+        eager_hidden.to(device=device, dtype=torch.float16),
+    )
+    tensor_error_metrics(
+        "language prefix_k",
+        trt_prefix_k.to(device=device, dtype=torch.float16),
+        eager_prefix_k.to(device=device, dtype=torch.float16),
+    )
+    tensor_error_metrics(
+        "language prefix_v",
+        trt_prefix_v.to(device=device, dtype=torch.float16),
+        eager_prefix_v.to(device=device, dtype=torch.float16),
+    )
+
+    set_reproducible_seed(seed, device)
+    noise = make_pi05_noise(core, tokens.shape[0], device)
+    position_ids, attention_mask = make_suffix_position_and_mask(
+        core,
+        compact_prefix.pad_mask,
+        noise,
+        device,
+    )
+    prefix_k = trt_prefix_k.to(device=device, dtype=noise.dtype).contiguous()
+    prefix_v = trt_prefix_v.to(device=device, dtype=noise.dtype).contiguous()
+    timestep = torch.full((tokens.shape[0],), 1.0, dtype=torch.float32, device=device)
+
+    eager_action_module = make_static_action_module(core, device)
+    with torch.no_grad():
+        eager_velocity = eager_action_module(
+            noise,
+            timestep,
+            prefix_k,
+            prefix_v,
+            position_ids.contiguous(),
+            attention_mask.contiguous(),
+        )
+        trt_velocity = trt_diffusion(
+            noise,
+            timestep,
+            prefix_k,
+            prefix_v,
+            position_ids.contiguous(),
+            attention_mask.contiguous(),
+        )
+    tensor_error_metrics("diffusion velocity", trt_velocity, eager_velocity)
+
+    eager_actions = sample_actions_raw(
+        eager_action_module,
+        ActionRolloutContext(
+            noise=noise,
+            device=device,
+            prefix_k=prefix_k,
+            prefix_v=prefix_v,
+            prefix_pad_mask=compact_prefix.pad_mask,
+        ),
+        PrefixKVFlowActionAdapter(core, int(core.config.num_inference_steps)),
+    )
+    trt_actions = sample_actions_raw(
+        trt_diffusion,
+        ActionRolloutContext(
+            noise=noise,
+            device=device,
+            prefix_k=prefix_k,
+            prefix_v=prefix_v,
+            prefix_pad_mask=compact_prefix.pad_mask,
+        ),
+        PrefixKVFlowActionAdapter(core, int(core.config.num_inference_steps)),
+    )
+    metrics = compute_action_parity_metrics(
+        crop_policy_actions(policy, trt_actions),
+        crop_policy_actions(policy, eager_actions),
+    )
+    print(
+        f"full rollout action_ade={metrics['action_ade']:.6f}  "
+        f"mean_abs={metrics['mean_abs']:.6f}"
+    )
 
 
 def load_pi05_batch(policy: Any, args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
@@ -235,6 +556,32 @@ def make_pi05_noise(core, batch_size: int, device: torch.device) -> torch.Tensor
     )
 
 
+def _normalize_pi05_image_embs(
+    image_embs: list[torch.Tensor],
+    img_masks: list[torch.Tensor],
+) -> list[torch.Tensor]:
+    """Restore [B, S, H] layout from VitRunner-style [B * S, H] flattening."""
+    normalized: list[torch.Tensor] = []
+    for embed, mask in zip(image_embs, img_masks, strict=True):
+        if embed.ndim == 3:
+            normalized.append(embed)
+            continue
+        if embed.ndim != 2:
+            raise ValueError(
+                f"Expected 2D or 3D image embeds, got {tuple(embed.shape)}"
+            )
+        batch_size = int(mask.shape[0])
+        hidden = embed.shape[-1]
+        if embed.shape[0] % batch_size != 0:
+            raise ValueError(
+                "Cannot reshape flattened image embeds "
+                f"{tuple(embed.shape)} for batch_size={batch_size}"
+            )
+        num_tokens = embed.shape[0] // batch_size
+        normalized.append(embed.reshape(batch_size, num_tokens, hidden))
+    return normalized
+
+
 @torch.no_grad()
 def prepare_compact_prefix(
     core,
@@ -247,7 +594,7 @@ def prepare_compact_prefix(
 ) -> PackedLanguageInputs:
     prefix = build_packed_prefix_inputs(
         core,
-        image_embs,
+        _normalize_pi05_image_embs(image_embs, img_masks),
         img_masks,
         tokens,
         masks,
@@ -273,24 +620,42 @@ def save_visual_engine_for_edge_llm(
     engine_dir: str | pathlib.Path,
     *,
     device: torch.device,
-    model_type: str = "vision",
+    model_type: str = "vit",
+    io: PipelineIOSpec = PI05_EDGE_IO,
 ):
-    pixel_values = pixel_values.to(device=device).contiguous()
+    pixel_values_nchw = pixel_values.to(device=device).contiguous()
+    images_hwc = nchw_to_hwc(pixel_values_nchw)
+    paligemma = core.paligemma_with_expert.paligemma
+    image_token_id = int(getattr(paligemma.config, "image_token_index", 257152))
+    vocab_size = int(paligemma.config.text_config.vocab_size)
+
+    vision_tower = clone_hf_module_for_export(
+        paligemma.model.vision_tower,
+        device,
+        dtype=next(paligemma.model.vision_tower.parameters()).dtype,
+    )
+    projector = clone_hf_module_for_export(
+        paligemma.model.multi_modal_projector,
+        device,
+        dtype=next(paligemma.model.multi_modal_projector.parameters()).dtype,
+        config=paligemma.config,
+    )
+
     visual = VisualFixedInput(
-        vision_model=core.paligemma_with_expert.paligemma.model.vision_tower,
-        projector=core.paligemma_with_expert.paligemma.model.multi_modal_projector,
-        sample_pixel_values=pixel_values,
+        vision_model=vision_tower,
+        projector=projector,
+        sample_pixel_values=images_hwc,
         select_layer=-1,
         pixel_shuffle=False,
         force_float32_input=True,
         cast_output_to_input_dtype=True,
     )
-    vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
+    vision_model = vision_tower.vision_model
 
     with torch.no_grad():
-        eager_output = visual(pixel_values)
+        eager_output = visual(images_hwc)
 
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values_nchw)
 
     patched = []
     try:
@@ -301,23 +666,25 @@ def save_visual_engine_for_edge_llm(
             name="SigLIP",
         )
 
-        return save_trt_engine_module(
+        engine_path = save_trt_engine_module(
             visual,
-            (pixel_values,),
+            (images_hwc,),
             engine_dir,
             engine_file="visual.engine",
             model_type=model_type,
             component="vision",
-            input_names=["pixel_values"],
-            output_names=["image_embeds"],
+            input_names=list(io.vision.input_names),
+            output_names=list(io.vision.output_names),
             example_output=eager_output,
-            extra_config={
-                "siglip_batch_size": batch_size,
-                "siglip_seq_len": seq_len,
-                "num_image_tokens": int(eager_output.shape[0]),
-                "hidden_size": int(eager_output.shape[1]),
-            },
+            extra_config=vit_visual_edge_config(
+                vocab_size=vocab_size,
+                image_token_id=image_token_id,
+                seq_len=seq_len,
+            ),
+            trt_settings=VISION_TRT_SETTINGS,
         )
+        free_cuda_memory(visual, vision_tower, projector)
+        return engine_path
     finally:
         if patched:
             restore_attention(patched)
@@ -332,80 +699,88 @@ def save_lm_engine_for_edge_llm(
     position_ids: torch.Tensor | None,
     model_type: str = "language",
     io: PipelineIOSpec = PI05_EDGE_IO,
+    tokenizer=None,
 ):
     prefix_embs = prefix_embs.to(device=device, dtype=torch.float16).contiguous()
     max_seq_len = int(prefix_embs.shape[1])
     batch_size = int(prefix_embs.shape[0])
 
-    lm = copy.deepcopy(
-        core.paligemma_with_expert.paligemma.model.language_model
-    ).to(device=device, dtype=torch.float16).eval()
+    lm = clone_hf_module_for_export(
+        core.paligemma_with_expert.paligemma.model.language_model,
+        device,
+        dtype=torch.float16,
+    )
     decoder = getattr(lm, "model", lm)
     cfg = lm.config
+    paligemma_cfg = core.paligemma_with_expert.paligemma.config
+    image_token_id = int(getattr(paligemma_cfg, "image_token_index", 257152))
 
-    lm_wrapper = make_plugin_lm_hidden_wrapper(
+    lm_head = clone_hf_module_for_export(
+        core.paligemma_with_expert.paligemma.lm_head,
+        device,
+        dtype=torch.float16,
+    )
+    lm_wrapper = make_plugin_lm_causal_wrapper(
         decoder,
         cfg,
-        max_seq_len=max_seq_len,
-        device=device,
-        position_ids=position_ids
-    )
+        lm_head,
+    ).to(device=device).eval()
 
-    kv_caches = [
-        torch.zeros(
-            batch_size,
-            2,  # key + value
-            int(cfg.num_key_value_heads),
-            max_seq_len,
-            language_head_dim(cfg),
-            device=device,
-            dtype=prefix_embs.dtype,
-        )
-        for _ in range(int(cfg.num_hidden_layers))
-    ]
-
-    ctx_len = torch.full(
-        (batch_size,),
-        max_seq_len,
-        device=device,
-        dtype=torch.int32,
-    )
-
-    rope_rotary_cos_sin = make_dummy_rope_rotary_cos_sin(
-        max_seq_len, language_head_dim(cfg), device
-    )
-    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-
-    wrapper = FlatKVLMHiddenWrapper(lm_wrapper).to(device=device).eval()
-    sample_inputs = (
+    sample_inputs, _trace_seq_len = make_language_edge_flat_tensors(
         prefix_embs,
-        rope_rotary_cos_sin,
-        ctx_len.contiguous(),
-        kvcache_start_index,
-        *[kv.contiguous() for kv in kv_caches],
+        batch_size=batch_size,
+        max_seq_len=max_seq_len,
+        num_layers=int(cfg.num_hidden_layers),
+        num_key_value_heads=int(cfg.num_key_value_heads),
+        head_dim=language_head_dim(cfg),
+        device=device,
+        dtype=prefix_embs.dtype,
     )
 
-    input_names = io.language_input_names(len(kv_caches))
+    input_names = io.language_input_names(int(cfg.num_hidden_layers))
+    input_specs = make_language_edge_input_specs(
+        input_names,
+        sample_inputs,
+        batch_size=batch_size,
+        max_seq_len=max_seq_len,
+    )
 
     with torch.no_grad():
-        example_output = wrapper(*sample_inputs)
+        example_output = lm_wrapper(*sample_inputs)
 
-    return save_trt_engine_module(
-        wrapper,
+    save_embedding_table(lm, engine_dir)
+    if tokenizer is not None:
+        save_tokenizer_for_edge_llm(
+            "",
+            engine_dir,
+            tokenizer=tokenizer,
+            chat_template=build_pi05_vitrunner_chat_template(),
+        )
+
+    output_names = language_edge_output_names(io.language.output_names, len(kv_caches))
+
+    engine_path = save_trt_engine_module(
+        lm_wrapper,
         sample_inputs,
         engine_dir,
         engine_file="language.engine",
         model_type=model_type,
         component="language",
         input_names=input_names,
-        output_names=list(io.language.output_names),
+        output_names=output_names,
         example_output=example_output,
         extra_config=language_edge_llm_config(
             cfg,
             max_seq_len=max_seq_len,
             batch_size=batch_size,
+            image_token_id=image_token_id,
         ),
+        input_specs=input_specs,
+        flat_tensors=sample_inputs,
+        trt_settings=LANGUAGE_TRT_SETTINGS,
     )
+    free_cuda_memory(lm, lm_wrapper)
+    return engine_path
 
 def save_action_diffusion_engine_for_edge_llm(
     core,
@@ -469,7 +844,7 @@ def _dump_pi05_edge_fixture(
     policy: Any,
     pixel_values: torch.Tensor,
     compact_prefix: PackedLanguageInputs,
-    hidden_states: torch.Tensor,
+    lm_hidden_states: torch.Tensor,
     prefix_k: torch.Tensor,
     prefix_v: torch.Tensor,
     seed: int,
@@ -515,7 +890,7 @@ def _dump_pi05_edge_fixture(
             prefix_v=prefix_v,
             prefix_pad_mask=compact_prefix.pad_mask,
         ),
-        PI05ActionAdapter(core, num_steps),
+        PrefixKVFlowActionAdapter(core, num_steps),
     )
 
     velocity_name = io.action.output_names[0]
@@ -526,7 +901,7 @@ def _dump_pi05_edge_fixture(
             "inputs_embeds": compact_prefix.inputs_embeds.to(device=device, dtype=torch.float16),
             "position_ids": position_ids,
             "attention_mask": attention_mask,
-            "hidden_states": hidden_states.to(device=device, dtype=torch.float16),
+            "lm_hidden_states": lm_hidden_states.to(device=device, dtype=torch.float16),
             "prefix_k": prefix_k,
             "prefix_v": prefix_v,
             "initial_actions": noise,
@@ -549,7 +924,6 @@ def compile_trt_with_plugin(
     debug: bool = False,
     accuracy_check: bool = True
 ) -> tuple[nn.Module, nn.Module, nn.Module, dict]:
-    del debug
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
     pixel_values = images[0].to(device=device).contiguous()
 
@@ -565,16 +939,29 @@ def compile_trt_with_plugin(
     }
 
     print("compiling PI0.5 vision")
+    paligemma = core.paligemma_with_expert.paligemma
+    vision_tower = clone_hf_module_for_export(
+        paligemma.model.vision_tower,
+        device,
+        dtype=next(paligemma.model.vision_tower.parameters()).dtype,
+    )
+    projector = clone_hf_module_for_export(
+        paligemma.model.multi_modal_projector,
+        device,
+        dtype=next(paligemma.model.multi_modal_projector.parameters()).dtype,
+        config=paligemma.config,
+    )
+    images_hwc = nchw_to_hwc(pixel_values)
     visual = VisualFixedInput(
-        vision_model=core.paligemma_with_expert.paligemma.model.vision_tower,
-        projector=core.paligemma_with_expert.paligemma.model.multi_modal_projector,
-        sample_pixel_values=pixel_values,
+        vision_model=vision_tower,
+        projector=projector,
+        sample_pixel_values=images_hwc,
         select_layer=-1,
         pixel_shuffle=False,
         force_float32_input=True,
         cast_output_to_input_dtype=True,
     ).eval().to(device=device)
-    vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
+    vision_model = vision_tower.vision_model
     batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
 
     patched = []
@@ -587,20 +974,29 @@ def compile_trt_with_plugin(
         )
         trt_vision = compile_trt_module(
             visual,
-            (pixel_values,),
+            (images_hwc,),
             plugin_settings,
         )
     finally:
         if patched:
             restore_attention(patched)
+        free_cuda_memory(visual, vision_tower, projector)
 
     with torch.no_grad():
-        trt_image_embs = [trt_vision(image.to(device=device).contiguous()) for image in images]
+        trt_image_embs = [
+            run_trt_vision_nchw(trt_vision, image.to(device=device))
+            for image in images
+        ]
 
     if accuracy_check:
-        compare_vision(core, images, trt_vision)
+        compare_vision(
+            core,
+            images,
+            lambda image: run_trt_vision_nchw(trt_vision, image.to(device=device)),
+        )
 
     print("compiling PI0.5 language")
+    ensure_pi05_paligemma_on_device(core, device)
     with torch.no_grad():
         eager_image_embs = [
             core.paligemma_with_expert.embed_image(image)
@@ -630,17 +1026,21 @@ def compile_trt_with_plugin(
     )
     language_max_seq_len = validate_language_len(trt_prefix, max_seq_len)
 
-    lm = copy.deepcopy(
-        core.paligemma_with_expert.paligemma.model.language_model
-    ).to(device=device, dtype=torch.float16).eval()
+    lm = clone_hf_module_for_export(
+        core.paligemma_with_expert.paligemma.model.language_model,
+        device,
+        dtype=torch.float16,
+    )
     decoder = getattr(lm, "model", lm)
     cfg = lm.config
-    plugin_language = make_plugin_lm_hidden_wrapper(
+    plugin_language = make_plugin_lm_causal_wrapper(
         decoder,
         cfg,
-        max_seq_len=language_max_seq_len,
-        device=device,
-        position_ids=trt_prefix.position_ids
+        clone_hf_module_for_export(
+            core.paligemma_with_expert.paligemma.lm_head,
+            device,
+            dtype=torch.float16,
+        ),
     )
     trt_lm, trt_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
@@ -679,13 +1079,23 @@ def compile_trt_with_plugin(
         language_model=lm,
         position_ids=trt_prefix.position_ids,
     )
+    free_cuda_memory(lm)
     trt_kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    trt_hidden, trt_prefix_k, trt_prefix_v = trt_lm(
-        trt_prefix_embs,
-        trt_rope,
-        trt_ctx_len,
-        trt_kvcache_start_index,
-        trt_kv_caches,
+    trt_last_token_ids = torch.full(
+        (trt_prefix_embs.shape[0], 1),
+        trt_prefix_embs.shape[1] - 1,
+        device=device,
+        dtype=torch.int64,
+    )
+    _, trt_hidden, trt_prefix_k, trt_prefix_v = unpack_vla_prefix_language_outputs(
+        trt_lm(
+            trt_prefix_embs,
+            trt_rope,
+            trt_ctx_len,
+            trt_kvcache_start_index,
+            trt_last_token_ids,
+            *trt_kv_caches,
+        )
     )
 
     if accuracy_check:
@@ -744,6 +1154,7 @@ def compile_trt_with_plugin(
 
     plugin_info = {
         "language_max_seq_len": language_max_seq_len,
+        "vision_output_seq_len": int(visual.output_seq_len),
         "prefix_seq_len": int(trt_prefix.pad_mask.shape[1]),
         "prefix_k_shape": list(trt_prefix_k.shape),
         "prefix_v_shape": list(trt_prefix_v.shape),
@@ -766,11 +1177,17 @@ def save_edge_engines_for_edge_llm(
     max_seq_len: int | None = None,
     engine_root: str | pathlib.Path = "/tmp/pi05_edge_llm",
     io: PipelineIOSpec = PI05_EDGE_IO,
+    accuracy_check: bool = True,
+    stage_parity: bool = True,
+    max_generate_length: int = 0,
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, dict]:
     engine_root = pathlib.Path(engine_root)
     images, img_masks, tokens, masks = prepare_policy_inputs(policy, batch, device)
     pixel_values = images[0].to(device=device).contiguous()
+    tokenizer = get_pi05_tokenizer()
+    lm_cfg = core.paligemma_with_expert.paligemma.model.language_model.config
 
+    ensure_pi05_paligemma_on_device(core, device)
     load_plugins_for_trt()
 
     print("exporting PI0.5 vision.engine")
@@ -781,22 +1198,23 @@ def save_edge_engines_for_edge_llm(
         vision_engine_dir,
         device=device,
     )
-
-    print("exporting PI0.5 language.engine")
+    vision_adapter = PI05VisionEngineAdapter(SerializedTRTEngine(vision_engine_dir))
     with torch.no_grad():
-        eager_image_embs = [
-            core.paligemma_with_expert.embed_image(image)
+        trt_image_embs = [
+            vision_adapter(image.to(device=device).contiguous())
             for image in images
         ]
         compact_prefix = prepare_compact_prefix(
             core,
-            eager_image_embs,
+            trt_image_embs,
             img_masks,
             tokens,
             masks,
             inputs_dtype=torch.float16,
         )
+    free_cuda_memory(vision_adapter)
 
+    print("exporting PI0.5 language.engine")
     language_max_seq_len = validate_language_len(compact_prefix, max_seq_len)
     language_engine_dir = engine_root / "language"
     language_engine = save_lm_engine_for_edge_llm(
@@ -806,7 +1224,21 @@ def save_edge_engines_for_edge_llm(
         device=device,
         position_ids=compact_prefix.position_ids,
         io=io,
+        tokenizer=tokenizer,
     )
+    free_cuda_memory()
+    language_runner = SerializedPI05Language(SerializedTRTEngine(language_engine_dir))
+    language_model = core.paligemma_with_expert.paligemma.model.language_model
+    with torch.no_grad():
+        trt_hidden, trt_prefix_k, trt_prefix_v = _run_serialized_pi05_language(
+            language_runner,
+            compact_prefix.inputs_embeds,
+            max_seq_len=language_max_seq_len,
+            device=device,
+            position_ids=compact_prefix.position_ids,
+            cfg=lm_cfg,
+            language_model=language_model,
+        )
 
     print("exporting PI0.5 diffusion.engine")
     action_engine_dir = engine_root / "action"
@@ -818,6 +1250,7 @@ def save_edge_engines_for_edge_llm(
         device=device,
         io=io,
     )
+    action_runner = SerializedPI05Action(SerializedTRTEngine(action_engine_dir))
 
     with torch.no_grad():
         eager_hidden, eager_prefix_k, eager_prefix_v = run_prefix_language_eager(
@@ -827,18 +1260,45 @@ def save_edge_engines_for_edge_llm(
             compact_prefix.position_ids,
         )
 
+    if accuracy_check and stage_parity:
+        compare_pi05_edge_pipeline_to_eager(
+            core,
+            policy,
+            images=images,
+            img_masks=img_masks,
+            tokens=tokens,
+            masks=masks,
+            trt_image_embs=trt_image_embs,
+            trt_hidden=trt_hidden,
+            trt_prefix_k=trt_prefix_k,
+            trt_prefix_v=trt_prefix_v,
+            trt_diffusion=action_runner,
+            device=device,
+            seed=seed,
+        )
+
     fixture_dir = _dump_pi05_edge_fixture(
         engine_root=engine_root,
         core=core,
         policy=policy,
         pixel_values=pixel_values,
         compact_prefix=compact_prefix,
-        hidden_states=eager_hidden,
+        lm_hidden_states=eager_hidden,
         prefix_k=eager_prefix_k,
         prefix_v=eager_prefix_v,
         seed=seed,
         device=device,
         io=io,
+    )
+
+    task_text = batch.get("task", "")
+    if isinstance(task_text, (list, tuple)):
+        task_text = task_text[0] if task_text else "pick up the object"
+    smoke_input = write_pi05_runtime_smoke_case(
+        engine_root,
+        task_text=str(task_text),
+        image=pixel_values,
+        max_generate_length=max_generate_length,
     )
 
     plugin_info = {
@@ -856,6 +1316,7 @@ def save_edge_engines_for_edge_llm(
         "output_action_dim": action_output_dim(policy),
         "num_inference_steps": int(core.config.num_inference_steps),
         "fixture_dir": str(fixture_dir),
+        "runtime_smoke_input": str(smoke_input),
         **io.to_plugin_info(),
     }
 
@@ -906,7 +1367,7 @@ def run_inference_pytorch_pi05(
             prefix_v=prefix_v,
             prefix_pad_mask=prefix.pad_mask,
         ),
-        PI05ActionAdapter(core, core.config.num_inference_steps),
+        PrefixKVFlowActionAdapter(core, core.config.num_inference_steps),
     )
 
     elapsed = time.perf_counter() - start_time
@@ -942,7 +1403,7 @@ def run_inference_trt_plugin(
     start_time = time.perf_counter()
 
     image_embs = [
-        trt_vision(image.to(device=device).contiguous())
+        run_trt_vision_nchw(trt_vision, image.to(device=device))
         for image in images
     ]
     prefix = prepare_compact_prefix(
@@ -983,12 +1444,21 @@ def run_inference_trt_plugin(
         position_ids=prefix.position_ids,
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    _, prefix_k, prefix_v = trt_lm(
-        prefix_embs,
-        rope_rotary_cos_sin,
-        ctx_len,
-        kvcache_start_index,
-        kv_caches,
+    last_token_ids = torch.full(
+        (prefix_embs.shape[0], 1),
+        prefix_embs.shape[1] - 1,
+        device=device,
+        dtype=torch.int64,
+    )
+    _, _, prefix_k, prefix_v = unpack_vla_prefix_language_outputs(
+        trt_lm(
+            prefix_embs,
+            rope_rotary_cos_sin,
+            ctx_len,
+            kvcache_start_index,
+            last_token_ids,
+            *kv_caches,
+        )
     )
 
     noise = make_pi05_noise(core, tokens.shape[0], device)
@@ -1001,7 +1471,7 @@ def run_inference_trt_plugin(
             prefix_v=prefix_v,
             prefix_pad_mask=prefix.pad_mask,
         ),
-        PI05ActionAdapter(core, int(plugin_info["num_inference_steps"])),
+        PrefixKVFlowActionAdapter(core, int(plugin_info["num_inference_steps"])),
     )
 
     elapsed = time.perf_counter() - start_time
@@ -1020,6 +1490,9 @@ def main() -> int:
     args = parse_args()
     configure_torch_runtime()
 
+    if args.plugin_so:
+        os.environ["EDGELLM_TRT_PLUGIN_SO"] = args.plugin_so
+
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     policy = load_policy(PI05Policy, args.model_id, device).to(device).eval()
@@ -1037,7 +1510,7 @@ def main() -> int:
     trt_vision = trt_lm = trt_diffusion = plugin_info = None
     serialized_engine_info = None
 
-    if not args.skip_trt:
+    if not args.skip_trt and not args.export_only:
         trt_vision, trt_lm, trt_diffusion, plugin_info = compile_trt_with_plugin(
             core,
             policy,
@@ -1050,6 +1523,11 @@ def main() -> int:
         )
 
     if not args.skip_engine:
+        ensure_pi05_paligemma_on_device(core, device)
+        if trt_vision is not None and not args.skip_export:
+            free_cuda_memory(trt_vision, trt_lm, trt_diffusion)
+            trt_vision = trt_lm = trt_diffusion = None
+
         if args.skip_export:
             serialized_engine_info = {"engine_root": args.engine_dir}
         else:
@@ -1061,14 +1539,57 @@ def main() -> int:
                 seed=args.seed,
                 max_seq_len=args.max_seq_len,
                 engine_root=args.engine_dir,
+                accuracy_check=not args.no_accuracy_check,
+                stage_parity=not args.no_stage_parity,
+                max_generate_length=0,
             )
+
+    if not args.skip_trt and not args.export_only and trt_vision is None:
+        print("recompiling PI0.5 in-memory TRT modules for plugin benchmarking")
+        trt_vision, trt_lm, trt_diffusion, plugin_info = compile_trt_with_plugin(
+            core,
+            policy,
+            device,
+            compile_inputs,
+            seed=args.seed,
+            max_seq_len=args.max_seq_len,
+            debug=args.debug,
+            accuracy_check=False,
+        )
+
+    if args.run_cpp_smoke and not args.skip_engine:
+        smoke_input = pathlib.Path(serialized_engine_info.get(
+            "runtime_smoke_input",
+            pathlib.Path(args.engine_dir) / "runtime_smoke" / "input.json",
+        ))
+        if not smoke_input.exists():
+            raise FileNotFoundError(f"Missing runtime smoke input: {smoke_input}")
+        print(f"\nRunning C++ llm_inference smoke: {smoke_input}")
+        result = run_llm_inference_runtime_smoke(
+            engine_root=args.engine_dir,
+            input_file=smoke_input,
+            llm_inference_bin=args.llm_inference_bin,
+            plugin_so=args.plugin_so,
+            max_generate_length=0,
+            dump_output=True,
+        )
+        print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=os.sys.stderr)
+        if result.returncode != 0:
+            print(f"C++ smoke failed with exit code {result.returncode}")
+            return result.returncode
+        print("C++ smoke completed successfully.")
+
+    if args.export_only:
+        return 0
 
     engine_vision = engine_lm = engine_diffusion = engine_info = None
     if not args.skip_engine:
         engine_vision, engine_lm, engine_diffusion, engine_info = load_serialized_modules(
             serialized_engine_info["engine_root"],
             specs=(
-                SerializedModuleSpec("vision", "visual", SerializedPI05Vision),
+                SerializedModuleSpec("vision", "visual", PI05VisionEngineAdapter),
                 SerializedModuleSpec("language", "language", SerializedPI05Language),
                 SerializedModuleSpec("action", "action", SerializedPI05Action),
             ),

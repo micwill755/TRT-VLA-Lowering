@@ -252,3 +252,18 @@ def make_rope_rotary_cos_sin(
                 exc,
             )
     return make_rope_rotary_cos_sin_from_config(config, max_seq_len, device)
+
+
+def make_dummy_rope_rotary_cos_sin(
+    max_seq_len: int,
+    head_dim: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Placeholder RoPE cache for export/compile tracing (runtime overwrites values)."""
+    return torch.randn(
+        1,
+        int(max_seq_len),
+        int(head_dim),
+        dtype=torch.float32,
+        device=device,
+    )

@@ -54,6 +54,37 @@ class _CacheLayerView:
         self.values = values
 
 
+class _SmolVLAAttnPastEntry:
+    """Per-layer KV view for ``smolvlm_with_expert`` dict-style cache access."""
+
+    __slots__ = ("key_states", "value_states")
+
+    def __init__(self, key_states: torch.Tensor, value_states: torch.Tensor):
+        self.key_states = key_states
+        self.value_states = value_states
+
+    def __getitem__(self, key: str) -> torch.Tensor:
+        if key == "key_states":
+            return self.key_states
+        if key == "value_states":
+            return self.value_states
+        raise KeyError(key)
+
+
+class SmolVLAPrefixPastLayers:
+    """Stacked prefix KV [L, B, H, S, D] -> SmolVLA ``past_key_values[layer]`` layout."""
+
+    def __init__(self, prefix_k: torch.Tensor, prefix_v: torch.Tensor):
+        self._k = prefix_k
+        self._v = prefix_v
+
+    def __getitem__(self, layer_idx: int) -> _SmolVLAAttnPastEntry:
+        return _SmolVLAAttnPastEntry(
+            self._k[layer_idx].transpose(1, 2).contiguous(),
+            self._v[layer_idx].transpose(1, 2).contiguous(),
+        )
+
+
 class PrefixKVCache:
     """KV cache backed by stacked tensors with shape [L, B, H, S, D]."""
 

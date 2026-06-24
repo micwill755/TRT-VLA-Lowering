@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 import torch
 
@@ -85,9 +85,12 @@ def sample_actions_raw(
 
 
 @dataclass
-class PI05ActionAdapter:
+class PrefixKVFlowActionAdapter:
+    """Flow-matching action rollout with prefix K/V (PI0.5, SmolVLA, etc.)."""
+
     core: object
     num_steps_value: int
+    runner_inputs_fn: Callable[..., tuple] = make_runner_inputs
 
     def initial_actions(self, context: ActionRolloutContext) -> torch.Tensor:
         return context.noise.clone().to(device=context.device)
@@ -115,7 +118,7 @@ class PI05ActionAdapter:
         timestep: torch.Tensor,
         context: ActionRolloutContext,
     ) -> tuple:
-        return make_runner_inputs(
+        return self.runner_inputs_fn(
             self.core,
             context.prefix_pad_mask,
             context.prefix_k,
@@ -134,6 +137,10 @@ class PI05ActionAdapter:
     ) -> torch.Tensor:
         dt = -1.0 / self.num_steps(context)
         return actions + dt * model_output.float()
+
+
+# Backward-compatible alias; prefer PrefixKVFlowActionAdapter.
+PI05ActionAdapter = PrefixKVFlowActionAdapter
 
 
 @dataclass
