@@ -8,13 +8,7 @@ import torch.nn as nn
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
 
-from trt.packing import (
-    MultimodalPromptProcessor,
-    PackedLanguageInputs,
-    PromptPackingSpec,
-    PromptTensorInputs,
-    compact_packed_language_inputs,
-)
+from trt.packing import compact_pi05_prefix
 
 def force_hf_attention(module, attn):
     for m in module.modules():
@@ -73,42 +67,18 @@ def prepare_policy_inputs(policy, batch, device):
     return images, img_masks, tokens, masks
 
 @torch.no_grad()
-def build_packed_prefix_inputs(core, image_embs, img_masks, tokens, masks) -> PackedLanguageInputs:
-    processor = MultimodalPromptProcessor(
-        PromptPackingSpec(
-            style="concat_prefix",
-            make_att_2d_masks=make_att_2d_masks,
-            prepare_attention_mask_4d=core._prepare_attention_masks_4d,
-        )
-    )
-
-    return processor(
-        PromptTensorInputs(
-            image_embs=image_embs,
-            image_masks=img_masks,
-            text_embs=core.paligemma_with_expert.embed_language_tokens(tokens),
-            text_mask=masks,
-        )
-    )
-
-@torch.no_grad()
-def build_prefix_inputs(core, image_embs, img_masks, tokens, masks):
-    return build_packed_prefix_inputs(
-        core,
-        image_embs,
-        img_masks,
-        tokens,
-        masks,
-    ).as_tuple()
-
-@torch.no_grad()
 def compact_prefix_inputs(prefix_embs, prefix_pad_masks, position_ids):
-    packed = PackedLanguageInputs(
-        inputs_embeds=prefix_embs,
-        pad_mask=prefix_pad_masks,
-        position_ids=position_ids,
+    packed = compact_pi05_prefix({
+        "inputs_embeds": prefix_embs,
+        "pad_mask": prefix_pad_masks,
+        "position_ids": position_ids,
+    })
+    return (
+        packed["inputs_embeds"],
+        packed["pad_mask"],
+        packed["attention_mask"],
+        packed["position_ids"],
     )
-    return compact_packed_language_inputs(packed).as_tuple()
 
 @torch.no_grad()
 def sample_actions_eager(policy, batch, noise, num_steps, device):

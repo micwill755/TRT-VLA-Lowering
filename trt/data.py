@@ -106,6 +106,7 @@ def load_test_data(
         "task": frame.get("task", "") or "Perform the task.",
     }
 
+# ------------------ GROOT SPECIFIC ------------------ 
 
 def create_pil_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build HF chat messages with PIL images for Eagle-style processors (GR00T).
@@ -168,14 +169,14 @@ def prepare_model_inputs(
         "task": data["task"],
     }
 
+    # TODO: remove this function
     return helper.to_device(model_inputs, device)
-
 
 def pack_state(
     state: torch.Tensor,
     max_state_dim: int,
     device: str | torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """Pad or truncate a LeRobot state vector to GROOT's fixed action-head width.
 
     Raw dataset frames often provide a small state vector shaped (D,). GROOT's
@@ -183,14 +184,10 @@ def pack_state(
     sequence-like state tensor shaped (B, state_horizon, max_state_dim). For a
     single frame, state_horizon is 1, so we add batch/history axes and pad or
     truncate the feature dimension to the fixed model width.
-
-    The returned mask marks which state slots came from the real dataset vector.
-    The current diffusion action wrapper consumes the padded state tensor
-    directly, but the mask mirrors native GROOT preprocessing and is useful for
-    callers that need to distinguish real state values from padding.
     """
     state = torch.as_tensor(state, dtype=torch.float32, device=device)
 
+    # libero often starts as (D,), so add batch + horizon axes
     if state.ndim == 1:
         state = state.unsqueeze(0)
 
@@ -198,7 +195,6 @@ def pack_state(
         state = state.unsqueeze(1)
 
     bsz, _, state_dim = state.shape
-    used_dim = min(state_dim, max_state_dim)
 
     if state_dim > max_state_dim:
         state = state[:, :, :max_state_dim]
@@ -212,17 +208,7 @@ def pack_state(
         )
         state = torch.cat([state, pad], dim=-1)
 
-    state_mask = torch.zeros(
-        bsz,
-        1,
-        max_state_dim,
-        dtype=torch.bool,
-        device=device,
-    )
-    state_mask[:, :, :used_dim] = True
-
-    return state, state_mask
-
+    return state
 
 def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
     """Convert a LeRobot CHW float tensor in [0, 1] to an RGB PIL image."""
@@ -235,3 +221,5 @@ def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
         img = img.permute(1, 2, 0)
 
     return Image.fromarray(img.numpy())
+
+# ------------------ GROOT SPECIFIC ------------------ 

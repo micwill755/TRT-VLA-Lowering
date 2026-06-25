@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import math
 import os
 import pathlib
 import time
@@ -30,7 +29,6 @@ from PIL import Image
 from transformers import AutoTokenizer
 
 from lerobot.policies.smolvla import SmolVLAPolicy
-from lerobot.policies.smolvla.modeling_smolvla import make_att_2d_masks, pad_tensor
 from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 
 from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
@@ -44,18 +42,16 @@ from trt.io_spec import (
     action_rollout_extra_config,
 )
 from trt.language import (
-    language_edge_llm_config,
-    language_edge_output_names,
     language_head_dim,
-    make_language_edge_flat_tensors,
-    make_language_edge_input_specs,
     make_plugin_lm_causal_wrapper,
     run_prefix_language_eager,
-    save_embedding_table,
+    save_language_engine_for_edge_llm,
 )
+from trt.language_builders import build_smolvla_language_export_params
+from trt.chat_template import build_smolvla_vitrunner_chat_template
+from trt.tokenizer import save_embedding_table, save_tokenizer_for_edge_llm
 from trt.edge_llm_runtime import (
     run_llm_inference_runtime_smoke,
-    save_tokenizer_for_edge_llm,
     write_llm_runtime_smoke_case,
 )
 from trt.measure import (
@@ -66,13 +62,8 @@ from trt.measure import (
     print_timing,
     tensor_error_metrics,
 )
-from trt.packing import PackedLanguageInputs
-from trt.plugin_utils import (
-    infer_smolvlm_seq_len,
-    load_plugins_for_trt,
-    patch_vision_attention,
-    restore_attention,
-)
+from trt.packing import pack_smolvla_prefix
+from trt.plugin_utils import load_plugins_for_trt
 from trt.rope import make_dummy_rope_rotary_cos_sin, make_rope_rotary_cos_sin
 from trt.serialize import (
     SerializedModuleSpec,
@@ -84,10 +75,10 @@ from trt.serialize import (
 from trt.utils import clone_hf_module_for_export, ensure_smolvla_on_device, free_cuda_memory, load_policy, make_smolvla_runner_inputs
 from trt.vision import (
     VIT_ENGINE_INPUT_NAME,
-    VisualFixedInput,
     nchw_to_hwc,
-    vit_visual_edge_config,
+    save_visual_engine_for_edge_llm,
 )
+from trt.vision_builders import build_smolvla_vision_export_params
 
 MODEL_ID = "lerobot/smolvla_base"
 DATASET_ID = "lerobot/libero"
@@ -167,18 +158,10 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
-
 def set_reproducible_seed(seed: int, device: torch.device) -> None:
     torch.manual_seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
-
-
-def configure_torch_runtime() -> None:
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
-
 
 def action_output_dim(policy: Any) -> int:
     output_feature = policy.config.output_features.get(ACTION)
@@ -186,28 +169,8 @@ def action_output_dim(policy: Any) -> int:
         return int(policy.model.config.max_action_dim)
     return int(output_feature.shape[0])
 
-
 def crop_policy_actions(policy: Any, actions: torch.Tensor) -> torch.Tensor:
     return actions[..., : action_output_dim(policy)]
-
-
-def build_smolvla_vitrunner_chat_template(tokenizer, *, image_token_id: int) -> dict[str, Any]:
-    """Minimal processed_chat_template.json for VitRunner image placeholder expansion."""
-    image_format = tokenizer.decode([int(image_token_id)])
-    if not image_format.strip():
-        image_format = "<image>"
-    return {
-        "model_path": "smolvla-vitrunner",
-        "roles": {
-            "user": {"prefix": "", "suffix": ""},
-        },
-        "content_types": {
-            "image": {"format": image_format},
-        },
-        "generation_prompt": "",
-        "default_system_prompt": "",
-    }
-
 
 def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
     img = img.detach().cpu()
@@ -248,8 +211,8 @@ def write_smolvla_runtime_smoke_case(
     )
 
 
-def validate_language_len(compact_prefix: PackedLanguageInputs, max_seq_len: int | None) -> int:
-    prefix_len = int(compact_prefix.inputs_embeds.shape[1])
+def validate_language_len(compact_prefix: dict, max_seq_len: int | None) -> int:
+    prefix_len = int(compact_prefix["inputs_embeds"].shape[1])
     if max_seq_len is not None and int(max_seq_len) != prefix_len:
         raise ValueError(
             "SmolVLA Edge export uses a static prefix. "
@@ -375,107 +338,6 @@ def prepare_smolvla_batch(policy, batch, device: torch.device):
     return images, img_masks, tokens, masks, state
 
 
-@torch.no_grad()
-def prepare_smolvla_prefix(
-    core,
-    images,
-    img_masks,
-    tokens,
-    masks,
-    state,
-    *,
-    visual_runner=None,
-) -> PackedLanguageInputs:
-    embs = []
-    pad_masks = []
-    att_masks = []
-
-    for img, img_mask in zip(images, img_masks, strict=False):
-        if core.add_image_special_tokens:
-            image_start_token = (
-                core.vlm_with_expert.embed_language_tokens(
-                    core.global_image_start_token.to(device=tokens.device)
-                )
-                .unsqueeze(0)
-                .expand(img.shape[0], -1, -1)
-            )
-            image_start_mask = torch.ones_like(
-                image_start_token[:, :, 0],
-                dtype=torch.bool,
-                device=image_start_token.device,
-            )
-            embs.append(image_start_token)
-            pad_masks.append(image_start_mask)
-            att_masks += [0] * image_start_mask.shape[1]
-
-        if visual_runner is None:
-            img_emb = core.vlm_with_expert.embed_image(img)
-        else:
-            img_emb = visual_runner(img)
-
-        img_emb = img_emb * torch.tensor(
-            img_emb.shape[-1] ** 0.5,
-            dtype=img_emb.dtype,
-            device=img_emb.device,
-        )
-
-        batch_size, num_img_embs = img_emb.shape[:2]
-        img_mask = img_mask[:, None].expand(batch_size, num_img_embs)
-        embs.append(img_emb)
-        pad_masks.append(img_mask)
-        att_masks += [0] * num_img_embs
-
-        if core.add_image_special_tokens:
-            image_end_token = (
-                core.vlm_with_expert.embed_language_tokens(
-                    core.image_end_token.to(device=tokens.device)
-                )
-                .unsqueeze(0)
-                .expand(img.shape[0], -1, -1)
-            )
-            image_end_mask = torch.ones_like(
-                image_end_token[:, :, 0],
-                dtype=torch.bool,
-                device=image_end_token.device,
-            )
-            embs.append(image_end_token)
-            pad_masks.append(image_end_mask)
-            att_masks += [0] * image_end_mask.shape[1]
-
-    lang_emb = core.vlm_with_expert.embed_language_tokens(tokens)
-    lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
-    embs.append(lang_emb)
-    pad_masks.append(masks)
-    att_masks += [0] * lang_emb.shape[1]
-
-    state_emb = core.state_proj(state)
-    state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb
-    embs.append(state_emb)
-    pad_masks.append(torch.ones(state_emb.shape[:2], dtype=torch.bool, device=state_emb.device))
-    att_masks += [1] * state_emb.shape[1]
-
-    prefix_embs = torch.cat(embs, dim=1)
-    prefix_pad_masks = torch.cat(pad_masks, dim=1)
-    prefix_att_masks = torch.tensor(att_masks, dtype=torch.bool, device=prefix_pad_masks.device)[
-        None, :
-    ].expand(prefix_embs.shape[0], -1)
-
-    if core.prefix_length > 0 and prefix_pad_masks.shape[1] < core.prefix_length:
-        prefix_embs = pad_tensor(prefix_embs, core.prefix_length, pad_value=0)
-        prefix_pad_masks = pad_tensor(prefix_pad_masks, core.prefix_length, pad_value=0)
-        prefix_att_masks = pad_tensor(prefix_att_masks, core.prefix_length, pad_value=0)
-
-    prefix_attention_mask = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-    prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-
-    return PackedLanguageInputs(
-        inputs_embeds=prefix_embs,
-        pad_mask=prefix_pad_masks,
-        attention_mask=prefix_attention_mask,
-        position_ids=prefix_position_ids,
-    )
-
-
 def make_action_compile_inputs(core, action_module, prefix_pad_masks, prefix_k, prefix_v, device):
     dtype = next(action_module.step_encoder.action_in_proj.parameters()).dtype
     batch_size = prefix_pad_masks.shape[0]
@@ -515,108 +377,16 @@ def _smolvla_language_model(core):
     return core.vlm_with_expert.get_vlm_model().text_model
 
 
-def _clone_smolvla_language_for_export(core, device: torch.device, *, dtype=torch.dtype):
-    """Clone truncated SmolVLM text stack (num_vlm_layers) for PluginLM export."""
-    text_model = _smolvla_language_model(core)
-    num_layers = int(core.vlm_with_expert.num_vlm_layers)
-    lm_config = copy.deepcopy(text_model.config)
-    lm_config.num_hidden_layers = num_layers
-    return clone_hf_module_for_export(
-        text_model,
-        device,
-        dtype=dtype,
-        config=lm_config,
-    )
-
-
-def _smolvla_image_token_id(core) -> int:
-    token = core.fake_image_token
-    if hasattr(token, "item"):
-        return int(token.item())
-    return int(token)
-
-
-def save_visual_engine_for_edge_llm(
-    core,
-    pixel_values: torch.Tensor,
-    engine_dir: str | pathlib.Path,
-    *,
-    device: torch.device,
-    io: PipelineIOSpec = PI05_EDGE_IO,
-):
-    vlm = core.vlm_with_expert.get_vlm_model()
-    text_cfg = vlm.config.text_config
-    image_token_id = _smolvla_image_token_id(core)
-    vision_dtype = next(vlm.vision_model.parameters()).dtype
-
-    pixel_values_nchw = pixel_values.to(device=device, dtype=vision_dtype).contiguous()
-    images_hwc = nchw_to_hwc(pixel_values_nchw)
-
-    vision_model = clone_hf_module_for_export(
-        vlm.vision_model,
-        device,
-        dtype=next(vlm.vision_model.parameters()).dtype,
-    )
-    connector = clone_hf_module_for_export(
-        vlm.connector,
-        device,
-        dtype=next(vlm.connector.parameters()).dtype,
-    )
-
-    visual = VisualFixedInput(
-        vision_model=vision_model,
-        projector=connector,
-        sample_pixel_values=images_hwc,
-        select_layer=-1,
-    ).eval().to(device)
-
-    with torch.no_grad():
-        eager_output = visual(images_hwc)
-
-    batch_size, seq_len = infer_smolvlm_seq_len(vision_model, pixel_values_nchw)
-
-    patched = patch_vision_attention(
-        vision_model,
-        batch_size=batch_size,
-        seq_len=seq_len,
-        name="SmolVLM",
-        allow_attention_mask=True,
-    )
-    try:
-        engine_path = save_trt_engine_module(
-            visual,
-            (images_hwc,),
-            engine_dir,
-            engine_file="visual.engine",
-            model_type="vit",
-            component="vision",
-            input_names=list(io.vision.input_names),
-            output_names=list(io.vision.output_names),
-            example_output=eager_output,
-            extra_config=vit_visual_edge_config(
-                vocab_size=int(text_cfg.vocab_size),
-                image_token_id=image_token_id,
-                seq_len=int(visual.output_seq_len),
-            ),
-            trt_settings=VISION_TRT_SETTINGS,
-        )
-    finally:
-        restore_attention(patched)
-        free_cuda_memory(visual, vision_model, connector)
-
-    return engine_path, int(visual.output_seq_len)
-
-
 @torch.no_grad()
 def _run_smolvla_plugin_language_eager(
     core,
-    prefix: PackedLanguageInputs,
+    prefix: dict,
     device: torch.device,
     *,
     language_model=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Eager PluginLM prefill matching the exported SmolVLA language.engine."""
-    prefix_embs = prefix.inputs_embeds.to(device=device, dtype=torch.float16).contiguous()
+    prefix_embs = prefix["inputs_embeds"].to(device=device, dtype=torch.float16).contiguous()
     max_seq_len = int(prefix_embs.shape[1])
     batch_size = int(prefix_embs.shape[0])
     cfg = _smolvla_text_config(core)
@@ -650,7 +420,7 @@ def _run_smolvla_plugin_language_eager(
         max_seq_len,
         device,
         language_model=language_model,
-        position_ids=prefix.position_ids,
+        position_ids=prefix["position_ids"],
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     last_token_ids = torch.full(
@@ -673,101 +443,38 @@ def _run_smolvla_plugin_language_eager(
 
 def save_lm_engine_for_edge_llm(
     core,
-    prefix: PackedLanguageInputs,
+    prefix: dict,
     engine_dir: str | pathlib.Path,
     *,
     device: torch.device,
-    tokenizer=None,
+    tokenizer,
     io: PipelineIOSpec = PI05_EDGE_IO,
 ):
-    prefix_embs = prefix.inputs_embeds.to(device=device, dtype=torch.float16).contiguous()
-    max_seq_len = int(prefix_embs.shape[1])
-    batch_size = int(prefix_embs.shape[0])
-    image_token_id = _smolvla_image_token_id(core)
-
-    lm = _clone_smolvla_language_for_export(core, device, dtype=torch.float16)
-    decoder = getattr(lm, "model", lm)
-    cfg = lm.config
-    num_layers = int(core.vlm_with_expert.num_vlm_layers)
-
-    lm_head = clone_hf_module_for_export(
-        core.vlm_with_expert.vlm.lm_head,
+    spec = build_smolvla_language_export_params(
+        core,
+        prefix,
         device,
-        dtype=torch.float16,
-    )
-    lm_wrapper = make_plugin_lm_causal_wrapper(
-        decoder,
-        cfg,
-        lm_head,
-        log_prefix="smolvla",
-    ).to(device=device).eval()
-
-    sample_inputs, _trace_seq_len = make_language_edge_flat_tensors(
-        prefix_embs,
-        batch_size=batch_size,
-        max_seq_len=max_seq_len,
-        num_layers=num_layers,
-        num_key_value_heads=int(cfg.num_key_value_heads),
-        head_dim=language_head_dim(cfg),
-        device=device,
-        dtype=prefix_embs.dtype,
-        static_prefill_seq_len=True,
-    )
-
-    input_names = io.language_input_names(num_layers)
-    input_specs = make_language_edge_input_specs(
-        input_names,
-        sample_inputs,
-        batch_size=batch_size,
-        max_seq_len=max_seq_len,
-        static_prefill_seq_len=True,
-    )
-
-    with torch.no_grad():
-        example_output = lm_wrapper(*sample_inputs)
-
-    save_embedding_table(lm, engine_dir)
-    if tokenizer is not None:
-        save_tokenizer_for_edge_llm(
-            "",
-            engine_dir,
-            tokenizer=tokenizer,
-            chat_template=build_smolvla_vitrunner_chat_template(
-                tokenizer,
-                image_token_id=image_token_id,
-            ),
-        )
-
-    output_names = language_edge_output_names(io.language.output_names, num_layers)
-
-    engine_path = save_trt_engine_module(
-        lm_wrapper,
-        sample_inputs,
-        engine_dir,
-        engine_file="language.engine",
-        model_type="smolvla",
-        component="language",
-        input_names=input_names,
-        output_names=output_names,
-        example_output=example_output,
-        extra_config=language_edge_llm_config(
-            cfg,
-            max_seq_len=max_seq_len,
-            batch_size=batch_size,
-            num_layers=num_layers,
-            image_token_id=image_token_id,
-        ),
-        input_specs=input_specs,
-        flat_tensors=sample_inputs,
+        io=io,
         trt_settings=LANGUAGE_TRT_SETTINGS,
     )
-    free_cuda_memory(lm, lm_wrapper, lm_head)
+
+    engine_path = save_language_engine_for_edge_llm(engine_dir, spec)
+
+    save_embedding_table(spec.language_model, engine_dir)
+    save_tokenizer_for_edge_llm(
+        engine_dir,
+        tokenizer=tokenizer,
+        chat_template=build_smolvla_vitrunner_chat_template(
+            tokenizer,
+            image_token_id=spec.image_token_id,
+        ),
+    )
     return engine_path
 
 
 def save_action_engine_for_edge_llm(
     core,
-    prefix: PackedLanguageInputs,
+    prefix: dict,
     engine_dir: str | pathlib.Path,
     *,
     device: torch.device,
@@ -777,9 +484,9 @@ def save_action_engine_for_edge_llm(
     text_cfg = _smolvla_text_config(core)
     prefix_k = torch.zeros(
         int(core.vlm_with_expert.num_vlm_layers),
-        int(prefix.inputs_embeds.shape[0]),
+        int(prefix["inputs_embeds"].shape[0]),
         int(text_cfg.num_key_value_heads),
-        int(prefix.pad_mask.shape[1]),
+        int(prefix["pad_mask"].shape[1]),
         int(text_cfg.head_dim),
         device=device,
         dtype=torch.float16,
@@ -788,7 +495,7 @@ def save_action_engine_for_edge_llm(
     sample_inputs = make_action_compile_inputs(
         core,
         action_module,
-        prefix.pad_mask,
+        prefix["pad_mask"],
         prefix_k,
         prefix_v,
         device,
@@ -816,7 +523,7 @@ def save_action_engine_for_edge_llm(
                 num_steps=int(core.config.num_steps),
                 chunk_size=int(core.config.chunk_size),
                 max_action_dim=int(core.config.max_action_dim),
-                prefix_seq_len=int(prefix.pad_mask.shape[1]),
+                prefix_seq_len=int(prefix["pad_mask"].shape[1]),
                 num_layers=int(core.vlm_with_expert.num_vlm_layers),
                 num_key_value_heads=int(text_cfg.num_key_value_heads),
                 head_dim=int(text_cfg.head_dim),
@@ -849,8 +556,9 @@ def compare_smolvla_edge_pipeline_to_eager(
 
     ensure_smolvla_on_device(core, device)
 
-    eager_prefix = prepare_smolvla_prefix(
-        core, images, img_masks, tokens, masks, state, visual_runner=None
+    eager_image_embs = [core.vlm_with_expert.embed_image(img) for img in images]
+    eager_prefix = pack_smolvla_prefix(
+        core, eager_image_embs, img_masks, tokens, masks, state
     )
     eager_hidden, eager_prefix_k, eager_prefix_v = _run_smolvla_plugin_language_eager(
         core,
@@ -860,11 +568,7 @@ def compare_smolvla_edge_pipeline_to_eager(
     )
 
     for i, (eager_img, trt_img) in enumerate(
-        zip(
-            [core.vlm_with_expert.embed_image(img) for img in images],
-            trt_image_embs,
-            strict=True,
-        )
+        zip(eager_image_embs, trt_image_embs, strict=True)
     ):
         tensor_error_metrics(f"vision[{i}]", trt_img, eager_img)
 
@@ -875,7 +579,7 @@ def compare_smolvla_edge_pipeline_to_eager(
         trt_hidden,
         trt_prefix_k,
         trt_prefix_v,
-        eager_prefix.pad_mask,
+        eager_prefix["pad_mask"],
     )
 
     noise = core.sample_noise(
@@ -898,7 +602,7 @@ def compare_smolvla_edge_pipeline_to_eager(
             device=device,
             prefix_k=trt_prefix_k,
             prefix_v=trt_prefix_v,
-            prefix_pad_mask=eager_prefix.pad_mask,
+            prefix_pad_mask=eager_prefix["pad_mask"],
         ),
         _smolvla_action_adapter(core),
     )
@@ -922,7 +626,7 @@ def _dump_smolvla_edge_fixture(
     *,
     engine_root: str | pathlib.Path,
     core,
-    prefix: PackedLanguageInputs,
+    prefix: dict,
     lm_hidden_states: torch.Tensor,
     prefix_k: torch.Tensor,
     prefix_v: torch.Tensor,
@@ -933,16 +637,16 @@ def _dump_smolvla_edge_fixture(
 ) -> pathlib.Path:
     set_reproducible_seed(seed, device)
     noise = core.sample_noise(
-        (prefix.inputs_embeds.shape[0], core.config.chunk_size, core.config.max_action_dim),
+        (prefix["inputs_embeds"].shape[0], core.config.chunk_size, core.config.max_action_dim),
         device,
     )
-    timestep = torch.ones(prefix.inputs_embeds.shape[0], device=device, dtype=torch.float32)
+    timestep = torch.ones(prefix["inputs_embeds"].shape[0], device=device, dtype=torch.float32)
     action_module = make_smolvla_action_step(core).to(device)
     prefix_k = prefix_k.to(device=device, dtype=noise.dtype).contiguous()
     prefix_v = prefix_v.to(device=device, dtype=noise.dtype).contiguous()
     noise, timestep, prefix_k, prefix_v, position_ids, attention_mask = make_smolvla_runner_inputs(
         core,
-        prefix.pad_mask,
+        prefix["pad_mask"],
         prefix_k,
         prefix_v,
         noise,
@@ -964,7 +668,7 @@ def _dump_smolvla_edge_fixture(
             device=device,
             prefix_k=prefix_k,
             prefix_v=prefix_v,
-            prefix_pad_mask=prefix.pad_mask,
+            prefix_pad_mask=prefix["pad_mask"],
         ),
         _smolvla_action_adapter(core),
     )
@@ -973,7 +677,7 @@ def _dump_smolvla_edge_fixture(
         engine_root,
         {
             "pixel_values": pixel_values.to(device=device).contiguous(),
-            "inputs_embeds": prefix.inputs_embeds.to(device=device, dtype=torch.float16),
+            "inputs_embeds": prefix["inputs_embeds"].to(device=device, dtype=torch.float16),
             "prefix_k": prefix_k,
             "prefix_v": prefix_v,
             "lm_hidden_states": lm_hidden_states.to(device=device, dtype=torch.float16),
@@ -1005,6 +709,7 @@ def save_edge_engines_for_edge_llm(
 
     images, img_masks, tokens, masks, state = prepare_smolvla_batch(policy, batch, device)
     pixel_values = images[0].contiguous()
+    # Required by llm_inference (see trt.tokenizer).
     tokenizer = AutoTokenizer.from_pretrained(core.config.vlm_model_name)
 
     ensure_smolvla_on_device(core, device)
@@ -1012,30 +717,38 @@ def save_edge_engines_for_edge_llm(
 
     print("exporting SmolVLA vision.engine")
     vision_engine_dir = engine_root / "visual"
-    vision_engine, vision_seq_len = save_visual_engine_for_edge_llm(
+    vis_params = build_smolvla_vision_export_params(
         core,
         pixel_values,
-        vision_engine_dir,
-        device=device,
+        device,
         io=io,
+        trt_settings=VISION_TRT_SETTINGS,
+    )
+    save_visual_engine_for_edge_llm(
+        pixel_values,
+        vision_engine_dir,
+        vis_params,
+        device=device,
     )
 
-    vision_adapter = SmolVLAVisionEngineAdapter(
-        SerializedTRTEngine(vision_engine_dir),
-        num_tokens=vision_seq_len,
-    )
+    # One entry per camera; each matches image_embed_shape == [B, S, H]
+    trt_image_embs = [
+        torch.zeros(
+            *vis_params.image_embed_shape,
+            device=device,
+            dtype=vis_params.input_dtype,
+        )
+        for _ in images
+    ]
     with torch.no_grad():
-        trt_image_embs = [vision_adapter(image.contiguous()) for image in images]
-        prefix = prepare_smolvla_prefix(
+        prefix = pack_smolvla_prefix(
             core,
-            images,
+            trt_image_embs,
             img_masks,
             tokens,
             masks,
             state,
-            visual_runner=vision_adapter,
         )
-    free_cuda_memory(vision_adapter)
 
     language_max_seq_len = validate_language_len(prefix, max_seq_len)
 
@@ -1053,11 +766,11 @@ def save_edge_engines_for_edge_llm(
     with torch.no_grad():
         trt_hidden, trt_prefix_k, trt_prefix_v = _run_serialized_language(
             language_runner,
-            prefix.inputs_embeds,
+            prefix["inputs_embeds"],
             max_seq_len=language_max_seq_len,
             num_layers=int(core.vlm_with_expert.num_vlm_layers),
             device=device,
-            position_ids=prefix.position_ids,
+            position_ids=prefix["position_ids"],
             cfg=text_cfg,
             language_model=language_model,
         )
@@ -1124,7 +837,7 @@ def save_edge_engines_for_edge_llm(
         "diffusion_engine": str(action_engine),
         "vision_output_seq_len": vision_seq_len,
         "language_max_seq_len": language_max_seq_len,
-        "prefix_seq_len": int(prefix.pad_mask.shape[1]),
+        "prefix_seq_len": int(prefix["pad_mask"].shape[1]),
         "chunk_size": int(core.config.chunk_size),
         "max_action_dim": int(core.config.max_action_dim),
         "output_action_dim": action_output_dim(policy),
@@ -1185,22 +898,22 @@ def run_inference_smolvla_engines(
     images, img_masks, tokens, masks, state = prepare_smolvla_batch(policy, batch, device)
 
     start_time = time.perf_counter()
-    prefix = prepare_smolvla_prefix(
+    image_embs = [vision_runner(image) for image in images]
+    prefix = pack_smolvla_prefix(
         core,
-        images,
+        image_embs,
         img_masks,
         tokens,
         masks,
         state,
-        visual_runner=vision_runner,
     )
     _, prefix_k, prefix_v = _run_serialized_language(
         language_runner,
-        prefix.inputs_embeds,
+        prefix["inputs_embeds"],
         max_seq_len=int(plugin_info["language_max_seq_len"]),
         num_layers=int(core.vlm_with_expert.num_vlm_layers),
         device=device,
-        position_ids=prefix.position_ids,
+        position_ids=prefix["position_ids"],
         cfg=_smolvla_text_config(core),
         language_model=_smolvla_language_model(core),
     )
@@ -1215,7 +928,7 @@ def run_inference_smolvla_engines(
             device=device,
             prefix_k=prefix_k,
             prefix_v=prefix_v,
-            prefix_pad_mask=prefix.pad_mask,
+            prefix_pad_mask=prefix["pad_mask"],
         ),
         _smolvla_action_adapter(core),
     )
@@ -1225,14 +938,13 @@ def run_inference_smolvla_engines(
         "noise": noise,
         "prefix_k": prefix_k,
         "prefix_v": prefix_v,
-        "prefix_pad_mask": prefix.pad_mask,
+        "prefix_pad_mask": prefix["pad_mask"],
     }
     return actions, extra, elapsed
 
 
 def main() -> int:
     args = parse_args()
-    configure_torch_runtime()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 

@@ -6,7 +6,8 @@ from trt.action_rollout import (
     PrefixKVFlowActionAdapter,
     sample_actions_raw,
 )
-from trt.utils import prepare_policy_inputs, make_runner_inputs, build_prefix_inputs, compact_prefix_inputs
+from trt.packing import pack_pi05_prefix
+from trt.utils import prepare_policy_inputs, make_runner_inputs, compact_prefix_inputs
 
 def _first_bad_index(mask, shape):
     flat_idx = int(mask.flatten().nonzero(as_tuple=False)[0].item())
@@ -194,13 +195,11 @@ def compare_full_vla_to_eager_actions(
 
     image_embs = [visual_runner(image) for image in images]
 
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_prefix_inputs(
-        core,
-        image_embs,
-        img_masks,
-        tokens,
-        masks,
-    )
+    packed = pack_pi05_prefix(core, image_embs, img_masks, tokens, masks, compact=False)
+    prefix_embs = packed["inputs_embeds"]
+    prefix_pad_masks = packed["pad_mask"]
+    prefix_attention_mask = packed["attention_mask"]
+    prefix_position_ids = packed["position_ids"]
 
     if compact_prefix:
         prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = compact_prefix_inputs(

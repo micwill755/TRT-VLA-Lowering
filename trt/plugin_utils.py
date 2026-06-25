@@ -184,13 +184,6 @@ def patch_vision_attention(
     print(f"patched {name} attention modules: {len(patched)}")
     return patched
 
-
-@torch.no_grad()
-def infer_siglip_seq_len(vision_model, image):
-    hidden_states = vision_model.embeddings(image)
-    return int(hidden_states.shape[0]), int(hidden_states.shape[1])
-
-
 @torch.no_grad()
 def infer_smolvlm_seq_len(vision_model, image):
     patch_size = vision_model.patch_size

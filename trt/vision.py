@@ -5,23 +5,147 @@ Layout conventions
 * **Policy / HuggingFace**: NCHW ``[batch, C, H, W]`` (LeRobot processor output).
 * **TRT engine / VitRunner**: HWC ``[batch, H, W, C]`` binding ``pixel_values``.
 * **Engine output**: flattened ``[batch * num_tokens, hidden]`` for C++
-  ``embeddingLookupWithImageInsertion``; PI0.5 prefix packing reshapes back to
-  ``[batch, num_tokens, hidden]`` inside ``prepare_compact_prefix``.
+  ``embeddingLookupWithImageInsertion``;.
 """
 
+from __future__ import annotations
+
 import logging
+import pathlib
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn as nn
 
-from trt.io_spec import VLA_VISION_IO
+from trt.compile import save_trt_engine_module
+from trt.io_spec import ComponentIOSpec, VLA_VISION_IO
+from trt.plugin_utils import patch_vision_attention, restore_attention
+from trt.utils import free_cuda_memory
 
 logger = logging.getLogger(__name__)
 
 # Canonical VitRunner engine binding names (shared by PI0.5 and GR00T).
 VIT_ENGINE_INPUT_NAME = VLA_VISION_IO.input_names[0]
 VIT_ENGINE_OUTPUT_NAME = VLA_VISION_IO.output_names[0]
+
+DEFAULT_VISION_TRT_SETTINGS: dict[str, Any] = {
+    "disable_tf32": True,
+    "use_explicit_typing": True,
+    "use_fp32_acc": True,
+    "truncate_double": True,
+    "immutable_weights": True,
+    "decompose_attention": True,
+    "require_full_compilation": True,
+    "offload_module_to_cpu": True,
+}
+
+
+@dataclass
+class VisionEngineSpec:
+    """Model-specific vision export configuration for ``save_visual_engine_for_edge_llm``."""
+
+    visual_vision_model: nn.Module
+    patch_vision_model: nn.Module
+    projector: nn.Module
+
+    input_dtype: torch.dtype
+    patch_batch_size: int
+    patch_seq_len: int
+    vocab_size: int
+    image_token_id: int
+    config_seq_len: int = 0
+    output_hidden_size: int = 0
+    # VitRunner flat output [B*S, H] and per-image [B, S, H]; set by save_visual_engine_for_edge_llm.
+    image_embed_flat_shape: tuple[int, int] = ()
+    image_embed_shape: tuple[int, int, int] = ()
+
+    select_layer: int = -1
+    pixel_shuffle: bool = False
+    downsample_ratio: float = 0.5
+    force_float32_input: bool = False
+    cast_output_to_input_dtype: bool = False
+    vision_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    patch_name: str = "SigLIP"
+    allow_attention_mask: bool = False
+
+    io: ComponentIOSpec = VLA_VISION_IO
+    trt_settings: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_VISION_TRT_SETTINGS))
+    model_type: str = "vit"
+
+
+def save_visual_engine_for_edge_llm(
+    pixel_values: torch.Tensor,
+    engine_dir: str | pathlib.Path,
+    vis_params: VisionEngineSpec,
+    *,
+    device: torch.device,
+) -> tuple[pathlib.Path, int]:
+    """Export a shared Edge-LLM ``visual.engine`` from preprocessed NCHW pixels."""
+    pixel_values_nchw = pixel_values.to(device=device, dtype=vis_params.input_dtype).contiguous()
+    images_hwc = nchw_to_hwc(pixel_values_nchw)
+
+    visual = VisualFixedInput(
+        vision_model=vis_params.visual_vision_model,
+        projector=vis_params.projector,
+        sample_pixel_values=images_hwc,
+        select_layer=vis_params.select_layer,
+        pixel_shuffle=vis_params.pixel_shuffle,
+        downsample_ratio=vis_params.downsample_ratio,
+        force_float32_input=vis_params.force_float32_input,
+        cast_output_to_input_dtype=vis_params.cast_output_to_input_dtype,
+        vision_kwargs=vis_params.vision_kwargs,
+    ).eval().to(device)
+
+    with torch.no_grad():
+        eager_output = visual(images_hwc)
+
+    config_seq_len = int(vis_params.config_seq_len)
+    if config_seq_len <= 0:
+        config_seq_len = int(visual.output_seq_len)
+    vis_params.config_seq_len = config_seq_len
+    vis_params.output_hidden_size = int(visual.output_hidden_size)
+    vis_params.image_embed_flat_shape = (
+        int(visual.output_num_tokens),
+        int(visual.output_hidden_size),
+    )
+    vis_params.image_embed_shape = (
+        int(visual.batch_size),
+        int(visual.output_seq_len),
+        int(visual.output_hidden_size),
+    )
+
+    patched = patch_vision_attention(
+        vis_params.patch_vision_model,
+        batch_size=vis_params.patch_batch_size,
+        seq_len=vis_params.patch_seq_len,
+        name=vis_params.patch_name,
+        allow_attention_mask=vis_params.allow_attention_mask,
+    )
+    try:
+        engine_path = save_trt_engine_module(
+            visual,
+            (images_hwc,),
+            engine_dir,
+            engine_file="visual.engine",
+            model_type=vis_params.model_type,
+            component="vision",
+            input_names=list(vis_params.io.input_names),
+            output_names=list(vis_params.io.output_names),
+            example_output=eager_output,
+            extra_config=vit_visual_edge_config(
+                vocab_size=vis_params.vocab_size,
+                image_token_id=vis_params.image_token_id,
+                seq_len=config_seq_len,
+            ),
+            trt_settings=vis_params.trt_settings,
+        )
+    finally:
+        restore_attention(patched)
+        free_cuda_memory(visual, vis_params.visual_vision_model, vis_params.projector)
+
+    return engine_path, config_seq_len
 
 
 def nchw_to_hwc(pixel_values: torch.Tensor) -> torch.Tensor:

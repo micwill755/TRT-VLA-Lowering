@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import copy
-import math
 import os
 
 import torch
 import torch.nn as nn
 
 from lerobot.policies.smolvla import SmolVLAPolicy
-from lerobot.policies.smolvla.modeling_smolvla import make_att_2d_masks, pad_tensor
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
+
+from trt.packing import pack_smolvla_prefix
 
 from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
 from trt.compile import compile_trt_module
@@ -135,107 +135,6 @@ def prepare_smolvla_inputs(policy, batch):
     return images, img_masks, tokens, masks, state
 
 
-@torch.no_grad()
-def build_smolvla_prefix_inputs(
-    core,
-    images,
-    img_masks,
-    tokens,
-    masks,
-    state,
-    *,
-    visual_runner=None,
-):
-    embs = []
-    pad_masks = []
-    att_masks = []
-
-    for img, img_mask in zip(images, img_masks, strict=False):
-        if core.add_image_special_tokens:
-            image_start_token = (
-                core.vlm_with_expert.embed_language_tokens(
-                    core.global_image_start_token.to(device=tokens.device)
-                )
-                .unsqueeze(0)
-                .expand(img.shape[0], -1, -1)
-            )
-            image_start_mask = torch.ones_like(
-                image_start_token[:, :, 0],
-                dtype=torch.bool,
-                device=image_start_token.device,
-            )
-            embs.append(image_start_token)
-            pad_masks.append(image_start_mask)
-            att_masks += [0] * image_start_mask.shape[1]
-
-        img_emb = (
-            core.vlm_with_expert.embed_image(img)
-            if visual_runner is None
-            else visual_runner(img)
-        )
-        img_emb = img_emb * torch.tensor(
-            img_emb.shape[-1] ** 0.5,
-            dtype=img_emb.dtype,
-            device=img_emb.device,
-        )
-
-        batch_size, num_img_embs = img_emb.shape[:2]
-        img_mask = img_mask[:, None].expand(batch_size, num_img_embs)
-
-        embs.append(img_emb)
-        pad_masks.append(img_mask)
-        att_masks += [0] * num_img_embs
-
-        if core.add_image_special_tokens:
-            image_end_token = (
-                core.vlm_with_expert.embed_language_tokens(
-                    core.image_end_token.to(device=tokens.device)
-                )
-                .unsqueeze(0)
-                .expand(img.shape[0], -1, -1)
-            )
-            image_end_mask = torch.ones_like(
-                image_end_token[:, :, 0],
-                dtype=torch.bool,
-                device=image_end_token.device,
-            )
-            embs.append(image_end_token)
-            pad_masks.append(image_end_mask)
-            att_masks += [0] * image_end_mask.shape[1]
-
-    lang_emb = core.vlm_with_expert.embed_language_tokens(tokens)
-    lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
-
-    embs.append(lang_emb)
-    pad_masks.append(masks)
-    att_masks += [0] * lang_emb.shape[1]
-
-    state_emb = core.state_proj(state)
-    state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb
-
-    embs.append(state_emb)
-    pad_masks.append(torch.ones(state_emb.shape[:2], dtype=torch.bool, device=state_emb.device))
-    att_masks += [1] * state_emb.shape[1]
-
-    prefix_embs = torch.cat(embs, dim=1)
-    prefix_pad_masks = torch.cat(pad_masks, dim=1)
-
-    prefix_att_masks = torch.tensor(att_masks, dtype=torch.bool, device=prefix_pad_masks.device)[
-        None, :
-    ]
-    prefix_att_masks = prefix_att_masks.expand(prefix_embs.shape[0], -1)
-
-    if core.prefix_length > 0 and prefix_pad_masks.shape[1] < core.prefix_length:
-        prefix_embs = pad_tensor(prefix_embs, core.prefix_length, pad_value=0)
-        prefix_pad_masks = pad_tensor(prefix_pad_masks, core.prefix_length, pad_value=0)
-        prefix_att_masks = pad_tensor(prefix_att_masks, core.prefix_length, pad_value=0)
-
-    prefix_attention_mask = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-    prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-
-    return prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids
-
-
 def make_compile_inputs(core, action_module, prefix_pad_masks, prefix_k, prefix_v, device):
     dtype = next(action_module.step_encoder.action_in_proj.parameters()).dtype
     batch_size = prefix_pad_masks.shape[0]
@@ -353,15 +252,19 @@ def main() -> int:
     finally:
         restore_attention(patched)
 
-    prefix_embs, prefix_pad_masks, prefix_attention_mask, prefix_position_ids = build_smolvla_prefix_inputs(
+    trt_image_embs = [trt_visual(img) for img in images]
+    packed = pack_smolvla_prefix(
         core,
-        images,
+        trt_image_embs,
         img_masks,
         tokens,
         masks,
         state,
-        visual_runner=trt_visual,
     )
+    prefix_embs = packed["inputs_embeds"]
+    prefix_pad_masks = packed["pad_mask"]
+    prefix_attention_mask = packed["attention_mask"]
+    prefix_position_ids = packed["position_ids"]
 
     print("compiling language")
     language_module = SmolVLAPrefixLanguagePrefill(core).eval().to(device)

@@ -25,12 +25,7 @@ from trt.data import (
     make_batch,
     pack_state,
 )
-from trt.packing import (
-    MultimodalPromptProcessor,
-    PackedLanguageInputs,
-    PromptPackingSpec,
-    PromptTensorInputs,
-)
+from trt.packing import pack_groot_language_inputs
 from trt.vision import GROOTVisualEmbed
 from trt.language import (
     compile_language_trt_with_plugin,
@@ -112,34 +107,9 @@ def make_compile_inputs(action_step, vl_embs, state, embodiment_id, device):
     )
 
 @torch.no_grad()
-def build_groot_language_inputs(core, vit_embs, input_ids, attention_mask=None) -> PackedLanguageInputs:
-    eagle = core.backbone.eagle_model
-    image_token_index = getattr(
-        eagle,
-        "image_token_index",
-        eagle.config.image_token_index,
-    )
-
-    processor = MultimodalPromptProcessor(
-        PromptPackingSpec(
-            style="chat_template_placeholder",
-            token_embed_fn=eagle.language_model.get_input_embeddings(),
-            image_token_id=image_token_index,
-        )
-    )
-
-    return processor(
-        PromptTensorInputs(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            image_embs=vit_embs,
-        )
-    )
-
-@torch.no_grad()
 def build_groot_context_inputs(core, vit_embs, input_ids, attention_mask):
     eagle = core.backbone.eagle_model
-    packed = build_groot_language_inputs(
+    packed = pack_groot_language_inputs(
         core,
         vit_embs,
         input_ids,
@@ -147,8 +117,8 @@ def build_groot_context_inputs(core, vit_embs, input_ids, attention_mask):
     )
 
     out = eagle.language_model(
-        inputs_embeds=packed.inputs_embeds,
-        attention_mask=packed.attention_mask,
+        inputs_embeds=packed["inputs_embeds"],
+        attention_mask=packed["attention_mask"],
         output_hidden_states=True,
         return_dict=True,
     )
@@ -165,9 +135,9 @@ def build_groot_context_inputs(core, vit_embs, input_ids, attention_mask):
 
     return (
         context_embs,
-        packed.pad_mask,
-        packed.attention_mask,
-        packed.position_ids,
+        packed["pad_mask"],
+        packed["attention_mask"],
+        packed["position_ids"],
     )
 
 def make_groot_context_masks(context_embs, attention_mask):
@@ -264,7 +234,7 @@ def main() -> int:
 
     # groot specifc inputs ------
     attention_mask = tokenized_data['attention_mask']
-    state, state_mask = pack_state(
+    state = pack_state(
         data["state"],
         max_state_dim=policy.config.max_state_dim,
         device=device,
@@ -347,7 +317,7 @@ def main() -> int:
     # -------------------------
 
     # Build the actual LM input embeddings for the TRT vision path.
-    trt_language_inputs = build_groot_language_inputs(
+    trt_language_inputs = pack_groot_language_inputs(
         model,
         trt_image_embs,
         input_ids,
@@ -355,7 +325,7 @@ def main() -> int:
     )
 
     # Build the same LM input embeddings with eager vision so we can isolate LM-plugin drift.
-    eager_language_inputs = build_groot_language_inputs(
+    eager_language_inputs = pack_groot_language_inputs(
         model,
         eager_image_embs,
         input_ids,
@@ -378,7 +348,7 @@ def main() -> int:
     )
     trt_language_model, trt_language_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
-        trt_language_inputs.inputs_embeds,
+        trt_language_inputs["inputs_embeds"],
         num_layers=len(decoder.layers),
         num_key_value_heads=int(language_model.config.num_key_value_heads),
         head_dim=language_head_dim(language_model.config),
@@ -388,7 +358,7 @@ def main() -> int:
     lm_head_dim = language_head_dim(language_model.config)
 
     # Run plugin LM/context with eager vision embeddings.
-    eager_lm_inputs = eager_language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+    eager_lm_inputs = eager_language_inputs["inputs_embeds"].to(device=device, dtype=torch.float16)
     eager_kv_caches = [
         torch.zeros(
             int(eager_lm_inputs.shape[0]),
@@ -412,7 +382,7 @@ def main() -> int:
         trt_language_max_seq_len,
         device,
         language_model=language_model,
-        position_ids=eager_language_inputs.position_ids,
+        position_ids=eager_language_inputs["position_ids"],
     )
     eager_kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     eager_last_token_ids = torch.full(
@@ -447,7 +417,7 @@ def main() -> int:
     )
 
     # Run plugin LM/context with TRT vision embeddings.
-    trt_lm_inputs = trt_language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+    trt_lm_inputs = trt_language_inputs["inputs_embeds"].to(device=device, dtype=torch.float16)
     trt_kv_caches = [
         torch.zeros(
             int(trt_lm_inputs.shape[0]),
@@ -471,7 +441,7 @@ def main() -> int:
         trt_language_max_seq_len,
         device,
         language_model=language_model,
-        position_ids=trt_language_inputs.position_ids,
+        position_ids=trt_language_inputs["position_ids"],
     )
     trt_kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     trt_last_token_ids = torch.full(

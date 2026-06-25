@@ -11,14 +11,18 @@ stacked views exported for the action head.
 """
 
 import copy
+import logging
 import pathlib
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.nn as nn
 import torch_tensorrt
 
 from trt.attention import PluginAttention
-from trt.compile import compile_trt_module
+from trt.compile import compile_trt_module, save_trt_engine_module
+from trt.io_spec import ComponentIOSpec, VLA_LANGUAGE_IO
 from trt.rope import (
     config_to_dict,
     export_rope_fields,
@@ -26,6 +30,57 @@ from trt.rope import (
     make_dummy_rope_rotary_cos_sin,
     make_rope_rotary_cos_sin,
 )
+from trt.utils import free_cuda_memory
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_LANGUAGE_TRT_SETTINGS: dict[str, Any] = {
+    "disable_tf32": True,
+    "use_explicit_typing": True,
+    "use_fp32_acc": True,
+    "truncate_double": True,
+    "immutable_weights": True,
+    "decompose_attention": True,
+    "require_full_compilation": True,
+    "offload_module_to_cpu": True,
+    "assume_dynamic_shape_support": True,
+}
+
+
+@dataclass
+class LanguageEngineSpec:
+    """Model-specific language export configuration for ``save_language_engine_for_edge_llm``."""
+
+    decoder: nn.Module
+    lm_head: nn.Module
+    language_model: nn.Module
+    config: Any
+
+    prefix_embs: torch.Tensor
+    batch_size: int
+    max_seq_len: int
+    hidden_size: int
+    num_layers: int
+    num_key_value_heads: int
+    head_dim: int
+
+    image_token_id: int
+    seq_len_per_image: int = 0
+
+    position_ids: torch.Tensor | None = None
+    select_layer: int = -1
+    enable_bidirectional_prefill: int = 1
+    static_prefill_seq_len: bool = False
+    context_hidden_size: int | None = None
+    export_dtype: torch.dtype = torch.float16
+
+    io: ComponentIOSpec = VLA_LANGUAGE_IO
+    trt_settings: dict[str, Any] = field(
+        default_factory=lambda: dict(DEFAULT_LANGUAGE_TRT_SETTINGS)
+    )
+    model_type: str = "language"
+    log_prefix: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -593,20 +648,6 @@ def make_dummy_inputs_embeds(
         dtype=dtype,
     )
 
-
-def save_embedding_table(language_model: nn.Module, output_dir: str | pathlib.Path) -> None:
-    """Write embedding.safetensors for LLMInferenceRuntime embedding lookup."""
-    from pathlib import Path
-    from safetensors.torch import save_file
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    embed_tokens = language_model.get_input_embeddings()
-    embedding_weight = embed_tokens.weight.data.detach().cpu().half()
-    save_file({"embedding": embedding_weight}, output_dir / "embedding.safetensors")
-
-
 # ---------------------------------------------------------------------------
 # Edge-LLM TRT input specs (PR #4325 multi-profile)
 # ---------------------------------------------------------------------------
@@ -819,12 +860,83 @@ def language_edge_trt_settings(**overrides):
     come from ``compile.py``; this adds only language-specific overrides for
     PR #4325 multi-profile + plugin attention conversion.
     """
-    settings = {
-        "assume_dynamic_shape_support": True,
-        "use_explicit_typing": False,
-    }
+    settings = dict(DEFAULT_LANGUAGE_TRT_SETTINGS)
+    settings["use_explicit_typing"] = False
     settings.update(overrides)
     return settings
+
+
+@torch.no_grad()
+def save_language_engine_for_edge_llm(
+    engine_dir: str | pathlib.Path,
+    spec: LanguageEngineSpec,
+) -> pathlib.Path:
+    """Export ``language.engine`` from a populated ``LanguageEngineSpec``."""
+    device = spec.prefix_embs.device
+    dtype = spec.export_dtype
+    prefix_embs = spec.prefix_embs.to(device=device, dtype=dtype).contiguous()
+
+    lm_wrapper = make_plugin_lm_causal_wrapper(
+        spec.decoder,
+        spec.config,
+        spec.lm_head,
+        select_layer=spec.select_layer,
+        enable_bidirectional_prefill=spec.enable_bidirectional_prefill,
+        log_prefix=spec.log_prefix,
+    ).to(device=device, dtype=dtype).eval()
+
+    sample_inputs, _trace_seq_len = make_language_edge_flat_tensors(
+        prefix_embs,
+        batch_size=spec.batch_size,
+        max_seq_len=spec.max_seq_len,
+        num_layers=spec.num_layers,
+        num_key_value_heads=spec.num_key_value_heads,
+        head_dim=spec.head_dim,
+        device=device,
+        dtype=dtype,
+        static_prefill_seq_len=spec.static_prefill_seq_len,
+    )
+
+    input_names = spec.io.input_names + [
+        f"past_key_values_{i}" for i in range(spec.num_layers)
+    ]
+    input_specs = make_language_edge_input_specs(
+        input_names,
+        sample_inputs,
+        batch_size=spec.batch_size,
+        max_seq_len=spec.max_seq_len,
+        static_prefill_seq_len=spec.static_prefill_seq_len,
+    )
+
+    with torch.no_grad():
+        example_output = lm_wrapper(*sample_inputs)
+
+    output_names = language_edge_output_names(spec.io.output_names, spec.num_layers)
+
+    engine_path = save_trt_engine_module(
+        lm_wrapper,
+        sample_inputs,
+        engine_dir,
+        engine_file="language.engine",
+        model_type=spec.model_type,
+        component="language",
+        input_names=input_names,
+        output_names=output_names,
+        example_output=example_output,
+        extra_config=language_edge_llm_config(
+            spec.config,
+            max_seq_len=spec.max_seq_len,
+            batch_size=spec.batch_size,
+            num_layers=spec.num_layers,
+            context_hidden_size=spec.context_hidden_size,
+            image_token_id=spec.image_token_id,
+        ),
+        input_specs=input_specs,
+        flat_tensors=sample_inputs,
+        trt_settings=spec.trt_settings,
+    )
+    free_cuda_memory(lm_wrapper, spec.decoder, spec.lm_head, spec.language_model)
+    return engine_path
 
 
 # ---------------------------------------------------------------------------

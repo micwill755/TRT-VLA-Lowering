@@ -43,34 +43,31 @@ from trt.data import (
     prepare_model_inputs,
     pack_state,
 )
-from trt.packing import (
-    MultimodalPromptProcessor,
-    PackedLanguageInputs,
-    PromptPackingSpec,
-    PromptTensorInputs,
-)
+from trt.packing import pack_groot_language_inputs
 from trt.vision import (
     VisualFixedInput,
     nchw_to_hwc,
-    vit_visual_edge_config,
+    save_visual_engine_for_edge_llm,
     VIT_ENGINE_INPUT_NAME,
     VIT_ENGINE_OUTPUT_NAME,
 )
+from trt.vision_builders import build_groot_vision_export_params
 
 from trt.language import (
     compile_language_trt_with_plugin,
-    compute_vit_expanded_seq_len,
-    language_edge_llm_config,
-    language_edge_trt_settings,
     language_head_dim,
     make_dummy_inputs_embeds,
     make_groot_action_context_module,
     make_groot_language_context_wrapper,
     make_plugin_lm_causal_wrapper,
-    make_language_edge_input_specs,
-    language_edge_output_names,
-    save_embedding_table,
+    save_language_engine_for_edge_llm,
 )
+from trt.language_builders import build_groot_language_export_params
+from trt.tokenizer import (
+    save_embedding_table,
+    save_tokenizer_for_edge_llm,
+)
+from trt.chat_template import build_groot_vitrunner_chat_template
 from trt.rope import (
     make_rope_rotary_cos_sin,
 )
@@ -87,7 +84,6 @@ from trt.plugin_utils import (
     load_plugin,
     patch_vision_attention,  
     restore_attention,
-    infer_siglip_seq_len,
     load_plugins_for_trt
 )
 from trt.io_spec import (
@@ -195,37 +191,12 @@ def make_static_action_module(
     ).eval().to(device=device, dtype=dtype)
 
 @torch.no_grad()
-def build_language_inputs(core, vit_embs, input_ids, attention_mask=None) -> PackedLanguageInputs:
-    eagle = core.backbone.eagle_model
-    image_token_index = getattr(
-        eagle,
-        "image_token_index",
-        eagle.config.image_token_index,
-    )
-
-    processor = MultimodalPromptProcessor(
-        PromptPackingSpec(
-            style="chat_template_placeholder",
-            token_embed_fn=eagle.language_model.get_input_embeddings(),
-            image_token_id=image_token_index,
-        )
-    )
-
-    return processor(
-        PromptTensorInputs(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            image_embs=vit_embs,
-        )
-    )
-
-@torch.no_grad()
-def build_lm_hidden_from_language_inputs(core, packed: PackedLanguageInputs):
+def build_lm_hidden_from_language_inputs(core, packed: dict):
     eagle = core.backbone.eagle_model
 
     out = eagle.language_model(
-        inputs_embeds=packed.inputs_embeds,
-        attention_mask=packed.attention_mask,
+        inputs_embeds=packed["inputs_embeds"],
+        attention_mask=packed["attention_mask"],
         output_hidden_states=True,
         return_dict=True,
     )
@@ -234,12 +205,12 @@ def build_lm_hidden_from_language_inputs(core, packed: PackedLanguageInputs):
 
 
 @torch.no_grad()
-def build_context_from_language_inputs(core, packed: PackedLanguageInputs):
+def build_context_from_language_inputs(core, packed: dict):
     eagle = core.backbone.eagle_model
 
     out = eagle.language_model(
-        inputs_embeds=packed.inputs_embeds,
-        attention_mask=packed.attention_mask,
+        inputs_embeds=packed["inputs_embeds"],
+        attention_mask=packed["attention_mask"],
         output_hidden_states=True,
         return_dict=True,
     )
@@ -258,7 +229,7 @@ def build_context_from_language_inputs(core, packed: PackedLanguageInputs):
 @torch.no_grad()
 def build_context_inputs(core, vit_embs, input_ids, attention_mask):
     eagle = core.backbone.eagle_model
-    packed = build_language_inputs(
+    packed = pack_groot_language_inputs(
         core,
         vit_embs,
         input_ids,
@@ -266,8 +237,8 @@ def build_context_inputs(core, vit_embs, input_ids, attention_mask):
     )
 
     out = eagle.language_model(
-        inputs_embeds=packed.inputs_embeds,
-        attention_mask=packed.attention_mask,
+        inputs_embeds=packed["inputs_embeds"],
+        attention_mask=packed["attention_mask"],
         output_hidden_states=True,
         return_dict=True,
     )
@@ -284,9 +255,9 @@ def build_context_inputs(core, vit_embs, input_ids, attention_mask):
 
     return (
         context_embs,
-        packed.pad_mask,
-        packed.attention_mask,
-        packed.position_ids,
+        packed["pad_mask"],
+        packed["attention_mask"],
+        packed["position_ids"],
     )
 
 def make_context_masks(context_embs, attention_mask):
@@ -315,199 +286,6 @@ def make_visual_fixed_input(
         pixel_shuffle=eagle.use_pixel_shuffle,
         downsample_ratio=eagle.downsample_ratio,
     ).eval().to(device=device, dtype=dtype)
-
-def save_visual_engine_for_edge_llm(
-    model,
-    pixel_values,
-    engine_dir,
-    *,
-    device="cuda",
-    dtype=torch.float16,
-    visual: nn.Module,
-    io: PipelineIOSpec,
-    trt_settings=None,
-):
-    pixel_values_nchw = pixel_values.to(device=device, dtype=dtype).contiguous()
-    images_hwc = nchw_to_hwc(pixel_values_nchw)
-
-    eagle = model.backbone.eagle_model
-    image_token_id = getattr(eagle, "image_token_index", eagle.config.image_token_index)
-    vocab_size = eagle.language_model.config.vocab_size
-
-    visual = make_visual_fixed_input(
-        model,
-        images_hwc,
-        device=device,
-        dtype=dtype,
-    )
-
-    vision_model = eagle.vision_model.vision_model
-
-    with torch.no_grad():
-        eager_output = visual(images_hwc)
-
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values_nchw)
-
-    patched = []
-    try:
-        patched = patch_vision_attention(
-            vision_model,
-            batch_size=batch_size,
-            seq_len=seq_len,
-            name="SigLIP",
-        )
-
-        return save_trt_engine_module(
-            visual,
-            (images_hwc,),
-            engine_dir,
-            engine_file="visual.engine",
-            model_type="vit",
-            component="vision",
-            input_names=list(io.vision.input_names),
-            output_names=list(io.vision.output_names),
-            example_output=eager_output,
-            extra_config=vit_visual_edge_config(
-                vocab_size=vocab_size,
-                image_token_id=image_token_id,
-                seq_len=seq_len,
-            ),
-            trt_settings=trt_settings,
-        )
-
-    finally:
-        if patched:
-            restore_attention(patched)
-
-def save_lm_engine_for_edge_llm(
-    core,
-    engine_dir,
-    *,
-    input_ids,
-    image_token_id,
-    seq_len_per_image,
-    device,
-    position_ids=None,
-    dtype=torch.float16,
-    model_type="language",
-    io: PipelineIOSpec,
-    tokenizer=None,
-):
-    language_model = copy.deepcopy(core.backbone.eagle_model.language_model).to(
-        device=device,
-        dtype=torch.float16,
-    ).eval()
-    decoder = getattr(language_model, "model", language_model)
-    cfg = language_model.config
-    head_dim = language_head_dim(cfg)
-
-    max_seq_len = compute_vit_expanded_seq_len(
-        input_ids,
-        int(image_token_id),
-        int(seq_len_per_image),
-    )
-    batch_size = int(input_ids.shape[0])
-    input_embs = make_dummy_inputs_embeds(
-        batch_size,
-        max_seq_len,
-        int(cfg.hidden_size),
-        device=device,
-        dtype=dtype,
-    )
-
-    kv_caches = [
-        torch.zeros(
-            batch_size,
-            2,  # key + value
-            int(cfg.num_key_value_heads),
-            max_seq_len,
-            head_dim,
-            device=device,
-            dtype=dtype,
-        )
-        for _ in range(len(decoder.layers))
-    ]
-
-    ctx_len = torch.full(
-        (batch_size,),
-        max_seq_len,
-        device=device,
-        dtype=torch.int32,
-    )
-    context_lengths = ctx_len
-
-    plugin_language = make_plugin_lm_causal_wrapper(
-        decoder,
-        cfg,
-        copy.deepcopy(language_model.lm_head).to(device=device, dtype=dtype).eval(),
-        select_layer=-1,
-        enable_bidirectional_prefill=0,
-        log_prefix="groot",
-    ).to(device=device)
-    # Placeholder RoPE cache for export/compile tracing (values are ignored).
-    rope_rotary_cos_sin = torch.randn(
-        1,
-        int(max_seq_len),
-        int(head_dim),
-        dtype=torch.float32,
-        device=device,
-    )
-    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    last_token_ids = torch.full(
-        (batch_size, 1),
-        max_seq_len - 1,
-        device=device,
-        dtype=torch.int64,
-    )
-    flat_tensors = (
-        input_embs,
-        rope_rotary_cos_sin,
-        context_lengths,
-        kvcache_start_index,
-        last_token_ids,
-        *kv_caches,
-    )
-    input_names = io.language_input_names(len(kv_caches))
-    input_specs = make_language_edge_input_specs(
-        input_names,
-        flat_tensors,
-        batch_size=batch_size,
-        max_seq_len=max_seq_len,
-    )
-
-    with torch.no_grad():
-        example_output = plugin_language(*flat_tensors)
-
-    save_embedding_table(language_model, engine_dir)
-    if tokenizer is not None:
-        from trt.edge_llm_runtime import save_tokenizer_for_edge_llm
-
-        save_tokenizer_for_edge_llm("", engine_dir, tokenizer=tokenizer)
-
-    output_names = language_edge_output_names(io.language.output_names, len(kv_caches))
-
-    return save_trt_engine_module(
-        plugin_language,
-        flat_tensors,
-        engine_dir,
-        engine_file="language.engine",
-        model_type=model_type,
-        component="language",
-        input_names=input_names,
-        output_names=output_names,
-        example_output=example_output,
-        input_specs=input_specs,
-        flat_tensors=flat_tensors,
-        trt_settings=language_edge_trt_settings(),
-        extra_config=language_edge_llm_config(
-            cfg,
-            max_seq_len=max_seq_len,
-            batch_size=batch_size,
-            num_layers=len(kv_caches),
-            context_hidden_size=None,
-            image_token_id=image_token_id,
-        ),
-    )
 
 def save_action_context_engine_for_edge_llm(
     core,
@@ -621,11 +399,11 @@ def save_action_diffusion_engine_for_edge_llm(
 def run_serialized_groot_language(
     engine_lm: SerializedGrootLanguage,
     model: nn.Module,
-    language_inputs: PackedLanguageInputs,
+    language_inputs: dict,
     device: torch.device,
 ) -> torch.Tensor:
     """Run an exported language.engine and return lm_hidden_states."""
-    lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+    lm_inputs = language_inputs["inputs_embeds"].to(device=device, dtype=torch.float16)
     language_model = model.backbone.eagle_model.language_model
     decoder = getattr(language_model, "model", language_model)
     cfg = language_model.config
@@ -655,7 +433,7 @@ def run_serialized_groot_language(
         max_seq_len,
         device,
         language_model=language_model,
-        position_ids=language_inputs.position_ids,
+        position_ids=language_inputs["position_ids"],
     )
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     last_token_ids = torch.full(
@@ -684,7 +462,7 @@ def compare_groot_edge_pipeline_to_eager(
     pixel_values: torch.Tensor,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
-    language_inputs: PackedLanguageInputs,
+    language_inputs: dict,
     state: torch.Tensor,
     embodiment_id: torch.Tensor,
     trt_image_embs: torch.Tensor,
@@ -693,13 +471,21 @@ def compare_groot_edge_pipeline_to_eager(
     trt_diffusion: nn.Module,
     device: torch.device,
     seed: int,
-    visual: nn.Module,
 ) -> None:
     """Stage-by-stage TRT vs eager checks for the 3-engine Edge-LLM export path."""
     print("\n=== Edge engine parity vs eager ===")
 
     with torch.no_grad():
-        eager_image_embs = visual(pixel_values)
+        images_hwc = nchw_to_hwc(
+            pixel_values.to(device=device, dtype=torch.float16).contiguous()
+        )
+        visual = make_visual_fixed_input(
+            model,
+            images_hwc,
+            device=device,
+            dtype=torch.float16,
+        )
+        eager_image_embs = visual(images_hwc)
     tensor_error_metrics(
         "vision",
         trt_image_embs.to(device=device, dtype=torch.float16),
@@ -823,20 +609,24 @@ def save_edge_engines_for_edge_llm(
     accuracy_check: bool = True,
     engine_root: str,
     io: PipelineIOSpec,
-    tokenizer=None,
+    tokenizer,
 ) -> tuple[nn.Module | None, nn.Module | None, nn.Module | None, dict]:
     engine_root = str(pathlib.Path(engine_root))
+
     tokenized_data = model_inputs['tokenized_data']
     input_ids = tokenized_data['input_ids']
-
-    # groot specifc inputs ------
     attention_mask = tokenized_data['attention_mask']
-    state, state_mask = pack_state(
+
+    # --------- pre process for action input ---------
+    # pack_state pads the proprio/state vector to max_state_dim
+    # state mask is not used here 
+    state = pack_state(
         model_inputs["state"],
         max_state_dim=policy.config.max_state_dim,
         device=device,
     )
-
+    # GR00T has multi embodiment support - multiple weight matrices in the diffusion action head
+    # action head encoders/decoders only - embodiment_id is the index for weight matrices
     embodiment_tag = getattr(policy.config, "embodiment_tag", "new_embodiment")
     embodiment_id = torch.full(
         (state.shape[0],),
@@ -844,6 +634,7 @@ def save_edge_engines_for_edge_llm(
         dtype=torch.long,
         device=device,
     )
+    # --------- pre process for action input ---------
 
     # Keep the raw image pixels as a one-stream list so this mirrors the PI0.5 script.
     images = [tokenized_data["pixel_values"].to(
@@ -851,7 +642,6 @@ def save_edge_engines_for_edge_llm(
         dtype=torch.float16,
     )]
     pixel_values = images[0]
-    # groot specifc inputs ------
 
     # Load the custom TensorRT plugin library before compiling plugin-backed modules.
     load_plugins_for_trt()
@@ -861,68 +651,64 @@ def save_edge_engines_for_edge_llm(
     # -------------------------
     print("compiling vision")
 
-    visual = make_visual_fixed_input(
-        model,
-        pixel_values,
-        device=device,
-        dtype=torch.float16,
-    )
-
     engine_dir = str(pathlib.Path(engine_root) / "visual")
-    save_visual_engine_for_edge_llm(
+    vis_params = build_groot_vision_export_params(
         model,
         pixel_values,
-        engine_dir,
-        device=device,
-        dtype=torch.float16,
-        visual=visual,
+        device,
         io=io,
         trt_settings=VISION_TRT_SETTINGS,
+        input_dtype=torch.float16,
+    )
+    save_visual_engine_for_edge_llm(
+        pixel_values,
+        engine_dir,
+        vis_params,
+        device=device,
+    )
+    # VitRunner visual.engine output (flat): image_embed_flat_shape == [B*S, H]
+    trt_image_embs = torch.zeros(
+        *vis_params.image_embed_flat_shape,
+        device=device,
+        dtype=vis_params.input_dtype,
     )
 
-    vision_runner = SerializedGrootVision(SerializedTRTEngine(engine_dir))
-    with torch.no_grad():
-        trt_image_embs = vision_runner(pixel_values)
+    # llm_inference requires tokenizer + embedding table + chat template in language/.
+    # language.engine only runs the transformer; C++ does tokenize → embed lookup →
+    # vision insert before the LM forward.
+    print("saving tokenizer")
+    language_engine_dir = str(pathlib.Path(engine_root) / "language")
+    language_model = model.backbone.eagle_model.language_model
+    save_embedding_table(language_model, language_engine_dir)
+    save_tokenizer_for_edge_llm(
+        language_engine_dir,
+        tokenizer=tokenizer,
+        chat_template=build_groot_vitrunner_chat_template(tokenizer),
+    )
 
     # -------------------------
-    # Language engine (logits + lm_hidden_states)
+    # Language engine
     # -------------------------
     print("compiling language")
 
-    eagle = model.backbone.eagle_model
-    image_token_id = getattr(eagle, "image_token_index", eagle.config.image_token_index)
-    vision_model = eagle.vision_model.vision_model
-    _, seq_len_per_image = infer_siglip_seq_len(vision_model, pixel_values)
-
-    language_engine_dir = str(pathlib.Path(engine_root) / "language")
-    save_lm_engine_for_edge_llm(
+    spec = build_groot_language_export_params(
         model,
-        language_engine_dir,
-        input_ids=input_ids,
-        image_token_id=image_token_id,
-        seq_len_per_image=seq_len_per_image,
-        device=device,
-        position_ids=None,
-        dtype=torch.float16,
-        io=io,
-        tokenizer=tokenizer,
-    )
-
-    language_inputs = build_language_inputs(
-        model,
-        trt_image_embs,
         input_ids,
-        attention_mask,
+        image_token_id=int(vis_params.image_token_id),
+        seq_len_per_image=int(vis_params.config_seq_len),
+        device=torch.device(device),
+        io=io,
+        dtype=torch.float16,
     )
+    save_language_engine_for_edge_llm(language_engine_dir, spec)
 
-    language_runner = SerializedGrootLanguage(SerializedTRTEngine(language_engine_dir))
-    with torch.no_grad():
-        lm_hidden_states = run_serialized_groot_language(
-            language_runner,
-            model,
-            language_inputs,
-            torch.device(device),
-        )
+    lm_hidden_states = torch.zeros(
+        spec.batch_size,
+        spec.max_seq_len,
+        spec.hidden_size,
+        device=torch.device(device),
+        dtype=torch.float16,
+    )
 
     # -------------------------
     # Action context engine (lm_hidden_states -> vl_embs)
@@ -940,14 +726,13 @@ def save_edge_engines_for_edge_llm(
         trt_settings=ACTION_TRT_SETTINGS,
     )
 
-    action_context_runner = SerializedGrootActionContext(
-        SerializedTRTEngine(action_context_engine_dir)
+    context_embs = torch.zeros(
+        spec.batch_size,
+        spec.max_seq_len,
+        int(model.action_head.config.backbone_embedding_dim),
+        device=torch.device(device),
+        dtype=torch.float16,
     )
-    with torch.no_grad():
-        context_embs = run_serialized_groot_action_context(
-            action_context_runner,
-            lm_hidden_states,
-        )
 
     # -------------------------
     # Action/diffusion engine
@@ -966,16 +751,42 @@ def save_edge_engines_for_edge_llm(
         io=io,
     )
 
-    action_runner = SerializedGrootAction(SerializedTRTEngine(action_engine_dir))
+    mtmdl_embds = pack_groot_language_inputs(
+        model,
+        trt_image_embs,
+        input_ids,
+        attention_mask,
+    )
+    action_runner = None
 
     if accuracy_check:
+        language_runner = SerializedGrootLanguage(SerializedTRTEngine(language_engine_dir))
+        with torch.no_grad():
+            lm_hidden_states = run_serialized_groot_language(
+                language_runner,
+                model,
+                mtmdl_embds,
+                torch.device(device),
+            )
+
+        action_context_runner = SerializedGrootActionContext(
+            SerializedTRTEngine(action_context_engine_dir)
+        )
+        with torch.no_grad():
+            context_embs = run_serialized_groot_action_context(
+                action_context_runner,
+                lm_hidden_states,
+            )
+
+        action_runner = SerializedGrootAction(SerializedTRTEngine(action_engine_dir))
+
         compare_groot_edge_pipeline_to_eager(
             model,
             policy,
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            language_inputs=language_inputs,
+            language_inputs=mtmdl_embds,
             state=state,
             embodiment_id=embodiment_id,
             trt_image_embs=trt_image_embs,
@@ -984,7 +795,6 @@ def save_edge_engines_for_edge_llm(
             trt_diffusion=action_runner,
             device=torch.device(device),
             seed=seed,
-            visual=visual,
         )
 
     fixture_dir = _dump_groot_edge_fixture(
@@ -993,7 +803,7 @@ def save_edge_engines_for_edge_llm(
         policy=policy,
         pixel_values=pixel_values,
         input_ids=input_ids,
-        language_inputs=language_inputs,
+        language_inputs=mtmdl_embds,
         visual_embeds=trt_image_embs,
         context_embs=context_embs,
         state=state,
@@ -1012,8 +822,8 @@ def save_edge_engines_for_edge_llm(
         "language_engine": str(pathlib.Path(language_engine_dir) / "language.engine"),
         "action_context_engine": str(pathlib.Path(action_context_engine_dir) / "action_context.engine"),
         "diffusion_engine": str(pathlib.Path(action_engine_dir) / "diffusion.engine"),
-        "language_seq_len": int(language_inputs.inputs_embeds.shape[1]),
-        "language_max_seq_len": int(language_inputs.inputs_embeds.shape[1]),
+        "language_seq_len": int(mtmdl_embds["inputs_embeds"].shape[1]),
+        "language_max_seq_len": int(mtmdl_embds["inputs_embeds"].shape[1]),
         "context_seq_len": int(context_embs.shape[1]),
         "context_hidden_size": int(context_embs.shape[2]),
         "lm_hidden_size": int(lm_hidden_states.shape[2]),
@@ -1053,7 +863,7 @@ def compile_trt_with_plugin(
     # GROOT is built to handle multiple embodiments, 
     # where each robot can expose a different state vector width so 
     # GROOT uses a fixed max_state_dim.
-    state, _ = pack_state(
+    state = pack_state(
         model_inputs["state"],
         max_state_dim=policy.config.max_state_dim,
         device=device,
@@ -1100,7 +910,8 @@ def compile_trt_with_plugin(
         eager_image_embs = visual(pixel_values)
 
     vision_model = model.backbone.eagle_model.vision_model.vision_model
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    hidden_states = vision_model.embeddings(image)
+    batch_size, seq_len = int(hidden_states.shape[0]), int(hidden_states.shape[1])
 
     patched = []
     try:
@@ -1130,14 +941,14 @@ def compile_trt_with_plugin(
     # -------------------------
     print("compiling language")
 
-    language_inputs = build_language_inputs(
+    language_inputs = pack_groot_language_inputs(
         model,
         trt_image_embs,
         input_ids,
         attention_mask,
     )
 
-    language_max_seq_len = int(language_inputs.inputs_embeds.shape[1])
+    language_max_seq_len = int(language_inputs["inputs_embeds"].shape[1])
     if max_seq_len is not None:
         language_max_seq_len = int(max_seq_len)
 
@@ -1159,7 +970,7 @@ def compile_trt_with_plugin(
 
     trt_lm, trt_max_seq_len = compile_language_trt_with_plugin(
         plugin_language,
-        language_inputs.inputs_embeds,
+        language_inputs["inputs_embeds"],
         num_layers=len(decoder.layers),
         num_key_value_heads=int(cfg.num_key_value_heads),
         head_dim=language_head_dim(cfg),
@@ -1171,7 +982,7 @@ def compile_trt_with_plugin(
     language_head_dim_val = language_head_dim(cfg)
 
     with torch.no_grad():
-        lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+        lm_inputs = language_inputs["inputs_embeds"].to(device=device, dtype=torch.float16)
         kv_caches = [
             torch.zeros(
                 int(lm_inputs.shape[0]),
@@ -1195,7 +1006,7 @@ def compile_trt_with_plugin(
             language_max_seq_len,
             device,
             language_model=language_model,
-            position_ids=language_inputs.position_ids,
+            position_ids=language_inputs["position_ids"],
         )
         kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
         last_token_ids = torch.full(
@@ -1286,7 +1097,7 @@ def run_inference_pytorch_groot(
     attention_mask = tokenized_data["attention_mask"]
     pixel_values = tokenized_data["pixel_values"].to(device=device, dtype=torch.float16)
 
-    state, _ = pack_state(
+    state = pack_state(
         model_inputs["state"],
         max_state_dim=policy.config.max_state_dim,
         device=device,
@@ -1386,7 +1197,7 @@ def run_inference_trt_plugin(
     attention_mask = tokenized_data["attention_mask"]
     pixel_values = tokenized_data["pixel_values"].to(device=device, dtype=torch.float16).contiguous()
 
-    state, _ = pack_state(
+    state = pack_state(
         model_inputs["state"],
         max_state_dim=policy.config.max_state_dim,
         device=device,
@@ -1398,7 +1209,7 @@ def run_inference_trt_plugin(
 
     image_embs = trt_vision(pixel_values)
 
-    language_inputs = build_language_inputs(
+    language_inputs = pack_groot_language_inputs(
         model,
         image_embs,
         input_ids,
@@ -1413,7 +1224,7 @@ def run_inference_trt_plugin(
             device,
         )
     else:
-        lm_inputs = language_inputs.inputs_embeds.to(device=device, dtype=torch.float16)
+        lm_inputs = language_inputs["inputs_embeds"].to(device=device, dtype=torch.float16)
         language_model = model.backbone.eagle_model.language_model
         decoder = getattr(language_model, "model", language_model)
         cfg = language_model.config
@@ -1440,7 +1251,7 @@ def run_inference_trt_plugin(
             int(plugin_info["language_max_seq_len"]),
             device,
             language_model=language_model,
-            position_ids=language_inputs.position_ids,
+            position_ids=language_inputs["position_ids"],
         )
         kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
         last_token_ids = torch.full(
@@ -1509,7 +1320,7 @@ def _dump_groot_edge_fixture(
     policy: Any,
     pixel_values: torch.Tensor,
     input_ids: torch.Tensor,
-    language_inputs: PackedLanguageInputs,
+    language_inputs: dict,
     visual_embeds: torch.Tensor,
     context_embs: torch.Tensor,
     state: torch.Tensor,
@@ -1567,7 +1378,7 @@ def _dump_groot_edge_fixture(
         GROOTActionAdapter(model.action_head),
     )
 
-    if language_inputs.image_token_mask is None:
+    if language_inputs["image_token_mask"] is None:
         raise ValueError("GR00T Edge fixture export requires image_token_mask for visual-to-LM packing")
 
     return dump_edge_fixture(
@@ -1575,8 +1386,8 @@ def _dump_groot_edge_fixture(
         {
             "pixel_values": pixel_values.to(device=device, dtype=torch.float16),
             "text_embeds": text_embeds,
-            "image_token_mask": language_inputs.image_token_mask.to(dtype=torch.uint8),
-            "inputs_embeds": language_inputs.inputs_embeds.to(device=device, dtype=torch.float16),
+            "image_token_mask": language_inputs["image_token_mask"].to(dtype=torch.uint8),
+            "inputs_embeds": language_inputs["inputs_embeds"].to(device=device, dtype=torch.float16),
             "visual_embeds": visual_embeds.to(device=device, dtype=torch.float16),
             "context_embs": context_embs,
             "state": state,
@@ -1689,7 +1500,7 @@ def main() -> int:
         frame_index=args.frame_index,
     )
     # Eagle processor doesn’t take LeRobot tensors directly. Its API is chat-shaped
-    # GR00T needs an extra step between raw data and prepare_model_inputs
+    # GR00T needs an extra step
     pil_messages = create_pil_messages(data)
 
     cache_dir = HF_LEROBOT_HOME / DEFAULT_TOKENIZER_ASSETS_REPO
@@ -1715,6 +1526,9 @@ def main() -> int:
         pil_messages,
         device,
     )
+
+    # Required by llm_inference (see trt.tokenizer); Eagle processor may wrap the tokenizer.
+    tokenizer = getattr(processor, "tokenizer", processor)
 
     print(
         f"dataset={args.dataset_id}  episode={args.episode_index}  frame={args.frame_index}  "
@@ -1756,7 +1570,7 @@ def main() -> int:
                 accuracy_check=not args.no_accuracy_check,
                 engine_root=args.engine_dir,
                 io=GROOT_EDGE_IO,
-                tokenizer=getattr(processor, "tokenizer", processor),
+                tokenizer=tokenizer,
             )
         edge_plugin_info = serialized_engine_info
 

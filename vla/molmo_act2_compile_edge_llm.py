@@ -9,7 +9,6 @@ from lerobot.policies.molmoact2 import MolmoAct2Policy
 from trt.utils import load_policy
 from vla.base_compile_edge_llm import BaseEdgeBuilder
 
-
 class MolmoAct2EdgeBuilder(BaseEdgeBuilder):
     name = "MolmoAct2"
     model_id = "allenai/MolmoAct2"
@@ -32,7 +31,7 @@ class MolmoAct2EdgeBuilder(BaseEdgeBuilder):
 
 
 def main() -> int:
-    return MolmoAct2EdgeBuilder().run()
+    MolmoAct2EdgeBuilder().run()
 
 
 if __name__ == "__main__":

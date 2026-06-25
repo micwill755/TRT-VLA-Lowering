@@ -18,12 +18,11 @@ from trt.measure import (
 from trt.diffusion import PI05StaticKVDiffusionStep
 from trt.utils import (
     load_policy, 
-    build_packed_prefix_inputs,
     prepare_policy_inputs, 
     make_suffix_position_and_mask
 )
 from trt.data import load_test_data, prepare_policy_batch
-from trt.packing import compact_packed_language_inputs
+from trt.packing import compact_pi05_prefix, pack_pi05_prefix
 from trt.vision import PI05VisualEmbed
 from trt.language import (
     compile_language_trt_with_plugin,
@@ -163,22 +162,21 @@ def main() -> int:
         for image in images
     ]
     # Combine eager image tokens with language-token embeddings and build masks/positions.
-    eager_prefix = build_packed_prefix_inputs(
+    eager_prefix = pack_pi05_prefix(
         core,
         eager_image_embs,
         img_masks,
         tokens,
         masks,
+        compact=False,
     )
 
     # Remove padded prefix slots so the eager reference uses the same dense sequence as TRT.
-    compact_eager_prefix = compact_packed_language_inputs(eager_prefix)
-    (
-        compact_eager_prefix_embs,
-        compact_eager_prefix_pad_masks,
-        compact_eager_prefix_attention_mask,
-        compact_eager_prefix_position_ids,
-    ) = compact_eager_prefix.as_tuple()
+    compact_eager_prefix = compact_pi05_prefix(eager_prefix)
+    compact_eager_prefix_embs = compact_eager_prefix["inputs_embeds"]
+    compact_eager_prefix_pad_masks = compact_eager_prefix["pad_mask"]
+    compact_eager_prefix_attention_mask = compact_eager_prefix["attention_mask"]
+    compact_eager_prefix_position_ids = compact_eager_prefix["position_ids"]
 
     # Run the original language model over the compact eager prefix to produce reference hidden/KV tensors.
     eager_hidden, eager_prefix_k, eager_prefix_v = run_prefix_language_eager(
@@ -195,24 +193,23 @@ def main() -> int:
     trt_image_embs = [trt_vision_model(image) for image in images]
 
     # Combine TRT image tokens with eager language embeddings and build the same prefix metadata.
-    prefix = build_packed_prefix_inputs(
+    prefix = pack_pi05_prefix(
         core,
         trt_image_embs,
         img_masks,
         tokens,
         masks,
+        compact=False,
     )
     # The plugin language model runs in fp16.
-    prefix = prefix.with_inputs_embeds(prefix.inputs_embeds.to(torch.float16))
+    prefix["inputs_embeds"] = prefix["inputs_embeds"].to(torch.float16)
 
     # Remove padded prefix slots before compiling/running the TRT language prefill engine.
-    compact_trt_prefix = compact_packed_language_inputs(prefix)
-    (
-        compact_trt_prefix_embs,
-        compact_trt_prefix_pad_masks,
-        compact_trt_prefix_attention_mask,
-        compact_trt_prefix_position_ids,
-    ) = compact_trt_prefix.as_tuple()
+    compact_trt_prefix = compact_pi05_prefix(prefix)
+    compact_trt_prefix_embs = compact_trt_prefix["inputs_embeds"]
+    compact_trt_prefix_pad_masks = compact_trt_prefix["pad_mask"]
+    compact_trt_prefix_attention_mask = compact_trt_prefix["attention_mask"]
+    compact_trt_prefix_position_ids = compact_trt_prefix["position_ids"]
 
     # Compile the PaliGemma language stack with plugin attention for compact prefix prefill.
     lm = copy.deepcopy(
