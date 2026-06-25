@@ -897,7 +897,7 @@ def save_language_engine_for_edge_llm(
         static_prefill_seq_len=spec.static_prefill_seq_len,
     )
 
-    input_names = spec.io.input_names + [
+    input_names = list(spec.io.input_names) + [
         f"past_key_values_{i}" for i in range(spec.num_layers)
     ]
     input_specs = make_language_edge_input_specs(

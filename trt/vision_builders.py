@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from trt.io_spec import GROOT_EDGE_IO, PI05_EDGE_IO, PipelineIOSpec
-from trt.plugin_utils import infer_siglip_seq_len, infer_smolvlm_seq_len
+from trt.plugin_utils import infer_smolvlm_seq_len
 from trt.utils import clone_hf_module_for_export
 from trt.vision import DEFAULT_VISION_TRT_SETTINGS, VisionEngineSpec
 
@@ -34,7 +34,10 @@ def build_pi05_vision_export_params(
         config=paligemma.config,
     )
     patch_vision_model = vision_tower.vision_model
-    patch_batch_size, patch_seq_len = infer_siglip_seq_len(patch_vision_model, pixel_values_nchw)
+    with torch.no_grad():
+        siglip_hidden = patch_vision_model.embeddings(pixel_values=pixel_values_nchw)
+    patch_batch_size = int(siglip_hidden.shape[0])
+    patch_seq_len = int(siglip_hidden.shape[1])
 
     return VisionEngineSpec(
         visual_vision_model=vision_tower,
@@ -123,7 +126,10 @@ def build_groot_vision_export_params(
         dtype=input_dtype,
     )
     patch_vision_model = eagle.vision_model.vision_model
-    patch_batch_size, patch_seq_len = infer_siglip_seq_len(patch_vision_model, pixel_values_nchw)
+    with torch.no_grad():
+        siglip_hidden = patch_vision_model.embeddings(pixel_values=pixel_values_nchw)
+    patch_batch_size = int(siglip_hidden.shape[0])
+    patch_seq_len = int(siglip_hidden.shape[1])
     image_token_id = getattr(eagle, "image_token_index", eagle.config.image_token_index)
 
     return VisionEngineSpec(

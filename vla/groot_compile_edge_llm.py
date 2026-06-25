@@ -7,7 +7,12 @@ import subprocess
 import copy
 import json
 import logging
+import sys
 import time
+
+_TEST_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(_TEST_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TEST_ROOT))
 
 from typing import Any
 
@@ -910,7 +915,8 @@ def compile_trt_with_plugin(
         eager_image_embs = visual(pixel_values)
 
     vision_model = model.backbone.eagle_model.vision_model.vision_model
-    hidden_states = vision_model.embeddings(image)
+    with torch.no_grad():
+        hidden_states = vision_model.embeddings(pixel_values=pixel_values)
     batch_size, seq_len = int(hidden_states.shape[0]), int(hidden_states.shape[1])
 
     patched = []

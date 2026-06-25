@@ -37,7 +37,6 @@ from trt.plugin_utils import (
     load_plugin,
     patch_vision_attention,  
     restore_attention,
-    infer_siglip_seq_len,
 )
 
 TRT_SETTINGS = {
@@ -124,7 +123,10 @@ def main() -> int:
     # The PI0.5 image encoder is the SigLIP vision model inside PaliGemma.
     vision_model = core.paligemma_with_expert.paligemma.model.vision_tower.vision_model
     # Infer the image-token sequence length so the patched attention plugin has the right shape.
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    with torch.no_grad():
+        siglip_hidden = vision_model.embeddings(pixel_values=pixel_values)
+    batch_size = int(siglip_hidden.shape[0])
+    seq_len = int(siglip_hidden.shape[1])
     # Wrap eager image embedding as a clean image -> patch-token module for TensorRT export.
     eager_model = PI05VisualEmbed(core).eval().to(device=device)
 

@@ -54,7 +54,6 @@ from trt.measure import (
 )
 from trt.packing import pack_pi05_prefix
 from trt.plugin_utils import (
-    infer_siglip_seq_len,
     patch_vision_attention,
     restore_attention,
     load_plugins_for_trt,
@@ -735,7 +734,10 @@ def compile_trt_with_plugin(
         cast_output_to_input_dtype=True,
     ).eval().to(device=device)
     vision_model = vision_tower.vision_model
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    with torch.no_grad():
+        siglip_hidden = vision_model.embeddings(pixel_values=pixel_values)
+    batch_size = int(siglip_hidden.shape[0])
+    seq_len = int(siglip_hidden.shape[1])
 
     patched = []
     try:

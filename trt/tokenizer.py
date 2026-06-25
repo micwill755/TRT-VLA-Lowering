@@ -12,7 +12,7 @@ runtime loads the rest from ``language/`` before that forward:
 Export must always write these files; ``llm_inference`` will not start without them.
 """
 
-from __future__ import annotation
+from __future__ import annotations
 
 from typing import Any
 

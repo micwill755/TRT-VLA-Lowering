@@ -145,10 +145,17 @@ def build_groot_language_export_params(
     trt_settings: dict | None = None,
     dtype: torch.dtype = torch.float16,
 ) -> LanguageEngineSpec:
+    source_lm = core.backbone.eagle_model.language_model
+    source_decoder = getattr(source_lm, "model", source_lm)
+    num_layers = len(source_decoder.layers)
+    lm_config = copy.deepcopy(source_lm.config)
+    lm_config.num_hidden_layers = num_layers
+
     language_model = clone_hf_module_for_export(
-        core.backbone.eagle_model.language_model,
+        source_lm,
         device,
         dtype=dtype,
+        config=lm_config,
     )
     decoder = getattr(language_model, "model", language_model)
     cfg = language_model.config
@@ -179,7 +186,7 @@ def build_groot_language_export_params(
         batch_size=batch_size,
         max_seq_len=max_seq_len,
         hidden_size=int(cfg.hidden_size),
-        num_layers=len(decoder.layers),
+        num_layers=num_layers,
         num_key_value_heads=int(cfg.num_key_value_heads),
         head_dim=head_dim,
         image_token_id=int(image_token_id),

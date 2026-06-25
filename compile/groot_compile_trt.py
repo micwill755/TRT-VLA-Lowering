@@ -46,7 +46,6 @@ from trt.plugin_utils import (
     load_plugins_for_trt,
     patch_vision_attention,  
     restore_attention,
-    infer_siglip_seq_len,
 )
 
 TRT_SETTINGS = {
@@ -271,7 +270,10 @@ def main() -> int:
 
     # inner SigLIP transformer to infer batch size and seq_len
     vision_model = model.backbone.eagle_model.vision_model.vision_model
-    batch_size, seq_len = infer_siglip_seq_len(vision_model, pixel_values)
+    with torch.no_grad():
+        siglip_hidden = vision_model.embeddings(pixel_values=pixel_values)
+    batch_size = int(siglip_hidden.shape[0])
+    seq_len = int(siglip_hidden.shape[1])
     
     # Temporarily swap eager SigLIP attention for the plugin-friendly implementation.
     patched = patch_vision_attention(
