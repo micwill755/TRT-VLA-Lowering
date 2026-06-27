@@ -14,6 +14,7 @@ class ActionRolloutContext:
     prefix_k: torch.Tensor | None = None
     prefix_v: torch.Tensor | None = None
     prefix_pad_mask: torch.Tensor | None = None
+    encoder_attention_mask: torch.Tensor | None = None
 
     context_embs: torch.Tensor | None = None
     state: torch.Tensor | None = None
@@ -141,6 +142,62 @@ class PrefixKVFlowActionAdapter:
 
 # Backward-compatible alias; prefer PrefixKVFlowActionAdapter.
 PI05ActionAdapter = PrefixKVFlowActionAdapter
+
+
+@dataclass
+class EncoderKVFlowActionAdapter:
+    """Flow-matching rollout with stacked encoder K/V (MolmoAct2)."""
+
+    num_steps_value: int
+    dt_sign: int = 1
+
+    def initial_actions(self, context: ActionRolloutContext) -> torch.Tensor:
+        return context.noise.clone().to(device=context.device)
+
+    def num_steps(self, context: ActionRolloutContext) -> int:
+        return int(self.num_steps_value)
+
+    def make_timestep(
+        self,
+        step: int,
+        actions: torch.Tensor,
+        context: ActionRolloutContext,
+    ) -> torch.Tensor:
+        return torch.full(
+            (actions.shape[0],),
+            step / self.num_steps(context),
+            dtype=actions.dtype,
+            device=actions.device,
+        )
+
+    def make_runner_inputs(
+        self,
+        actions: torch.Tensor,
+        timestep: torch.Tensor,
+        context: ActionRolloutContext,
+    ) -> tuple:
+        encoder_attention_mask = context.encoder_attention_mask
+        if encoder_attention_mask is None:
+            encoder_attention_mask = context.prefix_pad_mask
+        if encoder_attention_mask is None:
+            raise RuntimeError("encoder_attention_mask is required for MolmoAct2 action rollout")
+        return (
+            actions,
+            timestep.to(dtype=actions.dtype),
+            context.prefix_k,
+            context.prefix_v,
+            encoder_attention_mask.to(device=actions.device, dtype=actions.dtype),
+        )
+
+    def update(
+        self,
+        actions: torch.Tensor,
+        model_output: torch.Tensor,
+        step: int,
+        context: ActionRolloutContext,
+    ) -> torch.Tensor:
+        dt = self.dt_sign / self.num_steps(context)
+        return actions + dt * model_output.float()
 
 
 @dataclass

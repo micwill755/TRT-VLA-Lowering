@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -19,7 +19,11 @@ class PluginAttention(nn.Module):
     def __init__(
         self,
         original_attn: nn.Module,
-        config: Any,
+        *,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        hidden_size: int,
         layer_idx: int,
         enable_bidirectional_prefill: int = 1,
     ):
@@ -28,7 +32,10 @@ class PluginAttention(nn.Module):
 
         Args:
             original_attn: The original attention module to wrap.
-            config: Model configuration.
+            num_attention_heads: Number of query attention heads.
+            num_key_value_heads: Number of key/value attention heads.
+            head_dim: Per-head dimension.
+            hidden_size: Model hidden size.
             layer_idx: Index of this layer in the model.
             enable_bidirectional_prefill: Whether to enable bidirectional prefill.
         """
@@ -42,18 +49,11 @@ class PluginAttention(nn.Module):
         self.q_norm = getattr(original_attn, "q_norm", None)
         self.k_norm = getattr(original_attn, "k_norm", None)
 
-        self.num_heads = config.num_attention_heads
-        self.num_key_value_heads = config.num_key_value_heads
-
-        # Qwen3 has explicit head_dim that may differ from hidden_size // num_attention_heads
-        if hasattr(config, "head_dim") and config.head_dim is not None:
-            self.head_dim = config.head_dim
-        else:
-            self.head_dim = config.hidden_size // config.num_attention_heads
-
-        # For Qwen3, attention output size is num_heads * head_dim, not hidden_size
+        self.num_heads = int(num_attention_heads)
+        self.num_key_value_heads = int(num_key_value_heads)
+        self.head_dim = int(head_dim)
         self.attn_hidden_size = self.num_heads * self.head_dim
-        self.hidden_size = config.hidden_size
+        self.hidden_size = int(hidden_size)
         self.layer_idx = layer_idx
         self.enable_bidirectional_prefill = int(enable_bidirectional_prefill)
 

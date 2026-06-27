@@ -144,6 +144,34 @@ PI05_EDGE_IO = PipelineIOSpec(
     lm_to_action_slots=((1, 2), (2, 3)),
 )
 
+MOLMOACT2_BACKBONE_IO = ComponentIOSpec(
+    input_names=(
+        "input_ids",
+        "pixel_values",
+        "image_token_pooling",
+        "image_grids",
+        "image_num_crops",
+        "attention_mask",
+    ),
+    output_names=("encoder_k", "encoder_v"),
+)
+
+MOLMOACT2_EDGE_IO = PipelineIOSpec(
+    vision=VLA_VISION_IO,
+    language=MOLMOACT2_BACKBONE_IO,
+    action=ComponentIOSpec(
+        input_names=(
+            "x_t",
+            "timestep",
+            "encoder_k",
+            "encoder_v",
+            "encoder_attention_mask",
+        ),
+        output_names=VLA_ACTION_OUTPUT_NAMES,
+    ),
+    lm_to_action_slots=((0, 2), (1, 3)),
+)
+
 @dataclass(frozen=True)
 class ActionRolloutConfig:
     noise_input_name: str
@@ -160,6 +188,12 @@ PI05_ACTION_ROLLOUT = ActionRolloutConfig(
     noise_input_name="x_t",
     timestep_schedule="continuous_flow",
     rollout_dt_sign=-1,
+)
+
+MOLMOACT2_ACTION_ROLLOUT = ActionRolloutConfig(
+    noise_input_name="x_t",
+    timestep_schedule="continuous_flow",
+    rollout_dt_sign=1,
 )
 
 

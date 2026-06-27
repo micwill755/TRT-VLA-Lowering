@@ -1,10 +1,15 @@
 import math
+import pathlib
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from lerobot.policies.pi05.modeling_pi05 import get_safe_dtype
+from trt.compile import save_trt_engine_module
+from trt.io_spec import ComponentIOSpec
 from trt.prefix_cache import PrefixKVCache, SmolVLAPrefixPastLayers
 
 def create_sinusoidal_pos_embedding(  # see openpi `create_sinusoidal_pos_embedding` (exact copy)
@@ -461,3 +466,68 @@ class GrootDiTStepEncoder(ActionStepEncoder):
         decoder_kwargs = {}
 
         return expert_args, expert_kwargs, decoder_args, decoder_kwargs
+
+
+# ---------------------------------------------------------------------------
+# Edge-LLM diffusion engine export
+# ---------------------------------------------------------------------------
+
+DEFAULT_DIFFUSION_TRT_SETTINGS: dict[str, Any] = {
+    "disable_tf32": True,
+    "use_explicit_typing": True,
+    "truncate_double": True,
+    "immutable_weights": True,
+    "decompose_attention": True,
+    "require_full_compilation": True,
+    "offload_module_to_cpu": True,
+    "use_fp32_acc": True,
+}
+
+
+@dataclass
+class DiffusionEngineSpec:
+    """Model-specific diffusion export configuration for ``save_action_diffusion_engine_for_edge_llm``."""
+
+    diffusion_module: nn.Module
+    sample_inputs: tuple[torch.Tensor, ...]
+    extra_config: dict[str, Any] = field(default_factory=dict)
+
+    io: ComponentIOSpec | None = None
+    trt_settings: dict[str, Any] = field(
+        default_factory=lambda: dict(DEFAULT_DIFFUSION_TRT_SETTINGS)
+    )
+    model_type: str = "action"
+    component: str = "diffusion"
+    engine_file: str = "diffusion.engine"
+
+
+@torch.no_grad()
+def save_action_diffusion_engine_for_edge_llm(
+    engine_dir: str | pathlib.Path,
+    spec: DiffusionEngineSpec,
+) -> pathlib.Path:
+    """Export ``diffusion.engine`` from a populated ``DiffusionEngineSpec``."""
+    if spec.io is None:
+        raise ValueError("DiffusionEngineSpec.io is required (action ComponentIOSpec)")
+
+    sample_inputs = tuple(
+        x.contiguous() if isinstance(x, torch.Tensor) else x
+        for x in spec.sample_inputs
+    )
+
+    with torch.no_grad():
+        eager_output = spec.diffusion_module(*sample_inputs)
+
+    return save_trt_engine_module(
+        spec.diffusion_module,
+        sample_inputs,
+        engine_dir,
+        engine_file=spec.engine_file,
+        model_type=spec.model_type,
+        component=spec.component,
+        input_names=list(spec.io.input_names),
+        output_names=list(spec.io.output_names),
+        example_output=eager_output,
+        extra_config=spec.extra_config,
+        trt_settings=spec.trt_settings,
+    )

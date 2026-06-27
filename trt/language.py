@@ -20,7 +20,6 @@ import torch
 import torch.nn as nn
 import torch_tensorrt
 
-from trt.attention import PluginAttention
 from trt.compile import compile_trt_module, save_trt_engine_module
 from trt.io_spec import ComponentIOSpec, VLA_LANGUAGE_IO
 from trt.rope import (
@@ -31,6 +30,10 @@ from trt.rope import (
     make_rope_rotary_cos_sin,
 )
 from trt.utils import free_cuda_memory
+from trt.plugin_utils import (
+    patch_language_attention, 
+    restore_attention
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +57,13 @@ class LanguageEngineSpec:
     decoder: nn.Module
     lm_head: nn.Module
     language_model: nn.Module
-    config: Any
 
     prefix_embs: torch.Tensor
     batch_size: int
     max_seq_len: int
     hidden_size: int
     num_layers: int
+    num_attention_heads: int
     num_key_value_heads: int
     head_dim: int
 
@@ -92,7 +95,6 @@ def _as_tensor(x):
         return x[0]
     return x
 
-
 def gather_last_token_hidden(
     hidden_states: torch.Tensor,
     last_token_ids: torch.Tensor,
@@ -108,28 +110,6 @@ def gather_last_token_hidden(
         dtype=torch.long,
     )
     return hidden_states[batch_idx, indices]
-
-
-def _install_plugin_attention(
-    lm: nn.Module,
-    config,
-    enable_bidirectional_prefill: int = 1,
-) -> None:
-    """Replace each decoder layer's self_attn with PluginAttention."""
-    from trt.plugin_utils import set_plugin_config_from_model
-
-    set_plugin_config_from_model(
-        config,
-        enable_bidirectional_prefill=enable_bidirectional_prefill,
-    )
-    for i, layer in enumerate(lm.layers):
-        layer.self_attn = PluginAttention(
-            layer.self_attn,
-            config,
-            layer_idx=i,
-            enable_bidirectional_prefill=enable_bidirectional_prefill,
-        ).eval()
-
 
 # ---------------------------------------------------------------------------
 # Plugin LM cores
@@ -208,7 +188,6 @@ class PluginLMForCausalLM(nn.Module):
             dim=0,
         )
         return logits, context_hidden, prefix_k, prefix_v
-
 
 # ---------------------------------------------------------------------------
 # GR00T: causal LM + context projection (dual outputs)
@@ -530,40 +509,7 @@ def unpack_vla_prefix_language_outputs(
     """Split VLA language outputs: logits, lm_hidden_states, prefix_k, prefix_v."""
     return outputs[0], outputs[1], outputs[2], outputs[3]
 
-
-def make_plugin_lm_causal_wrapper(
-    decoder: nn.Module,
-    config,
-    lm_head: nn.Module,
-    *,
-    select_layer: int = -1,
-    enable_bidirectional_prefill: int = 1,
-    log_prefix: str = "",
-) -> PluginLMForCausalLM:
-    head_dim = getattr(
-        config,
-        "head_dim",
-        config.hidden_size // config.num_attention_heads,
-    )
-
-    prefix = f"{log_prefix} " if log_prefix else ""
-    print(f"{prefix}head_dim:", head_dim)
-    print(f"{prefix}select_layer:", int(select_layer))
-
-    _install_plugin_attention(
-        decoder,
-        config,
-        enable_bidirectional_prefill=enable_bidirectional_prefill,
-    )
-
-    return PluginLMForCausalLM(
-        decoder,
-        lm_head,
-        select_layer=select_layer,
-    ).eval()
-
-
-def make_groot_action_context_module(
+def make_action_context_module(
     core,
     *,
     device: torch.device,
@@ -577,10 +523,10 @@ def make_groot_action_context_module(
     ).eval()
 
 
-def make_groot_language_context_wrapper(
+def make_language_context_wrapper(
     core,
     decoder: nn.Module,
-    config,
+    spec,
     *,
     device: torch.device,
     dtype: torch.dtype = torch.float16,
@@ -595,15 +541,13 @@ def make_groot_language_context_wrapper(
 
     language_model = core.backbone.eagle_model.language_model
     lm_head = copy.deepcopy(language_model.lm_head).to(device=device, dtype=dtype).eval()
-    causal_lm = make_plugin_lm_causal_wrapper(
-        decoder,
-        config,
-        lm_head,
-        select_layer=select_layer,
-        enable_bidirectional_prefill=enable_bidirectional_prefill,
-        log_prefix="groot",
-    )
-    context = make_groot_action_context_module(core, device=device, dtype=dtype)
+    causal_lm = PluginLMForCausalLM(
+        spec.decoder,
+        spec.lm_head,
+        select_layer=spec.select_layer,
+    ).eval()
+    
+    context = make_action_context_module(core, device=device, dtype=dtype)
     return GROOTLanguageContextWrapper(causal_lm, context).eval()
 
 
@@ -876,14 +820,11 @@ def save_language_engine_for_edge_llm(
     dtype = spec.export_dtype
     prefix_embs = spec.prefix_embs.to(device=device, dtype=dtype).contiguous()
 
-    lm_wrapper = make_plugin_lm_causal_wrapper(
+    lm_wrapper = PluginLMForCausalLM(
         spec.decoder,
-        spec.config,
         spec.lm_head,
         select_layer=spec.select_layer,
-        enable_bidirectional_prefill=spec.enable_bidirectional_prefill,
-        log_prefix=spec.log_prefix,
-    ).to(device=device, dtype=dtype).eval()
+    )
 
     sample_inputs, _trace_seq_len = make_language_edge_flat_tensors(
         prefix_embs,
@@ -913,31 +854,42 @@ def save_language_engine_for_edge_llm(
 
     output_names = language_edge_output_names(spec.io.output_names, spec.num_layers)
 
-    engine_path = save_trt_engine_module(
-        lm_wrapper,
-        sample_inputs,
-        engine_dir,
-        engine_file="language.engine",
-        model_type=spec.model_type,
-        component="language",
-        input_names=input_names,
-        output_names=output_names,
-        example_output=example_output,
-        extra_config=language_edge_llm_config(
-            spec.config,
-            max_seq_len=spec.max_seq_len,
-            batch_size=spec.batch_size,
-            num_layers=spec.num_layers,
-            context_hidden_size=spec.context_hidden_size,
-            image_token_id=spec.image_token_id,
-        ),
-        input_specs=input_specs,
-        flat_tensors=sample_inputs,
-        trt_settings=spec.trt_settings,
+    patched = patch_language_attention(
+        spec.decoder,
+        hidden_size=spec.hidden_size,
+        num_attention_heads=spec.num_attention_heads,
+        num_key_value_heads=spec.num_key_value_heads,
+        head_dim=spec.head_dim,
+        enable_bidirectional_prefill=spec.enable_bidirectional_prefill,
     )
-    free_cuda_memory(lm_wrapper, spec.decoder, spec.lm_head, spec.language_model)
-    return engine_path
 
+    try:
+        engine_path = save_trt_engine_module(
+            lm_wrapper,
+            sample_inputs,
+            engine_dir,
+            engine_file="language.engine",
+            model_type=spec.model_type,
+            component="language",
+            input_names=input_names,
+            output_names=output_names,
+            example_output=example_output,
+            extra_config=language_edge_llm_config(
+                spec.language_model.config,
+                max_seq_len=spec.max_seq_len,
+                batch_size=spec.batch_size,
+                num_layers=spec.num_layers,
+                context_hidden_size=spec.context_hidden_size,
+                image_token_id=spec.image_token_id,
+            ),
+            input_specs=input_specs,
+            flat_tensors=sample_inputs,
+            trt_settings=spec.trt_settings,
+        )
+    finally:
+        restore_attention(patched)
+        free_cuda_memory(lm_wrapper, spec.decoder, spec.lm_head, spec.language_model)
+    return engine_path
 
 # ---------------------------------------------------------------------------
 # Edge-LLM engine config (language/config.json)

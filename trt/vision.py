@@ -145,7 +145,7 @@ def save_visual_engine_for_edge_llm(
         restore_attention(patched)
         free_cuda_memory(visual, vis_params.visual_vision_model, vis_params.projector)
 
-    return engine_path, config_seq_len
+    return engine_path
 
 
 def nchw_to_hwc(pixel_values: torch.Tensor) -> torch.Tensor:

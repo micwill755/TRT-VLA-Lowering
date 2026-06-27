@@ -6,16 +6,15 @@ from typing import Any, Optional, Sequence, Tuple
 import tensorrt as trt
 import torch
 
-_PLUGIN_CONFIG: dict[str, Any] = {}
+from trt.attention import PluginAttention, ViTPluginAttention
 
+_PLUGIN_CONFIG: dict[str, Any] = {}
 
 def get_plugin_config() -> dict[str, Any]:
     return _PLUGIN_CONFIG
 
-
 def _has_torch_op(namespace: str, name: str) -> bool:
     return hasattr(torch.ops, namespace) and hasattr(getattr(torch.ops, namespace), name)
-
 
 def _register_attention_plugin_op() -> None:
     """Register ``trt::attention_plugin`` for export when edge_plugins is unavailable."""
@@ -167,8 +166,6 @@ def patch_vision_attention(
     name: str,
     allow_attention_mask: bool = False,
 ):
-    from trt.attention import ViTPluginAttention
-
     patched = []
 
     for layer in vision_model.encoder.layers:
@@ -179,6 +176,33 @@ def patch_vision_attention(
             seq_len=seq_len,
             name=name,
             allow_attention_mask=allow_attention_mask,
+        ).eval()
+
+    print(f"patched {name} attention modules: {len(patched)}")
+    return patched
+
+def patch_language_attention(
+    language_model,
+    *,
+    hidden_size: int,
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    enable_bidirectional_prefill: int = 1,
+    name: str = "language",
+):
+    patched = []
+
+    for i, layer in enumerate(language_model.layers):
+        patched.append((layer, layer.self_attn))
+        layer.self_attn = PluginAttention(
+            layer.self_attn,
+            num_attention_heads=int(num_attention_heads),
+            num_key_value_heads=int(num_key_value_heads),
+            head_dim=int(head_dim),
+            hidden_size=int(hidden_size),
+            layer_idx=i,
+            enable_bidirectional_prefill=enable_bidirectional_prefill,
         ).eval()
 
     print(f"patched {name} attention modules: {len(patched)}")
@@ -199,41 +223,3 @@ def infer_smolvlm_seq_len(vision_model, image):
         patch_attention_mask=patch_attention_mask,
     )
     return int(hidden_states.shape[0]), int(hidden_states.shape[1])
-
-
-def set_plugin_config(
-    num_attention_heads: int,
-    num_key_value_heads: int,
-    head_dim: int,
-    max_seq_len: int = 2048,
-    max_batch_size: int = 4,
-    enable_bidirectional_prefill: int = 0,
-) -> None:
-    global _PLUGIN_CONFIG
-    _PLUGIN_CONFIG = {
-        "num_attention_heads": num_attention_heads,
-        "num_key_value_heads": num_key_value_heads,
-        "head_dim": head_dim,
-        "max_seq_len": max_seq_len,
-        "max_batch_size": max_batch_size,
-        "enable_bidirectional_prefill": int(enable_bidirectional_prefill),
-    }
-
-
-def set_plugin_config_from_model(
-    model_config: Any,
-    max_seq_len: int = 2048,
-    enable_bidirectional_prefill: int = 0,
-) -> None:
-    if hasattr(model_config, "head_dim") and model_config.head_dim is not None:
-        head_dim = model_config.head_dim
-    else:
-        head_dim = model_config.hidden_size // model_config.num_attention_heads
-
-    set_plugin_config(
-        num_attention_heads=model_config.num_attention_heads,
-        num_key_value_heads=model_config.num_key_value_heads,
-        head_dim=head_dim,
-        max_seq_len=max_seq_len,
-        enable_bidirectional_prefill=enable_bidirectional_prefill,
-    )
