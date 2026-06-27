@@ -41,7 +41,6 @@ class ExportContext:
     context_embs: torch.Tensor | None = None
 
     handles: dict[str, Any] = field(default_factory=dict)
-    plugin_info: dict[str, Any] = field(default_factory=dict)
 
     def engine_subdir(self, name: str) -> Path | None:
         if self.engine_root is None:
@@ -65,4 +64,3 @@ class ComponentBuild:
 @dataclass
 class PipelineResult:
     handles: dict[str, Any]
-    plugin_info: dict[str, Any]

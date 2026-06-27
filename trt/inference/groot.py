@@ -73,7 +73,10 @@ class GrootInferenceHooks(VLAInferenceHooks):
         lm = self.language_model_for_prefill(ctx)
         decoder = getattr(lm, "model", lm)
         seq_len = int(ctx.language_inputs["inputs_embeds"].shape[1])
-        max_seq_len = int(ctx.plugin_info.get("language_max_seq_len", seq_len))
+        max_seq_len = seq_len
+        language = ctx.stage_handles.language if ctx.stage_handles else None
+        if language is not None:
+            max_seq_len = int(getattr(language, "max_seq_len", language.engine.config["max_seq_len"]))
         return {
             "num_layers": len(decoder.layers),
             "num_key_value_heads": int(lm.config.num_key_value_heads),
@@ -304,7 +307,6 @@ def run_inference_trt_plugin(
     trt_vision,
     trt_lm,
     trt_diffusion,
-    plugin_info: dict,
     seed: int,
     device: torch.device,
     trt_action_context=None,
@@ -316,7 +318,6 @@ def run_inference_trt_plugin(
             language=trt_lm,
             action_context=trt_action_context,
             action=trt_diffusion,
-            plugin_info=plugin_info,
         )
     )
     result = _pipeline(io).run(
@@ -326,7 +327,6 @@ def run_inference_trt_plugin(
         model_inputs,
         backend,
         seed=seed,
-        plugin_info=plugin_info,
     )
     return result.actions, result.extras, result.elapsed_s
 

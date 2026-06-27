@@ -144,35 +144,6 @@ def _trt_dtype_to_torch(dtype) -> torch.dtype:
         return torch.bool
     raise TypeError(f"Unsupported TensorRT dtype: {dtype}")
 
-def _is_plugin_info_value(value: Any) -> bool:
-    return isinstance(value, (str, int, float, bool, list, tuple, dict, type(None)))
-
-def _add_config_to_plugin_info(plugin_info: dict, component_name: str, config: dict) -> None:
-    plugin_info[f"{component_name}_config"] = config
-    plugin_info[f"{component_name}_engine_file"] = config.get("engine_file")
-
-    for key, value in config.items():
-        if not _is_plugin_info_value(value):
-            continue
-
-        plugin_info[f"{component_name}_{key}"] = value
-
-        if key not in plugin_info:
-            plugin_info[key] = value
-
-
-def _apply_plugin_info_aliases(
-    plugin_info: dict,
-    engines: dict[str, SerializedTRTEngine],
-    aliases: dict[str, tuple[str, str]] | None,
-) -> None:
-    if not aliases:
-        return
-
-    for output_key, source in aliases.items():
-        component_name, config_key = source
-        plugin_info[output_key] = engines[component_name].config[config_key]
-
 def load_engine_config(engine_root: pathlib.Path, component: str) -> dict:
     with (engine_root / component / "config.json").open() as f:
         return json.load(f)
@@ -181,43 +152,18 @@ def load_serialized_modules(
     engine_root,
     *,
     specs: tuple[SerializedModuleSpec, ...],
-    plugin_info_aliases: dict[str, tuple[str, str]] | None = None,
-):
+) -> tuple[Any, ...]:
     from trt.plugin_utils import load_plugins_for_trt
 
     load_plugins_for_trt()
 
     engine_root = pathlib.Path(engine_root)
-
-    engines: dict[str, SerializedTRTEngine] = {}
     modules = []
-    plugin_info = {
-        "engine_root": str(engine_root),
-    }
-
     for spec in specs:
         engine_dir = engine_root / spec.engine_subdir
         engine = SerializedTRTEngine(engine_dir)
-
-        engines[spec.name] = engine
         modules.append(spec.wrapper_cls(engine))
-
-        plugin_info[f"{spec.name}_engine_dir"] = str(engine_dir)
-        plugin_info[f"{spec.name}_engine_path"] = str(engine.engine_path)
-
-        _add_config_to_plugin_info(
-            plugin_info,
-            spec.name,
-            engine.config,
-        )
-
-    _apply_plugin_info_aliases(
-        plugin_info,
-        engines,
-        plugin_info_aliases,
-    )
-
-    return (*modules, plugin_info)
+    return tuple(modules)
 
 class SerializedGrootVision:
     def __init__(self, engine):
@@ -233,6 +179,8 @@ class SerializedGrootVision:
         return self.engine({input_name: images})[0]
 
 class SerializedGrootLanguage:
+    bundles_kv_caches = True
+
     def __init__(self, engine):
         self.engine = engine
         self.max_seq_len = int(engine.config["max_seq_len"])
@@ -327,6 +275,8 @@ class SerializedPI05Vision:
         })[0]
 
 class SerializedPI05Language:
+    bundles_kv_caches = True
+
     def __init__(self, engine):
         self.engine = engine
         self.max_seq_len = int(engine.config["max_seq_len"])

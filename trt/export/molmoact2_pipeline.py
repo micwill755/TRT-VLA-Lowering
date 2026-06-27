@@ -95,5 +95,4 @@ class MolmoAct2ExportPipeline:
         if accuracy_check:
             self.hooks.after_export(ctx, sink)
 
-        ctx.plugin_info = self.hooks.finalize_plugin_info(ctx)
-        return PipelineResult(handles=ctx.handles, plugin_info=ctx.plugin_info)
+        return PipelineResult(handles=ctx.handles)

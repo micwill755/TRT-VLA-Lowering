@@ -34,7 +34,6 @@ class VLAInferencePipeline:
         reference: InferenceBackend | None = None,
         seed: int = 42,
         vision_module=None,
-        plugin_info: dict | None = None,
         engine_root: str | Path | None = None,
     ) -> InferenceResult:
         ctx = InferenceContext(
@@ -47,10 +46,8 @@ class VLAInferencePipeline:
             vision_module=vision_module,
             engine_root=Path(engine_root) if engine_root else None,
         )
-        if plugin_info:
-            ctx.plugin_info.update(plugin_info)
-        elif getattr(backend, "handles", None) and backend.handles.plugin_info:
-            ctx.plugin_info.update(backend.handles.plugin_info)
+        if getattr(backend, "handles", None) is not None:
+            ctx.stage_handles = backend.handles
 
         self._seed(ctx)
         t0 = time.perf_counter()
@@ -167,9 +164,9 @@ class VLAInferencePipeline:
             model_inputs=ctx.model_inputs,
             io=ctx.io,
             seed=ctx.seed,
-            plugin_info=dict(ctx.plugin_info),
             vision_module=ctx.vision_module,
             engine_root=ctx.engine_root,
+            stage_handles=ctx.stage_handles,
         )
         self.hooks.preprocess(ref_ctx)
         ref_ctx.language_inputs = dict(ctx.language_inputs)

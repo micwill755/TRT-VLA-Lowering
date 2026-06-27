@@ -13,7 +13,6 @@ from PIL import Image
 from lerobot.utils.constants import ACTION
 
 from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
-from trt.chat_template import build_pi05_vitrunner_chat_template
 from trt.compile import dump_edge_fixture
 from trt.diffusion_builders import (
     build_pi05_diffusion_export_params,
@@ -42,23 +41,14 @@ from trt.vision_builders import build_pi05_vision_export_params
 
 PALIGEMMA_TOKENIZER_ID = "google/paligemma-3b-pt-224"
 
-
-def configure_torch_runtime() -> None:
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
-
-
 def action_output_dim(policy: Any) -> int:
     output_feature = policy.config.output_features.get(ACTION)
     if output_feature is None:
         return int(policy.model.config.max_action_dim)
     return int(output_feature.shape[0])
 
-
 def crop_policy_actions(policy: Any, actions: torch.Tensor) -> torch.Tensor:
     return actions[..., : action_output_dim(policy)]
-
 
 def validate_language_len(prefix: dict, max_seq_len: int | None) -> int:
     prefix_len = int(prefix["inputs_embeds"].shape[1])
@@ -68,7 +58,6 @@ def validate_language_len(prefix: dict, max_seq_len: int | None) -> int:
             f"--max-seq-len must match compact prefix length {prefix_len}, got {max_seq_len}."
         )
     return prefix_len
-
 
 def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
     img = img.detach().cpu()
@@ -81,7 +70,6 @@ def _tensor_image_to_pil(img: torch.Tensor) -> Image.Image:
     if img.ndim == 3 and img.shape[-1] == 1:
         img = img.squeeze(-1)
     return Image.fromarray(img.numpy())
-
 
 def write_pi05_runtime_smoke_case(
     engine_root: str | pathlib.Path,
@@ -375,14 +363,12 @@ class Pi05ExportHooks(VLAExportHooks):
         tokenizer: Any | None = None,
         vision_trt_settings: dict | None = None,
         action_trt_settings: dict | None = None,
-        stage_parity: bool = True,
         max_generate_length: int = 0,
     ) -> None:
         self.io = io
         self.tokenizer = tokenizer
         self.vision_trt_settings = vision_trt_settings or dict(VISION_TRT_SETTINGS)
         self.action_trt_settings = action_trt_settings or dict(ACTION_TRT_SETTINGS)
-        self.stage_parity = stage_parity
         self.max_generate_length = max_generate_length
 
     def preprocess(self, ctx: ExportContext) -> None:
@@ -432,6 +418,8 @@ class Pi05ExportHooks(VLAExportHooks):
 
     def build_chat_template(self, tokenizer: Any) -> dict[str, Any]:
         """Minimal processed_chat_template.json for VitRunner image placeholder expansion."""
+        del tokenizer
+        image_format = "<image>"
         return {
             "model_path": "pi05-vitrunner",
             "roles": {
@@ -460,17 +448,20 @@ class Pi05ExportHooks(VLAExportHooks):
             return
 
         if sink.mode is ExportMode.SERIALIZED:
-            if not self.stage_parity:
-                return
-
+            vision_dir = ctx.engine_subdir("visual")
             language_dir = ctx.engine_subdir("language")
             action_dir = ctx.engine_subdir("action")
+            vision_runner = PI05VisionEngineAdapter(SerializedTRTEngine(vision_dir))
             language_runner = SerializedPI05Language(SerializedTRTEngine(language_dir))
             lm_cfg = ctx.model.paligemma_with_expert.paligemma.model.language_model.config
             language_model = ctx.model.paligemma_with_expert.paligemma.model.language_model
             max_seq_len = int(ctx.lang_spec.max_seq_len)
 
             with torch.no_grad():
+                trt_image_embs = [
+                    vision_runner(image.to(device=ctx.device))
+                    for image in ctx.action_side["images"]
+                ]
                 trt_hidden, trt_prefix_k, trt_prefix_v = run_serialized_pi05_language(
                     language_runner,
                     ctx.language_inputs["inputs_embeds"],
@@ -489,7 +480,7 @@ class Pi05ExportHooks(VLAExportHooks):
                 img_masks=ctx.action_side["img_masks"],
                 tokens=ctx.action_side["tokens"],
                 masks=ctx.action_side["masks"],
-                trt_image_embs=ctx.image_embs,
+                trt_image_embs=trt_image_embs,
                 trt_hidden=trt_hidden,
                 trt_prefix_k=trt_prefix_k,
                 trt_prefix_v=trt_prefix_v,
@@ -513,18 +504,17 @@ class Pi05ExportHooks(VLAExportHooks):
                     prefix_k=eager_prefix_k,
                     prefix_v=eager_prefix_v,
                 )
-                ctx.plugin_info["fixture_dir"] = str(fixture_dir)
+                del fixture_dir
 
                 task_text = ctx.model_inputs.get("task", "")
                 if isinstance(task_text, (list, tuple)):
                     task_text = task_text[0] if task_text else "pick up the object"
-                smoke_input = write_pi05_runtime_smoke_case(
+                write_pi05_runtime_smoke_case(
                     ctx.engine_root,
                     task_text=str(task_text),
                     image=ctx.pixel_values,
                     max_generate_length=self.max_generate_length,
                 )
-                ctx.plugin_info["runtime_smoke_input"] = str(smoke_input)
             return
 
         if ctx.handles.get("language") is not None:
@@ -539,28 +529,3 @@ class Pi05ExportHooks(VLAExportHooks):
                 prefix_pad_masks=ctx.language_inputs["pad_mask"],
                 max_logit_tokens=16,
             )
-
-    def finalize_plugin_info(self, ctx: ExportContext) -> dict:
-        info = super().finalize_plugin_info(ctx)
-        pad_mask = ctx.language_inputs.get("pad_mask")
-        if pad_mask is not None:
-            info["prefix_seq_len"] = int(pad_mask.shape[1])
-        info["chunk_size"] = int(ctx.model.config.chunk_size)
-        info["max_action_dim"] = int(ctx.model.config.max_action_dim)
-        info["output_action_dim"] = action_output_dim(ctx.policy)
-        info["num_inference_steps"] = int(ctx.model.config.num_inference_steps)
-        if ctx.lang_spec is not None:
-            info["language_max_seq_len"] = int(ctx.lang_spec.max_seq_len)
-        root = ctx.engine_root
-        if root is not None:
-            info.update(
-                {
-                    "vision_engine_dir": str(root / "visual"),
-                    "language_engine_dir": str(root / "language"),
-                    "action_engine_dir": str(root / "action"),
-                    "vision_engine": str(root / "visual" / "visual.engine"),
-                    "language_engine": str(root / "language" / "language.engine"),
-                    "diffusion_engine": str(root / "action" / "diffusion.engine"),
-                }
-            )
-        return info

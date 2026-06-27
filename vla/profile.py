@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, TYPE_CHECKING
 
@@ -39,7 +39,6 @@ class InMemoryHandles:
     language: Any = None
     action: Any = None
     action_context: Any = None
-    plugin_info: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -48,7 +47,6 @@ class SerializedHandles:
     language: Any = None
     action_context: Any = None
     action: Any = None
-    plugin_info: dict[str, Any] = field(default_factory=dict)
 
 
 class VLAProfile(ABC):
@@ -66,7 +64,6 @@ class VLAProfile(ABC):
     fill_missing_cameras: ClassVar[bool] = False
 
     serialized_stages: ClassVar[tuple[SerializedStageSpec, ...]] = ()
-    plugin_info_aliases: ClassVar[dict[str, tuple[str, str]]] = {}
 
     vision_trt_settings: ClassVar[dict] = {}
     action_trt_settings: ClassVar[dict] = {}
@@ -116,17 +113,17 @@ class VLAProfile(ABC):
     def run_export_phase(
         self,
         runner: BaseEdgeCompileRunner,
-    ) -> tuple[InMemoryHandles, dict[str, Any] | None]:
+    ) -> tuple[InMemoryHandles, str | None]:
         del runner
         raise NotImplementedError(f"{self.name} export is not implemented")
 
     def post_export(
         self,
         runner: BaseEdgeCompileRunner,
-        engine_info: dict[str, Any] | None,
+        engine_root: str | None,
     ) -> int | None:
         """Optional C++ smoke or early exit. Return an exit code to stop the runner."""
-        del runner, engine_info
+        del runner, engine_root
         return None
 
     @abstractmethod

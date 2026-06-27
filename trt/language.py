@@ -849,9 +849,6 @@ def save_language_engine_for_edge_llm(
         static_prefill_seq_len=spec.static_prefill_seq_len,
     )
 
-    with torch.no_grad():
-        example_output = lm_wrapper(*sample_inputs)
-
     output_names = language_edge_output_names(spec.io.output_names, spec.num_layers)
 
     patched = patch_language_attention(
@@ -864,6 +861,9 @@ def save_language_engine_for_edge_llm(
     )
 
     try:
+        with torch.no_grad():
+            example_output = lm_wrapper(*sample_inputs)
+
         engine_path = save_trt_engine_module(
             lm_wrapper,
             sample_inputs,

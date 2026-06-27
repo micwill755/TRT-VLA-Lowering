@@ -1,4 +1,16 @@
-"""Shared Edge-LLM compile + benchmark runner for all VLAs."""
+"""Shared Edge-LLM compile + benchmark runner for all VLAs.
+
+``BaseEdgeCompileRunner`` implements the template-method lifecycle shared by every
+VLA profile (groot, pi05, smolvla, molmoact2):
+
+    load dataset frame → load policy → prepare compile inputs
+    → export TRT (in-memory plugin modules and/or serialized .engine files)
+    → optional C++ smoke test (profile hook)
+    → benchmark PyTorch vs in-memory TRT vs serialized engines
+
+Profile-specific behavior lives in ``VLAProfile`` subclasses and their export /
+inference hooks; this file only orchestrates the common flow.
+"""
 
 from __future__ import annotations
 
@@ -10,15 +22,21 @@ import torch
 import torch.nn as nn
 
 from trt.data import load_test_data
-from trt.export import ExportMode, VLAExportPipeline
+from trt.export.mode import ExportMode
+from trt.export.pipeline import VLAExportPipeline
 from trt.measure import mean, print_action_metrics, print_timing
 from trt.serialize import load_serialized_modules
-
+from trt.utils import load_policy
 from vla.profile import InMemoryHandles, SerializedHandles, VLAProfile
 
+# Default LeRobot dataset used to fetch a single observation frame for compile/benchmark.
 DATASET_ID = "lerobot/libero"
+# Fixed RNG seed for reproducible action sampling during export and inference.
 SEED = 42
-WORKSPACE_ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+# ``Test/`` repo root — used to locate bundled C++ smoke-test binaries.
+REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = REPO_ROOT.parent
+# Default path to the generic Edge-LLM ``llm_inference`` binary (PI0.5 / SmolVLA / GR00T smoke).
 DEFAULT_LLM_INFERENCE_BIN = (
     WORKSPACE_ROOT
     / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/examples/llm/llm_inference"
@@ -26,14 +44,21 @@ DEFAULT_LLM_INFERENCE_BIN = (
 
 
 class BaseEdgeCompileRunner:
-    """Template-method runner: load → export → benchmark."""
+    """Template-method runner: load → export → benchmark.
+
+    Constructed by ``compile_edge_llm.main()`` after the profile is resolved from
+    ``--model``. Holds the loaded policy, inner ``nn.Module``, and compile inputs
+    for the duration of ``run()``.
+    """
 
     def __init__(self, profile: VLAProfile, args: argparse.Namespace | None = None) -> None:
         self.profile = profile
         self.args = args or self.parse_args()
+        # Fall back to CPU when CUDA is unavailable (export may still fail later).
         self.device = torch.device(
             self.args.device if torch.cuda.is_available() else "cpu"
         )
+        # Populated during ``run()`` — kept as instance attrs for profile hooks.
         self.policy: Any = None
         self.model: nn.Module | None = None
         self.compile_inputs: dict[str, Any] | None = None
@@ -41,14 +66,39 @@ class BaseEdgeCompileRunner:
 
     @classmethod
     def build_arg_parser(cls, profile: VLAProfile) -> argparse.ArgumentParser:
+        """Build the profile-specific CLI parser (phase 2 after ``--model``)."""
         parser = argparse.ArgumentParser(
             description=f"Export {profile.name} TensorRT engines for TensorRT-Edge-LLM",
         )
-        parser.add_argument("--model-id", type=str, default=profile.model_id)
+
+        # --- Model / data ---
+        parser.add_argument(
+            "--model-id",
+            type=str,
+            default=profile.model_id,
+            help="HuggingFace model id or local checkpoint path.",
+        )
         parser.add_argument("--dataset-id", type=str, default=DATASET_ID)
-        parser.add_argument("--episode-index", type=int, default=0)
-        parser.add_argument("--frame-index", type=int, default=0)
-        parser.add_argument("--engine-dir", type=str, default=profile.engine_dir_default)
+        parser.add_argument(
+            "--episode-index",
+            type=int,
+            default=0,
+            help="LeRobot episode index for the benchmark frame.",
+        )
+        parser.add_argument(
+            "--frame-index",
+            type=int,
+            default=0,
+            help="Frame index within the episode.",
+        )
+
+        # --- Output paths ---
+        parser.add_argument(
+            "--engine-dir",
+            type=str,
+            default=profile.engine_dir_default,
+            help="Root directory for serialized .engine files and sidecars.",
+        )
         parser.add_argument("--device", type=str, default="cuda")
         parser.add_argument(
             "--llm-inference-bin",
@@ -56,25 +106,50 @@ class BaseEdgeCompileRunner:
             default=str(DEFAULT_LLM_INFERENCE_BIN),
             help="Path to TensorRT-Edge-LLM llm_inference binary for C++ smoke tests.",
         )
-        parser.add_argument("--seed", type=int, default=SEED)
-        parser.add_argument("--max-seq-len", type=int, default=None)
-        parser.add_argument("--num-traj-samples", type=int, default=1)
-        parser.add_argument("--max-generation-length", type=int, default=256)
+
+        # --- Export / inference tuning ---
+        parser.add_argument(
+            "--max-seq-len",
+            type=int,
+            default=None,
+            help="Override language max sequence length for TRT export.",
+        )
+        parser.add_argument(
+            "--num-traj-samples",
+            type=int,
+            default=1,
+            help="Number of action trajectory samples per inference call.",
+        )
+        parser.add_argument(
+            "--max-generation-length",
+            type=int,
+            default=256,
+            help="Max tokens for language generation (profiles that use it).",
+        )
+
+        # --- Mode switches ---
         parser.add_argument(
             "--export-only",
             action="store_true",
             help="Export serialized .engine files; skip in-memory TRT plugin compile.",
         )
-        parser.add_argument("--debug", action="store_true")
-        parser.add_argument("--no-accuracy-check", action="store_true")
-        parser.add_argument("--no-stage-parity", action="store_true")
-        parser.add_argument("--run-cpp-smoke", action="store_true")
-        parser.add_argument("--skip-export", action="store_true")
-        parser.add_argument("--skip-pytorch", action="store_true")
-        parser.add_argument("--skip-trt", action="store_true")
-        parser.add_argument("--skip-engine", action="store_true")
+
+        parser.add_argument(
+            "--run-cpp-smoke",
+            action="store_true",
+            help="Run profile C++ smoke test after export (via ``post_export``).",
+        )
+
+        # --- Benchmark loop ---
         parser.add_argument("--num-iterations", type=int, default=12)
-        parser.add_argument("--warmup", type=int, default=3)
+        parser.add_argument(
+            "--warmup",
+            type=int,
+            default=3,
+            help="Iterations excluded from summary averages.",
+        )
+
+        # Profile-specific flags (e.g. ``--groot-runtime-bin``).
         profile.add_arguments(parser)
         return parser
 
@@ -84,14 +159,16 @@ class BaseEdgeCompileRunner:
         profile: VLAProfile,
         argv: list[str] | None = None,
     ) -> argparse.Namespace:
+        """Parse CLI args for a known profile (called from ``compile_edge_llm``)."""
         return cls.build_arg_parser(profile).parse_args(argv)
 
     def parse_args(self, argv: list[str] | None = None) -> argparse.Namespace:
+        """Parse CLI args using this runner's already-bound profile."""
         return self.parse_args_for_profile(self.profile, argv)
 
     def run(self) -> int:
-        self.profile.on_run_start(self.device, self.args)
-
+        """Execute the full load → export → benchmark pipeline. Returns process exit code."""
+        # Fetch one observation frame from LeRobot for compile trace inputs.
         data = load_test_data(
             dataset_id=self.args.dataset_id,
             episode_index=self.args.episode_index,
@@ -105,44 +182,7 @@ class BaseEdgeCompileRunner:
             args=self.args,
         )
         self.tokenizer = self.profile.get_tokenizer(policy=self.policy, args=self.args)
-        self._print_run_header()
-
-        in_memory = InMemoryHandles()
-        serialized_engine_info: dict[str, Any] | None = None
-
-        if self.profile.uses_export_pipeline:
-            if self._should_compile_in_memory():
-                in_memory = self._run_export(ExportMode.IN_MEMORY)
-
-            if self._should_export_or_load_engines():
-                if self.args.skip_export:
-                    serialized_engine_info = {"engine_root": self.args.engine_dir}
-                else:
-                    serialized_engine_info = self._run_export(ExportMode.SERIALIZED).plugin_info
-        else:
-            in_memory, serialized_engine_info = self.profile.run_export_phase(self)
-
-        exit_code = self.profile.post_export(self, serialized_engine_info)
-        if exit_code is not None:
-            return exit_code
-        if self.args.export_only:
-            return 0
-
-        serialized = self._load_serialized_handles(serialized_engine_info)
-        self._benchmark(in_memory, serialized)
-        return 0
-
-    def _load_policy(self) -> tuple[Any, nn.Module]:
-        if hasattr(self.profile, "load_policy"):
-            return self.profile.load_policy(self.args.model_id, self.device)
-        from trt.utils import load_policy
-
-        policy = load_policy(self.profile.policy_cls, self.args.model_id, self.device)
-        policy = policy.to(self.device).eval()
-        model = policy._model.to(self.device).eval()
-        return policy, model
-
-    def _print_run_header(self) -> None:
+        
         print(
             f"model={self.profile.name}  dataset={self.args.dataset_id}  "
             f"episode={self.args.episode_index}  frame={self.args.frame_index}  "
@@ -150,13 +190,49 @@ class BaseEdgeCompileRunner:
             f"iters={self.args.num_iterations}  warmup={self.args.warmup}"
         )
 
-    def _should_compile_in_memory(self) -> bool:
-        return not self.args.skip_trt and not self.args.export_only
+        # Handles populated by export; used later in the benchmark loop.
+        in_memory = InMemoryHandles()
+        serialized_engine_root: str | None = None
 
-    def _should_export_or_load_engines(self) -> bool:
-        return not self.args.skip_engine
+        self._run_export(ExportMode.SERIALIZED)
+        serialized_engine_root = self.args.engine_dir
+
+        # Profile may run C++ smoke test and return early (non-zero exit on failure).
+        exit_code = self.profile.post_export(self, serialized_engine_root)
+        if exit_code is not None:
+            return exit_code
+
+        # Standard path: shared ``VLAExportPipeline`` (vision → language → action…).
+        if not self.args.export_only:
+            # Compile TRT modules held in RAM (AttentionPlugin path).
+            in_memory = self._run_export(ExportMode.IN_MEMORY)
+        else:
+            return 0
+            
+        serialized = self._load_serialized_handles(serialized_engine_root)
+        self._benchmark(in_memory, serialized)
+        return 0
+
+    def _load_policy(self) -> tuple[Any, nn.Module]:
+        """Load the LeRobot policy wrapper and inner ``nn.Module``.
+
+        Profiles may override ``load_policy`` when the default attribute paths
+        (``policy._model`` vs ``policy.model``) differ.
+        """
+        if hasattr(self.profile, "load_policy"):
+            return self.profile.load_policy(self.args.model_id, self.device)
+
+        policy = load_policy(self.profile.policy_cls, self.args.model_id, self.device)
+        policy = policy.to(self.device).eval()
+        model = policy._model.to(self.device).eval()
+        return policy, model
 
     def _run_export(self, mode: ExportMode) -> Any:
+        """Run ``VLAExportPipeline`` in IN_MEMORY or SERIALIZED mode.
+
+        Returns ``InMemoryHandles`` for in-memory export, or the raw
+        ``PipelineResult`` for serialized export.
+        """
         assert self.model is not None and self.compile_inputs is not None
         hooks = self.profile.make_export_hooks(
             tokenizer=self.tokenizer,
@@ -170,9 +246,9 @@ class BaseEdgeCompileRunner:
             self.compile_inputs,
             mode=mode,
             engine_root=self.args.engine_dir if mode is ExportMode.SERIALIZED else None,
-            seed=self.args.seed,
+            seed=SEED,
             max_seq_len=self.args.max_seq_len,
-            accuracy_check=not self.args.no_accuracy_check,
+            accuracy_check=True,
         )
         if mode is ExportMode.IN_MEMORY:
             return InMemoryHandles(
@@ -180,34 +256,24 @@ class BaseEdgeCompileRunner:
                 language=result.handles.get("language"),
                 action=result.handles.get("action"),
                 action_context=result.handles.get("action_context"),
-                plugin_info=dict(result.plugin_info),
             )
         return result
 
     def _load_serialized_handles(
         self,
-        engine_info: dict[str, Any] | None,
+        engine_root: str | None,
     ) -> SerializedHandles | None:
-        if not self._should_export_or_load_engines() or engine_info is None:
-            return None
-        engine_root = engine_info.get("engine_root")
-        if not engine_root:
+        """Load serialized TRT engines from ``engine_root`` via profile stage specs."""
+        if engine_root is None:
             return None
         if not self.profile.serialized_stages:
-            return SerializedHandles(plugin_info=dict(engine_info))
+            return SerializedHandles()
 
         specs = tuple(stage.to_module_spec() for stage in self.profile.serialized_stages)
-        loaded = load_serialized_modules(
-            engine_root,
-            specs=specs,
-            plugin_info_aliases=self.profile.plugin_info_aliases,
-        )
-        handles = SerializedHandles(plugin_info=loaded[-1])
+        loaded = load_serialized_modules(engine_root, specs=specs)
+        handles = SerializedHandles()
         for index, stage in enumerate(self.profile.serialized_stages):
             setattr(handles, stage.key, loaded[index])
-        finalize = getattr(self.profile, "finalize_serialized_handles", None)
-        if finalize is not None:
-            finalize(handles, self.policy)
         return handles
 
     def _benchmark(
@@ -215,6 +281,7 @@ class BaseEdgeCompileRunner:
         in_memory: InMemoryHandles,
         serialized: SerializedHandles | None,
     ) -> None:
+        """Time PyTorch, in-memory TRT, and serialized engine inference over N iterations."""
         assert self.model is not None and self.compile_inputs is not None
 
         pt_times: list[float] = []
@@ -225,6 +292,7 @@ class BaseEdgeCompileRunner:
         engine_action_ades: list[float] = []
         engine_actionmean_abs: list[float] = []
 
+        # Optional fixed PyTorch reference for accuracy metrics (computed once before loop).
         pt_ref_for_trt = None
         trt_stage = getattr(self.profile, "in_memory_trt_stage", "vision")
         if (
@@ -235,7 +303,7 @@ class BaseEdgeCompileRunner:
                 self.model,
                 self.policy,
                 self.compile_inputs,
-                seed=self.args.seed,
+                seed=SEED,
                 device=self.device,
                 vision_module=in_memory.vision,
             )
@@ -251,11 +319,13 @@ class BaseEdgeCompileRunner:
                 self.model,
                 self.policy,
                 self.compile_inputs,
-                seed=self.args.seed,
+                seed=SEED,
                 device=self.device,
                 vision_module=serialized.vision,
             )
 
+        # When True, compare TRT/engine output to PyTorch from the same iteration
+        # (needed when stochastic action sampling differs run-to-run).
         prefer_same_iter = getattr(self.profile, "prefer_same_iter_reference", False)
 
         for iteration in range(self.args.num_iterations):
@@ -263,33 +333,33 @@ class BaseEdgeCompileRunner:
 
             pred_actions_pt = None
 
-            if not self.args.skip_pytorch:
-                if prefer_same_iter:
-                    elapsed, pred_actions_pt = self._timed_call_with_result(
-                        lambda: self.profile.run_inference_eager(
-                            self.model,
-                            self.policy,
-                            self.compile_inputs,
-                            seed=self.args.seed,
-                            device=self.device,
-                        )
+            # --- PyTorch eager baseline ---
+            if prefer_same_iter:
+                elapsed, pred_actions_pt = self._timed_call_with_result(
+                    lambda: self.profile.run_inference_eager(
+                        self.model,
+                        self.policy,
+                        self.compile_inputs,
+                        seed=SEED,
+                        device=self.device,
                     )
-                else:
-                    elapsed = self._timed_call(
-                        lambda: self.profile.run_inference_eager(
-                            self.model,
-                            self.policy,
-                            self.compile_inputs,
-                            seed=self.args.seed,
-                            device=self.device,
-                        )
+                )
+            else:
+                elapsed = self._timed_call(
+                    lambda: self.profile.run_inference_eager(
+                        self.model,
+                        self.policy,
+                        self.compile_inputs,
+                        seed=SEED,
+                        device=self.device,
                     )
-                pt_times.append(elapsed)
-                print(f"  PyTorch    : {elapsed:7.1f} ms")
+                )
+            pt_times.append(elapsed)
+            print(f"  PyTorch    : {elapsed:7.1f} ms")
 
+            # --- In-memory TRT plugin modules ---
             if (
-                not self.args.skip_trt
-                and not self.args.export_only
+                not self.args.export_only
                 and getattr(in_memory, trt_stage, None) is not None
             ):
                 elapsed, pred = self._timed_call_with_result(
@@ -298,7 +368,7 @@ class BaseEdgeCompileRunner:
                         self.policy,
                         self.compile_inputs,
                         handles=in_memory,
-                        seed=self.args.seed,
+                        seed=SEED,
                         device=self.device,
                     )
                 )
@@ -320,14 +390,15 @@ class BaseEdgeCompileRunner:
                 else:
                     print(f"  TRT Plugin : {elapsed:7.1f} ms")
 
-            if not self.args.skip_engine and serialized is not None:
+            # --- Serialized .engine files loaded from disk ---
+            if not self.args.export_only and serialized is not None:
                 elapsed, pred = self._timed_call_with_result(
                     lambda: self.profile.run_inference_trt(
                         self.model,
                         self.policy,
                         self.compile_inputs,
                         handles=serialized,
-                        seed=self.args.seed,
+                        seed=SEED,
                         device=self.device,
                     )
                 )
@@ -360,6 +431,7 @@ class BaseEdgeCompileRunner:
         )
 
     def _sync_and_time(self, fn) -> float:
+        """Run ``fn`` and return elapsed wall time in ms (CUDA-synchronized)."""
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         start = time.perf_counter()
@@ -369,9 +441,11 @@ class BaseEdgeCompileRunner:
         return 1000 * (time.perf_counter() - start)
 
     def _timed_call(self, fn) -> float:
+        """Time a void inference call; discard the return value."""
         return self._sync_and_time(fn)
 
     def _timed_call_with_result(self, fn) -> tuple[float, torch.Tensor]:
+        """Time an inference call and return ``(elapsed_ms, pred_actions)``."""
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         start = time.perf_counter()
@@ -379,6 +453,7 @@ class BaseEdgeCompileRunner:
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         elapsed = 1000 * (time.perf_counter() - start)
+        # Profile inference functions return ``(actions, side_dict, extra_ms)``.
         return elapsed, result[0]
 
     def _print_summary(
@@ -391,6 +466,7 @@ class BaseEdgeCompileRunner:
         engine_action_ades: list[float],
         engine_actionmean_abs: list[float],
     ) -> None:
+        """Print averaged timing and accuracy metrics after warmup iterations."""
         warmup = self.args.warmup
         print("\n" + "=" * 78)
         print(f"Summary  (warmup={warmup} / {self.args.num_iterations})")

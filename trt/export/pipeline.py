@@ -83,11 +83,11 @@ class VLAExportPipeline:
         if custom_lm is not None and sink.mode is ExportMode.IN_MEMORY:
             ctx.handles["language"] = custom_lm
         else:
-        ctx.handles["language"] = sink.export_language(
-            ctx.lang_spec,
-            engine_dir=language_dir,
-            trace_inputs_embeds=trace_embeds,
-        )
+            ctx.handles["language"] = sink.export_language(
+                ctx.lang_spec,
+                engine_dir=language_dir,
+                trace_inputs_embeds=trace_embeds,
+            )
 
         if sink.mode is ExportMode.SERIALIZED:
             ctx.lm_hidden_states = torch.zeros(
@@ -145,8 +145,7 @@ class VLAExportPipeline:
         if accuracy_check:
             self.hooks.after_export(ctx, sink)
 
-        ctx.plugin_info = self.hooks.finalize_plugin_info(ctx)
-        return PipelineResult(handles=ctx.handles, plugin_info=ctx.plugin_info)
+        return PipelineResult(handles=ctx.handles)
 
     def _run_in_memory_language(self, ctx: ExportContext):
         """Default in-memory LM forward parsed into ``LanguageOutputs``."""

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 
@@ -119,9 +118,7 @@ class SerializedModuleBackend:
         return run_language_prefill(runner, prefill, ctx.io.language)
 
     def has_action_context(self) -> bool:
-        return self.handles.action_context is not None or (
-            self.handles.plugin_info.get("action_context_engine") is not None
-        )
+        return self.handles.action_context is not None
 
     def run_action_context(self, ctx: InferenceContext, lm_hidden: torch.Tensor) -> torch.Tensor:
         if self.handles.action_context is not None:
@@ -161,12 +158,10 @@ def stage_handles_from_modules(
     language=None,
     action_context=None,
     action=None,
-    plugin_info: dict[str, Any] | None = None,
 ) -> StageHandles:
     return StageHandles(
         vision=vision,
         language=language,
         action_context=action_context,
         action=action,
-        plugin_info=dict(plugin_info or {}),
     )

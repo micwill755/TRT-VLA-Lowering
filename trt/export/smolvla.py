@@ -12,7 +12,6 @@ from PIL import Image
 from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 
 from trt.action_rollout import ActionRolloutContext, PrefixKVFlowActionAdapter, sample_actions_raw
-from trt.chat_template import build_smolvla_vitrunner_chat_template
 from trt.compile import dump_edge_fixture
 from trt.diffusion_builders import build_smolvla_diffusion_export_params
 from trt.edge_llm_runtime import write_llm_runtime_smoke_case
@@ -22,7 +21,7 @@ from trt.export.mode import ExportMode
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
 from trt.export.sinks import ExportSink
 from trt.io_spec import PI05_EDGE_IO, PipelineIOSpec
-from trt.language import language_head_dim, make_plugin_lm_causal_wrapper
+from trt.language import PluginLMForCausalLM, language_head_dim
 from trt.language_builders import build_smolvla_language_export_params
 from trt.measure import compare_language, compute_action_parity_metrics, tensor_error_metrics
 from trt.packing import pack_smolvla_prefix
@@ -188,27 +187,29 @@ def run_smolvla_plugin_language_eager(
     core,
     prefix: dict,
     device: torch.device,
-    *,
-    language_model=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Eager plugin-LM prefill matching the exported SmolVLA language engine."""
+    from trt.plugin_utils import patch_language_attention, restore_attention
+
     prefix_embs = prefix["inputs_embeds"].to(device=device, dtype=torch.float16).contiguous()
     max_seq_len = int(prefix_embs.shape[1])
     batch_size = int(prefix_embs.shape[0])
     cfg = smolvla_text_config(core)
     num_layers = int(core.vlm_with_expert.num_vlm_layers)
-
-    lm = smolvla_language_model(core)
-    decoder = getattr(lm, "model", lm)
+    language_model = smolvla_language_model(core)
+    decoder = getattr(language_model, "model", language_model)
     lm_head = core.vlm_with_expert.vlm.lm_head
-    lm_wrapper = make_plugin_lm_causal_wrapper(
+
+    patched = patch_language_attention(
         decoder,
-        lm_head,
         hidden_size=int(cfg.hidden_size),
         num_attention_heads=int(cfg.num_attention_heads),
         num_key_value_heads=int(cfg.num_key_value_heads),
         head_dim=language_head_dim(cfg),
-        log_prefix="smolvla",
-    ).to(device=device, dtype=torch.float16).eval()
+        enable_bidirectional_prefill=1,
+        name="smolvla",
+    )
+    lm_wrapper = PluginLMForCausalLM(decoder, lm_head).to(device=device, dtype=torch.float16).eval()
 
     kv_caches = [
         torch.zeros(
@@ -233,14 +234,17 @@ def run_smolvla_plugin_language_eager(
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
     last_token_ids = torch.full((batch_size, 1), max_seq_len - 1, device=device, dtype=torch.int64)
 
-    _, hidden, prefix_k, prefix_v = lm_wrapper(
-        prefix_embs,
-        rope_rotary_cos_sin,
-        ctx_len,
-        kvcache_start_index,
-        last_token_ids,
-        *kv_caches,
-    )
+    try:
+        _, hidden, prefix_k, prefix_v = lm_wrapper(
+            prefix_embs,
+            rope_rotary_cos_sin,
+            ctx_len,
+            kvcache_start_index,
+            last_token_ids,
+            *kv_caches,
+        )
+    finally:
+        restore_attention(patched)
     return hidden, prefix_k, prefix_v
 
 
@@ -274,7 +278,6 @@ def compare_smolvla_edge_pipeline_to_eager(
         core,
         eager_prefix,
         device,
-        language_model=smolvla_language_model(core),
     )
 
     for i, (eager_img, trt_img) in enumerate(zip(eager_image_embs, trt_image_embs, strict=True)):
@@ -414,14 +417,12 @@ class SmolVLAExportHooks(VLAExportHooks):
         tokenizer: Any | None = None,
         vision_trt_settings: dict | None = None,
         action_trt_settings: dict | None = None,
-        stage_parity: bool = True,
         max_generate_length: int = 0,
     ) -> None:
         self.io = io
         self.tokenizer = tokenizer
         self.vision_trt_settings = vision_trt_settings or dict(VISION_TRT_SETTINGS)
         self.action_trt_settings = action_trt_settings or dict(ACTION_TRT_SETTINGS)
-        self.stage_parity = stage_parity
         self.max_generate_length = max_generate_length
 
     def preprocess(self, ctx: ExportContext) -> None:
@@ -472,7 +473,11 @@ class SmolVLAExportHooks(VLAExportHooks):
 
     def build_chat_template(self, tokenizer: Any) -> dict[str, Any]:
         """Minimal processed_chat_template.json for VitRunner image placeholder expansion."""
-        image_format = tokenizer.decode([int(image_token_id)])
+        image_token_id = getattr(self, "_last_image_token_id", None)
+        if image_token_id is not None:
+            image_format = tokenizer.decode([int(image_token_id)])
+        else:
+            image_format = "<image>"
         if not image_format.strip():
             image_format = "<image>"
         return {
@@ -495,10 +500,7 @@ class SmolVLAExportHooks(VLAExportHooks):
         save_tokenizer_for_edge_llm(
             language_dir,
             tokenizer=self.tokenizer,
-            chat_template=build_smolvla_vitrunner_chat_template(
-                self.tokenizer,
-                image_token_id=int(ctx.lang_spec.image_token_id),
-            ),
+            chat_template=self.build_chat_template(self.tokenizer),
         )
 
     def build_diffusion_spec(self, ctx: ExportContext):
@@ -511,13 +513,15 @@ class SmolVLAExportHooks(VLAExportHooks):
         )
 
     def after_export(self, ctx: ExportContext, sink: ExportSink) -> None:
-        if not ctx.accuracy_check or not self.stage_parity:
+        if not ctx.accuracy_check:
             return
         if sink.mode is not ExportMode.SERIALIZED:
             return
 
         language_dir = ctx.engine_subdir("language")
         action_dir = ctx.engine_subdir("action")
+        vision_dir = ctx.engine_subdir("visual")
+        vision_runner = SerializedSmolVLAVision(SerializedTRTEngine(vision_dir))
         language_runner = SerializedPI05Language(SerializedTRTEngine(language_dir))
         text_cfg = smolvla_text_config(ctx.model)
         language_model = smolvla_language_model(ctx.model)
@@ -525,6 +529,10 @@ class SmolVLAExportHooks(VLAExportHooks):
         num_layers = int(ctx.model.vlm_with_expert.num_vlm_layers)
 
         with torch.no_grad():
+            trt_image_embs = [
+                vision_runner(image.to(device=ctx.device))
+                for image in ctx.action_side["images"]
+            ]
             trt_hidden, trt_prefix_k, trt_prefix_v = run_serialized_smolvla_language(
                 language_runner,
                 ctx.language_inputs["inputs_embeds"],
@@ -545,7 +553,7 @@ class SmolVLAExportHooks(VLAExportHooks):
             tokens=ctx.action_side["tokens"],
             masks=ctx.action_side["masks"],
             state=ctx.action_side["state"],
-            trt_image_embs=ctx.image_embs,
+            trt_image_embs=trt_image_embs,
             trt_hidden=trt_hidden,
             trt_prefix_k=trt_prefix_k,
             trt_prefix_v=trt_prefix_v,
@@ -562,38 +570,10 @@ class SmolVLAExportHooks(VLAExportHooks):
                 prefix_k=trt_prefix_k,
                 prefix_v=trt_prefix_v,
             )
-            ctx.plugin_info["fixture_dir"] = str(fixture_dir)
-            smoke_input = write_llm_runtime_smoke_case(
+            del fixture_dir
+            write_llm_runtime_smoke_case(
                 ctx.engine_root,
                 task_text=_smolvla_task_text(ctx.model_inputs),
                 images=[_tensor_image_to_pil(ctx.pixel_values)],
                 max_generate_length=self.max_generate_length,
             )
-            ctx.plugin_info["runtime_smoke_input"] = str(smoke_input)
-
-    def finalize_plugin_info(self, ctx: ExportContext) -> dict:
-        info = super().finalize_plugin_info(ctx)
-        pad_mask = ctx.language_inputs.get("pad_mask")
-        if pad_mask is not None:
-            info["prefix_seq_len"] = int(pad_mask.shape[1])
-        info["chunk_size"] = int(ctx.model.config.chunk_size)
-        info["max_action_dim"] = int(ctx.model.config.max_action_dim)
-        info["output_action_dim"] = action_output_dim(ctx.policy)
-        info["num_inference_steps"] = int(ctx.model.config.num_steps)
-        if ctx.vis_spec is not None and ctx.vis_spec.config_seq_len:
-            info["vision_output_seq_len"] = int(ctx.vis_spec.config_seq_len)
-        if ctx.lang_spec is not None:
-            info["language_max_seq_len"] = int(ctx.lang_spec.max_seq_len)
-        root = ctx.engine_root
-        if root is not None:
-            info.update(
-                {
-                    "vision_engine_dir": str(root / "visual"),
-                    "language_engine_dir": str(root / "language"),
-                    "action_engine_dir": str(root / "action"),
-                    "vision_engine": str(root / "visual" / "visual.engine"),
-                    "language_engine": str(root / "language" / "language.engine"),
-                    "diffusion_engine": str(root / "action" / "diffusion.engine"),
-                }
-            )
-        return info

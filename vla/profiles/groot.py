@@ -14,10 +14,11 @@ from lerobot.policies.groot.groot_n1 import DEFAULT_TOKENIZER_ASSETS_REPO
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
 from trt.data import create_pil_messages, prepare_model_inputs
-from trt.export import GrootExportHooks
+from trt.edge_llm_runtime import run_llm_inference_runtime_smoke
+from trt.export.groot import GrootExportHooks
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
 from trt.helper import get_processor
-from trt.inference import (
+from trt.inference.groot import (
     GrootInferenceHooks,
     compute_groot_policy_action_metrics,
     run_inference_pytorch_groot,
@@ -34,10 +35,11 @@ from trt.utils import load_policy
 
 from vla.profile import InMemoryHandles, SerializedHandles, SerializedStageSpec, VLAProfile
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_GROOT_RUNTIME_BIN = (
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = REPO_ROOT.parent
+DEFAULT_LLM_INFERENCE_BIN = (
     WORKSPACE_ROOT
-    / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/examples/groot/groot_runtime_smoke"
+    / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/examples/llm/llm_inference"
 )
 
 class GrootProfile(VLAProfile):
@@ -48,7 +50,6 @@ class GrootProfile(VLAProfile):
 
     policy_cls = GrootPolicy
     io = GROOT_EDGE_IO
-    uses_export_pipeline = True
 
     serialized_stages = (
         SerializedStageSpec("vision", "visual", SerializedGrootVision),
@@ -56,15 +57,10 @@ class GrootProfile(VLAProfile):
         SerializedStageSpec("action_context", "action_context", SerializedGrootActionContext),
         SerializedStageSpec("action", "action", SerializedGrootAction),
     )
-    plugin_info_aliases = {
-        "language_max_seq_len": ("language", "max_seq_len"),
-        "context_seq_len": ("action", "context_seq_len"),
-        "context_hidden_size": ("action", "context_hidden_size"),
-    }
 
     vision_trt_settings = dict(VISION_TRT_SETTINGS)
     action_trt_settings = dict(ACTION_TRT_SETTINGS)
-    cpp_smoke_bin = DEFAULT_GROOT_RUNTIME_BIN
+    cpp_smoke_bin = DEFAULT_LLM_INFERENCE_BIN
 
     def __init__(self) -> None:
         self._processor: Any = None
@@ -74,8 +70,8 @@ class GrootProfile(VLAProfile):
         parser.add_argument(
             "--groot-runtime-bin",
             type=str,
-            default=str(DEFAULT_GROOT_RUNTIME_BIN),
-            help="Path to the C++ groot_runtime_smoke executable.",
+            default=str(DEFAULT_LLM_INFERENCE_BIN),
+            help="Path to the C++ llm_inference executable for GR00T smoke tests.",
         )
         parser.add_argument(
             "--vision-engine-dir",
@@ -102,7 +98,7 @@ class GrootProfile(VLAProfile):
 
     def load_policy(self, model_id: str, device: torch.device) -> tuple[Any, nn.Module]:
         policy = load_policy(self.policy_cls, model_id, device).to(device).eval()
-        model = policy._model.to(device).eval()
+        model = policy._groot_model.to(device).eval()
         return policy, model
 
     def prepare_compile_inputs(
@@ -157,6 +153,45 @@ class GrootProfile(VLAProfile):
     def make_inference_hooks(self) -> GrootInferenceHooks:
         return GrootInferenceHooks()
 
+    def post_export(
+        self,
+        runner: Any,
+        engine_root: str | None,
+    ) -> int | None:
+        args = runner.args
+        if not args.run_cpp_smoke or engine_root is None:
+            return None
+
+        smoke_input = Path(engine_root) / "runtime_smoke" / "input_action.json"
+        if not smoke_input.exists():
+            smoke_input = Path(engine_root) / "runtime_smoke" / "input.json"
+        if not smoke_input.exists():
+            raise FileNotFoundError(
+                f"Missing runtime smoke input under {Path(engine_root) / 'runtime_smoke'}"
+            )
+
+        runtime_bin = getattr(args, "groot_runtime_bin", None) or args.llm_inference_bin
+        if not Path(runtime_bin).exists():
+            runtime_bin = args.llm_inference_bin
+        print(f"\nRunning C++ llm_inference smoke: {smoke_input}")
+        result = run_llm_inference_runtime_smoke(
+            engine_root=engine_root,
+            input_file=smoke_input,
+            llm_inference_bin=runtime_bin,
+            max_generate_length=0,
+            dump_output=True,
+        )
+        print(result.stdout)
+        if result.stderr:
+            import sys
+
+            print(result.stderr, file=sys.stderr)
+        if result.returncode != 0:
+            print(f"C++ smoke failed with exit code {result.returncode}")
+            return result.returncode
+        print("C++ smoke completed successfully.")
+        return None
+
     def run_inference_eager(
         self,
         model: nn.Module,
@@ -196,7 +231,6 @@ class GrootProfile(VLAProfile):
             trt_lm=handles.language,
             trt_diffusion=handles.action,
             trt_action_context=action_context,
-            plugin_info=handles.plugin_info,
             seed=seed,
             device=device,
             io=self.io,

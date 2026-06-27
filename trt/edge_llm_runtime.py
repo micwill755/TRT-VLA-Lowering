@@ -96,6 +96,10 @@ def run_llm_inference_runtime_smoke(
 
     env = os.environ.copy()
 
+    plugin_path = os.environ.get("EDGELLM_PLUGIN_PATH") or os.environ.get("EDGE_LLM_PLUGIN_SO")
+    if plugin_path:
+        env["EDGELLM_PLUGIN_PATH"] = plugin_path
+
     trt_lib = os.environ.get("TRT_PACKAGE_DIR")
     if trt_lib:
         env["LD_LIBRARY_PATH"] = f"{env.get('LD_LIBRARY_PATH', '')}:{trt_lib}/lib"

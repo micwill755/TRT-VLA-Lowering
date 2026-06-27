@@ -10,38 +10,38 @@ import torch
 import torch.nn as nn
 
 from trt.action_rollout import ActionRolloutContext, GROOTActionAdapter, sample_actions_raw
-from trt.chat_template import build_vitrunner_chat_template
-from trt.compile import dump_edge_fixture
+from trt.compile import dump_edge_fixture as write_edge_fixture
 from trt.data import pack_state
 from trt.diffusion_builders import (
     build_groot_diffusion_export_params,
-    make_groot_action_compile_inputs,
     make_groot_static_action_module,
 )
+make_static_action_module = make_groot_static_action_module
 from trt.export.context import ComponentBuild, ExportContext
 from trt.export.hooks import VLAExportHooks
 from trt.export.mode import ExportMode
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS, in_memory_settings
 from trt.export.sinks import ExportSink
-from trt.inference.language_prefill import build_language_prefill_inputs, run_language_prefill
 from trt.io_spec import GROOT_EDGE_IO, PipelineIOSpec
 from trt.language import (
     compile_language_trt_with_plugin,
     language_head_dim,
+    make_action_context_module,
     make_language_context_wrapper,
 )
-from trt.language_builders import build_language_export_params
+from trt.language_builders import build_groot_language_export_params
 from trt.measure import compute_action_parity_metrics, tensor_error_metrics
-from trt.packing import pack_language_inputs
+from trt.packing import pack_groot_language_inputs
 from trt.rope import make_rope_rotary_cos_sin
 from trt.serialize import (
     SerializedGrootAction,
     SerializedGrootActionContext,
     SerializedGrootLanguage,
+    SerializedGrootVision,
     SerializedTRTEngine,
 )
 from trt.vision import VisualFixedInput, nchw_to_hwc
-from trt.vision_builders import build_vision_export_params
+from trt.vision_builders import build_groot_vision_export_params
 
 GROOT_EMBODIMENT_MAPPING = {
     "new_embodiment": 31,
@@ -51,34 +51,6 @@ GROOT_EMBODIMENT_MAPPING = {
     "so100": 2,
     "unitree_g1": 3,
 }
-
-@torch.no_grad()
-def make_action_compile_inputs(
-    action_horizon: int,
-    action_dim: int,
-    vl_embs: torch.Tensor,
-    state: torch.Tensor,
-    embodiment_id: torch.Tensor,
-    device: torch.device,
-) -> tuple[torch.Tensor, ...]:
-    return make_groot_action_compile_inputs(
-        action_horizon,
-        action_dim,
-        vl_embs,
-        state,
-        embodiment_id,
-        device,
-    )
-
-
-def make_static_action_module(
-    action_head: nn.Module,
-    device: torch.device,
-    dtype: torch.dtype,
-    embodiment_id: torch.Tensor | None,
-) -> nn.Module:
-    return make_groot_static_action_module(action_head, device, dtype, embodiment_id)
-
 
 @torch.no_grad()
 def make_visual_fixed_input(
@@ -112,19 +84,6 @@ def make_embodiment_id(
         device=device,
     )
 
-
-@torch.no_grad()
-def build_lm_hidden_from_language_inputs(core: nn.Module, packed: dict) -> torch.Tensor:
-    eagle = core.backbone.eagle_model
-    out = eagle.language_model(
-        inputs_embeds=packed["inputs_embeds"],
-        attention_mask=packed["attention_mask"],
-        output_hidden_states=True,
-        return_dict=True,
-    )
-    return out.hidden_states[core.backbone.select_layer]
-
-
 @torch.no_grad()
 def build_context_from_language_inputs(core: nn.Module, packed: dict) -> torch.Tensor:
     eagle = core.backbone.eagle_model
@@ -145,12 +104,27 @@ def build_context_from_language_inputs(core: nn.Module, packed: dict) -> torch.T
 
 
 @torch.no_grad()
+def build_lm_hidden_from_language_inputs(model_or_ctx: Any, packed: dict) -> torch.Tensor:
+    core = model_or_ctx.model if hasattr(model_or_ctx, "model") else model_or_ctx
+    eagle = core.backbone.eagle_model
+    out = eagle.language_model(
+        inputs_embeds=packed["inputs_embeds"],
+        attention_mask=packed["attention_mask"],
+        output_hidden_states=True,
+        return_dict=True,
+    )
+    return out.hidden_states[core.backbone.select_layer]
+
+
+@torch.no_grad()
 def run_serialized_language(
     engine_lm: SerializedGrootLanguage,
     model: nn.Module,
     language_inputs: dict,
     device: torch.device,
 ) -> torch.Tensor:
+    from trt.inference.language_prefill import build_language_prefill_inputs, run_language_prefill
+
     language_model = model.backbone.eagle_model.language_model
     decoder = getattr(language_model, "model", language_model)
     seq_len = int(language_inputs["inputs_embeds"].shape[1])
@@ -204,6 +178,7 @@ def compare_edge_pipeline_to_eager(
             dtype=torch.float16,
         )
         eager_image_embs = visual(images_hwc)
+
     tensor_error_metrics(
         "vision",
         trt_image_embs.to(device=device, dtype=torch.float16),
@@ -211,7 +186,15 @@ def compare_edge_pipeline_to_eager(
     )
 
     with torch.no_grad():
-        eager_lm_hidden = build_lm_hidden_from_language_inputs(model, language_inputs)
+        eagle = model.backbone.eagle_model
+        out = eagle.language_model(
+            inputs_embeds=language_inputs["inputs_embeds"],
+            attention_mask=language_inputs["attention_mask"],
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        eager_lm_hidden = out.hidden_states[model.backbone.select_layer]
+
     tensor_error_metrics(
         "language lm_hidden_states",
         lm_hidden_states.to(device=device, dtype=torch.float16),
@@ -220,6 +203,7 @@ def compare_edge_pipeline_to_eager(
 
     with torch.no_grad():
         eager_context_embs = build_context_from_language_inputs(model, language_inputs)
+
     tensor_error_metrics(
         "action_context vl_embs",
         context_embs.to(device=device, dtype=torch.float16),
@@ -242,7 +226,7 @@ def compare_edge_pipeline_to_eager(
     )
     timestep = torch.zeros(context_fp16.shape[0], device=device, dtype=torch.long)
 
-    eager_action_module = make_static_action_module(
+    eager_action_module = make_groot_static_action_module(
         model.action_head,
         device,
         torch.float16,
@@ -303,7 +287,6 @@ def compare_edge_pipeline_to_eager(
         f"mean_abs={action_metrics['mean_abs']:.6f}",
     )
 
-
 def compute_policy_action_metrics(
     trt_actions: torch.Tensor,
     eager_actions: torch.Tensor,
@@ -357,7 +340,7 @@ def dump_edge_fixture(ctx: ExportContext) -> pathlib.Path:
     )
     timestep = torch.zeros(context_embs.shape[0], device=device, dtype=torch.long)
 
-    action_module = make_static_action_module(
+    action_module = make_groot_static_action_module(
         model.action_head,
         device,
         torch.float16,
@@ -385,7 +368,7 @@ def dump_edge_fixture(ctx: ExportContext) -> pathlib.Path:
     if language_inputs.get("image_token_mask") is None:
         raise ValueError("GR00T Edge fixture export requires image_token_mask")
 
-    return dump_edge_fixture(
+    return write_edge_fixture(
         str(ctx.engine_root),
         {
             "pixel_values": pixel_values.to(device=device, dtype=torch.float16),
@@ -442,7 +425,7 @@ class GrootExportHooks(VLAExportHooks):
         }
 
     def build_vision_spec(self, ctx: ExportContext):
-        return build_vision_export_params(
+        return build_groot_vision_export_params(
             ctx.model,
             ctx.pixel_values,
             ctx.device,
@@ -452,7 +435,7 @@ class GrootExportHooks(VLAExportHooks):
         )
 
     def pack_language_inputs(self, ctx: ExportContext) -> dict:
-        return pack_language_inputs(
+        return pack_groot_language_inputs(
             ctx.model,
             ctx.image_embs,
             ctx.tokenized["input_ids"],
@@ -462,7 +445,7 @@ class GrootExportHooks(VLAExportHooks):
     def build_language_spec(self, ctx: ExportContext):
         if ctx.vis_spec is None:
             raise RuntimeError("vis_spec required before build_language_spec")
-        return build_language_export_params(
+        return build_groot_language_export_params(
             ctx.model,
             ctx.tokenized["input_ids"],
             image_token_id=int(ctx.vis_spec.image_token_id),
@@ -575,10 +558,13 @@ class GrootExportHooks(VLAExportHooks):
             language_dir = ctx.engine_subdir("language")
             action_context_dir = ctx.engine_subdir("action_context")
             action_dir = ctx.engine_subdir("action")
+            vision_dir = ctx.engine_subdir("visual")
 
             if ctx.accuracy_check:
+                vision_runner = SerializedGrootVision(SerializedTRTEngine(vision_dir))
                 language_runner = SerializedGrootLanguage(SerializedTRTEngine(language_dir))
                 with torch.no_grad():
+                    trt_image_embs = vision_runner(ctx.pixel_values)
                     ctx.lm_hidden_states = run_serialized_language(
                         language_runner,
                         ctx.model,
@@ -605,7 +591,7 @@ class GrootExportHooks(VLAExportHooks):
                     language_inputs=ctx.language_inputs,
                     state=ctx.action_side["state"],
                     embodiment_id=ctx.action_side["embodiment_id"],
-                    trt_image_embs=ctx.image_embs,
+                    trt_image_embs=trt_image_embs,
                     lm_hidden_states=ctx.lm_hidden_states,
                     context_embs=ctx.context_embs,
                     trt_diffusion=action_runner,
@@ -614,8 +600,7 @@ class GrootExportHooks(VLAExportHooks):
                 )
 
             if ctx.engine_root is not None:
-                fixture_dir = dump_edge_fixture(ctx)
-                ctx.plugin_info["fixture_dir"] = str(fixture_dir)
+                dump_edge_fixture(ctx)
             return
 
         if ctx.context_embs is not None and ctx.image_embs is not None:
@@ -649,23 +634,3 @@ class GrootExportHooks(VLAExportHooks):
                 ctx.context_embs,
                 eager_context.to(device=ctx.device, dtype=torch.float16),
             )
-
-    def finalize_plugin_info(self, ctx: ExportContext) -> dict:
-        info = super().finalize_plugin_info(ctx)
-        if ctx.lang_spec is not None:
-            info["language_head_dim"] = int(ctx.lang_spec.head_dim)
-        root = ctx.engine_root
-        if root is not None:
-            info.update(
-                {
-                    "vision_engine_dir": str(root / "visual"),
-                    "language_engine_dir": str(root / "language"),
-                    "action_context_engine_dir": str(root / "action_context"),
-                    "action_engine_dir": str(root / "action"),
-                    "vision_engine": str(root / "visual" / "visual.engine"),
-                    "language_engine": str(root / "language" / "language.engine"),
-                    "action_context_engine": str(root / "action_context" / "action_context.engine"),
-                    "diffusion_engine": str(root / "action" / "diffusion.engine"),
-                }
-            )
-        return info

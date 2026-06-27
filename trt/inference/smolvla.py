@@ -61,7 +61,10 @@ class SmolVLAInferenceHooks(VLAInferenceHooks):
     def language_prefill_scalars(self, ctx: InferenceContext) -> dict[str, int]:
         cfg = smolvla_text_config(ctx.model)
         seq_len = int(ctx.language_inputs["inputs_embeds"].shape[1])
-        max_seq_len = int(ctx.plugin_info.get("language_max_seq_len", seq_len))
+        max_seq_len = seq_len
+        language = ctx.stage_handles.language if ctx.stage_handles else None
+        if language is not None:
+            max_seq_len = int(getattr(language, "max_seq_len", language.engine.config["max_seq_len"]))
         return {
             "num_layers": int(ctx.model.vlm_with_expert.num_vlm_layers),
             "num_key_value_heads": int(cfg.num_key_value_heads),
@@ -149,7 +152,6 @@ def run_inference_smolvla_engines(
     vision_runner,
     language_runner,
     diffusion_runner,
-    plugin_info: dict,
     seed: int,
     device: torch.device,
     io: PipelineIOSpec = PI05_EDGE_IO,
@@ -159,7 +161,6 @@ def run_inference_smolvla_engines(
             vision=vision_runner,
             language=language_runner,
             action=diffusion_runner,
-            plugin_info=plugin_info,
         )
     )
     result = VLAInferencePipeline(SmolVLAInferenceHooks(), io=io).run(
@@ -169,7 +170,6 @@ def run_inference_smolvla_engines(
         batch,
         backend,
         seed=seed,
-        plugin_info=plugin_info,
     )
-    result.actions = result.actions[..., : action_output_dim(ctx.policy)]
+    result.actions = result.actions[..., : action_output_dim(policy)]
     return result.actions, result.extras, result.elapsed_s

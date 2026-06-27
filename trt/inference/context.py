@@ -48,7 +48,6 @@ class StageHandles:
     language: Any = None
     action_context: Any = None
     action: Any = None
-    plugin_info: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -59,8 +58,8 @@ class InferenceContext:
     model_inputs: dict[str, Any]
     io: PipelineIOSpec
     seed: int = 42
-    plugin_info: dict[str, Any] = field(default_factory=dict)
     vision_module: nn.Module | None = None
+    stage_handles: StageHandles | None = None
 
     pixel_values: torch.Tensor | None = None
     tokenized: dict[str, torch.Tensor] = field(default_factory=dict)

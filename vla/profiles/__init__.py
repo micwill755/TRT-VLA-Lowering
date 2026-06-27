@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 from vla.profile import VLAProfile
-from vla.profiles.groot import GrootProfile
-from vla.profiles.molmoact2 import MolmoAct2Profile
-from vla.profiles.pi05 import Pi05Profile
-from vla.profiles.smolvla import SmolVLAProfile
 
-MODEL_REGISTRY: dict[str, type[VLAProfile]] = {
-    GrootProfile.name: GrootProfile,
-    Pi05Profile.name: Pi05Profile,
-    SmolVLAProfile.name: SmolVLAProfile,
-    MolmoAct2Profile.name: MolmoAct2Profile,
+MODEL_REGISTRY: dict[str, str] = {
+    "groot": "vla.profiles.groot:GrootProfile",
+    "pi05": "vla.profiles.pi05:Pi05Profile",
+    "smolvla": "vla.profiles.smolvla:SmolVLAProfile",
+    "molmoact2": "vla.profiles.molmoact2:MolmoAct2Profile",
 }
 
-def get_profile(name: str) -> VLAProfile:
+
+def _load_profile_cls(name: str) -> type[VLAProfile]:
     try:
-        cls = MODEL_REGISTRY[name]
+        target = MODEL_REGISTRY[name]
     except KeyError as exc:
         known = ", ".join(sorted(MODEL_REGISTRY))
-        raise SystemExit(f"Unknown model {name!r}. Choose from: {known}") from exc
-    return cls()
+        raise SystemExit(f"Model not supported: {name!r}. Choose from: {known}") from exc
+
+    module_path, class_name = target.split(":")
+    from importlib import import_module
+
+    module = import_module(module_path)
+    return getattr(module, class_name)
+
+
+def get_profile(name: str) -> VLAProfile:
+    return _load_profile_cls(name)()

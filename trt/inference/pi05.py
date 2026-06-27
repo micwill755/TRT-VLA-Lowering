@@ -60,7 +60,10 @@ class Pi05InferenceHooks(VLAInferenceHooks):
         lm = self.language_model_for_prefill(ctx)
         decoder = getattr(lm, "model", lm)
         seq_len = int(ctx.language_inputs["inputs_embeds"].shape[1])
-        max_seq_len = int(ctx.plugin_info.get("language_max_seq_len", seq_len))
+        max_seq_len = seq_len
+        language = ctx.stage_handles.language if ctx.stage_handles else None
+        if language is not None:
+            max_seq_len = int(getattr(language, "max_seq_len", language.engine.config["max_seq_len"]))
         return {
             "num_layers": len(decoder.layers),
             "num_key_value_heads": int(lm.config.num_key_value_heads),
@@ -77,7 +80,10 @@ class Pi05InferenceHooks(VLAInferenceHooks):
         )
 
     def action_adapter(self, ctx: InferenceContext):
-        num_steps = int(ctx.plugin_info.get("num_inference_steps", ctx.model.config.num_inference_steps))
+        num_steps = int(ctx.model.config.num_inference_steps)
+        action = ctx.stage_handles.action if ctx.stage_handles else None
+        if action is not None and getattr(action, "engine", None) is not None:
+            num_steps = int(action.engine.config.get("num_inference_steps", num_steps))
         return PrefixKVFlowActionAdapter(ctx.model, num_steps)
 
     def build_action_rollout_context(
@@ -173,7 +179,6 @@ def run_inference_trt_plugin(
     trt_vision,
     trt_lm,
     trt_diffusion,
-    plugin_info: dict,
     seed: int,
     device: torch.device,
     io: PipelineIOSpec = PI05_EDGE_IO,
@@ -183,7 +188,6 @@ def run_inference_trt_plugin(
             vision=trt_vision,
             language=trt_lm,
             action=trt_diffusion,
-            plugin_info=plugin_info,
         )
     )
     result = _pipeline(io).run(
@@ -193,7 +197,6 @@ def run_inference_trt_plugin(
         batch,
         backend,
         seed=seed,
-        plugin_info=plugin_info,
     )
     result.actions = crop_policy_actions(policy, result.actions)
     return result.actions, result.extras, result.elapsed_s
@@ -208,7 +211,6 @@ def run_inference_pi05_engines(
     vision_runner,
     language_runner,
     diffusion_runner,
-    plugin_info: dict,
     seed: int,
     device: torch.device,
     io: PipelineIOSpec = PI05_EDGE_IO,
@@ -218,7 +220,6 @@ def run_inference_pi05_engines(
             vision=vision_runner,
             language=language_runner,
             action=diffusion_runner,
-            plugin_info=plugin_info,
         )
     )
     result = _pipeline(io).run(
@@ -228,7 +229,6 @@ def run_inference_pi05_engines(
         batch,
         backend,
         seed=seed,
-        plugin_info=plugin_info,
     )
     result.actions = crop_policy_actions(policy, result.actions)
     return result.actions, result.extras, result.elapsed_s

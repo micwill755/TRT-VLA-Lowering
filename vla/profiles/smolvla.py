@@ -15,10 +15,9 @@ from lerobot.policies.smolvla import SmolVLAPolicy
 
 from trt.data import prepare_policy_batch
 from trt.edge_llm_runtime import run_llm_inference_runtime_smoke
-from trt.export import SmolVLAExportHooks
+from trt.export.smolvla import SerializedSmolVLAVision, SmolVLAExportHooks
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
-from trt.export.smolvla import SerializedSmolVLAVision, action_output_dim
-from trt.inference import (
+from trt.inference.smolvla import (
     SmolVLAInferenceHooks,
     run_inference_pytorch_smolvla,
     run_inference_smolvla_engines,
@@ -39,7 +38,6 @@ class SmolVLAProfile(VLAProfile):
 
     policy_cls = SmolVLAPolicy
     io = PI05_EDGE_IO
-    uses_export_pipeline = True
     fill_missing_cameras = True
     prefer_same_iter_reference = True
 
@@ -48,13 +46,6 @@ class SmolVLAProfile(VLAProfile):
         SerializedStageSpec("language", "language", SerializedPI05Language),
         SerializedStageSpec("action", "action", SerializedPI05Action),
     )
-    plugin_info_aliases = {
-        "language_max_seq_len": ("language", "max_seq_len"),
-        "prefix_seq_len": ("action", "prefix_seq_len"),
-        "chunk_size": ("action", "chunk_size"),
-        "max_action_dim": ("action", "max_action_dim"),
-        "num_inference_steps": ("action", "num_inference_steps"),
-    }
 
     vision_trt_settings = dict(VISION_TRT_SETTINGS)
     action_trt_settings = dict(ACTION_TRT_SETTINGS)
@@ -85,12 +76,12 @@ class SmolVLAProfile(VLAProfile):
         return AutoTokenizer.from_pretrained(policy.model.config.vlm_model_name)
 
     def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> SmolVLAExportHooks:
+        del args
         return SmolVLAExportHooks(
             io=self.io,
             tokenizer=tokenizer,
             vision_trt_settings=self.vision_trt_settings,
             action_trt_settings=self.action_trt_settings,
-            stage_parity=not args.no_stage_parity,
             max_generate_length=0,
         )
 
@@ -100,18 +91,13 @@ class SmolVLAProfile(VLAProfile):
     def post_export(
         self,
         runner: Any,
-        engine_info: dict[str, Any] | None,
+        engine_root: str | None,
     ) -> int | None:
         args = runner.args
-        if not args.run_cpp_smoke or args.skip_engine or engine_info is None:
+        if not args.run_cpp_smoke or engine_root is None:
             return None
 
-        smoke_input = pathlib.Path(
-            engine_info.get(
-                "runtime_smoke_input",
-                pathlib.Path(args.engine_dir) / "runtime_smoke" / "input.json",
-            )
-        )
+        smoke_input = pathlib.Path(engine_root) / "runtime_smoke" / "input.json"
         if not smoke_input.exists():
             raise FileNotFoundError(f"Missing runtime smoke input: {smoke_input}")
 
@@ -131,9 +117,6 @@ class SmolVLAProfile(VLAProfile):
             return result.returncode
         print("C++ smoke completed successfully.")
         return None
-
-    def finalize_serialized_handles(self, handles: SerializedHandles, policy: Any) -> None:
-        handles.plugin_info.setdefault("output_action_dim", action_output_dim(policy))
 
     def run_inference_eager(
         self,
@@ -174,7 +157,6 @@ class SmolVLAProfile(VLAProfile):
             vision_runner=handles.vision,
             language_runner=handles.language,
             diffusion_runner=handles.action,
-            plugin_info=handles.plugin_info,
             seed=seed,
             device=device,
             io=self.io,

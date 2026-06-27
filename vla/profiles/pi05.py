@@ -15,11 +15,19 @@ from lerobot.policies.pi05 import PI05Policy
 
 from trt.data import prepare_policy_batch
 from trt.edge_llm_runtime import run_llm_inference_runtime_smoke
-from trt.export import Pi05ExportHooks
-from trt.export.pi05 import PALIGEMMA_TOKENIZER_ID, PI05VisionEngineAdapter, action_output_dim, configure_torch_runtime
+from trt.export.pi05 import (
+    PALIGEMMA_TOKENIZER_ID,
+    PI05VisionEngineAdapter,
+    Pi05ExportHooks,
+    action_output_dim,
+)
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
-from trt.inference import Pi05InferenceHooks, run_inference_pi05_engines, run_inference_pytorch_pi05
-from trt.inference.pi05 import run_inference_trt_plugin
+from trt.inference.pi05 import (
+    Pi05InferenceHooks,
+    run_inference_pi05_engines,
+    run_inference_pytorch_pi05,
+    run_inference_trt_plugin,
+)
 from trt.io_spec import PI05_EDGE_IO
 from trt.measure import compute_action_parity_metrics
 from trt.serialize import SerializedPI05Action, SerializedPI05Language
@@ -35,7 +43,6 @@ class Pi05Profile(VLAProfile):
 
     policy_cls = PI05Policy
     io = PI05_EDGE_IO
-    uses_export_pipeline = True
     fill_missing_cameras = True
     prefer_same_iter_reference = True
 
@@ -44,20 +51,9 @@ class Pi05Profile(VLAProfile):
         SerializedStageSpec("language", "language", SerializedPI05Language),
         SerializedStageSpec("action", "action", SerializedPI05Action),
     )
-    plugin_info_aliases = {
-        "language_max_seq_len": ("language", "max_seq_len"),
-        "prefix_seq_len": ("action", "prefix_seq_len"),
-        "chunk_size": ("action", "chunk_size"),
-        "max_action_dim": ("action", "max_action_dim"),
-        "num_inference_steps": ("action", "num_inference_steps"),
-    }
 
     vision_trt_settings = dict(VISION_TRT_SETTINGS)
     action_trt_settings = dict(ACTION_TRT_SETTINGS)
-
-    def on_run_start(self, device: torch.device, args: argparse.Namespace) -> None:
-        del args
-        configure_torch_runtime()
 
     def load_policy(self, model_id: str, device: torch.device) -> tuple[Any, nn.Module]:
         policy = load_policy(self.policy_cls, model_id, device).to(device).eval()
@@ -85,12 +81,12 @@ class Pi05Profile(VLAProfile):
         return AutoTokenizer.from_pretrained(PALIGEMMA_TOKENIZER_ID)
 
     def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> Pi05ExportHooks:
+        del args
         return Pi05ExportHooks(
             io=self.io,
             tokenizer=tokenizer,
             vision_trt_settings=self.vision_trt_settings,
             action_trt_settings=self.action_trt_settings,
-            stage_parity=not args.no_stage_parity,
             max_generate_length=0,
         )
 
@@ -100,18 +96,13 @@ class Pi05Profile(VLAProfile):
     def post_export(
         self,
         runner: Any,
-        engine_info: dict[str, Any] | None,
+        engine_root: str | None,
     ) -> int | None:
         args = runner.args
-        if not args.run_cpp_smoke or args.skip_engine or engine_info is None:
+        if not args.run_cpp_smoke or engine_root is None:
             return None
 
-        smoke_input = pathlib.Path(
-            engine_info.get(
-                "runtime_smoke_input",
-                pathlib.Path(args.engine_dir) / "runtime_smoke" / "input.json",
-            )
-        )
+        smoke_input = pathlib.Path(engine_root) / "runtime_smoke" / "input.json"
         if not smoke_input.exists():
             raise FileNotFoundError(f"Missing runtime smoke input: {smoke_input}")
 
@@ -131,9 +122,6 @@ class Pi05Profile(VLAProfile):
             return result.returncode
         print("C++ smoke completed successfully.")
         return None
-
-    def finalize_serialized_handles(self, handles: SerializedHandles, policy: Any) -> None:
-        handles.plugin_info.setdefault("output_action_dim", action_output_dim(policy))
 
     def run_inference_eager(
         self,
@@ -173,7 +161,6 @@ class Pi05Profile(VLAProfile):
                 vision_runner=handles.vision,
                 language_runner=handles.language,
                 diffusion_runner=handles.action,
-                plugin_info=handles.plugin_info,
                 seed=seed,
                 device=device,
                 io=self.io,
@@ -185,7 +172,6 @@ class Pi05Profile(VLAProfile):
             trt_vision=handles.vision,
             trt_lm=handles.language,
             trt_diffusion=handles.action,
-            plugin_info=handles.plugin_info,
             seed=seed,
             device=device,
             io=self.io,

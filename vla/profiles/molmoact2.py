@@ -15,7 +15,6 @@ from trt.export import MolmoAct2ExportHooks
 from trt.export.molmoact2 import (
     SerializedMolmoAct2Action,
     SerializedMolmoAct2Backbone,
-    action_output_dim,
 )
 from trt.export.molmoact2_pipeline import MolmoAct2ExportPipeline
 from trt.export.settings import ACTION_TRT_SETTINGS
@@ -39,7 +38,6 @@ class MolmoAct2Profile(VLAProfile):
 
     policy_cls = MolmoAct2Policy
     io = MOLMOACT2_EDGE_IO
-    uses_export_pipeline = True
     fill_missing_cameras = False
     prefer_same_iter_reference = True
     in_memory_trt_stage = "language"
@@ -49,12 +47,6 @@ class MolmoAct2Profile(VLAProfile):
         SerializedStageSpec("language", "language", SerializedMolmoAct2Backbone),
         SerializedStageSpec("action", "action", SerializedMolmoAct2Action),
     )
-    plugin_info_aliases = {
-        "prefix_seq_len": ("action", "prefix_seq_len"),
-        "chunk_size": ("action", "chunk_size"),
-        "max_action_dim": ("action", "max_action_dim"),
-        "num_inference_steps": ("action", "num_inference_steps"),
-    }
 
     action_trt_settings = dict(ACTION_TRT_SETTINGS)
 
@@ -90,18 +82,14 @@ class MolmoAct2Profile(VLAProfile):
         return MolmoAct2ExportPipeline
 
     def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> MolmoAct2ExportHooks:
-        del tokenizer
+        del tokenizer, args
         return MolmoAct2ExportHooks(
             io=self.io,
             action_trt_settings=self.action_trt_settings,
-            stage_parity=not args.no_stage_parity,
         )
 
     def make_inference_hooks(self) -> MolmoAct2InferenceHooks:
         return MolmoAct2InferenceHooks()
-
-    def finalize_serialized_handles(self, handles: SerializedHandles, policy: Any) -> None:
-        handles.plugin_info.setdefault("output_action_dim", action_output_dim(policy))
 
     def run_inference_eager(
         self,
@@ -140,7 +128,6 @@ class MolmoAct2Profile(VLAProfile):
                 compile_inputs,
                 backbone_runner=handles.language,
                 diffusion_runner=handles.action,
-                plugin_info=handles.plugin_info,
                 seed=seed,
                 device=device,
                 io=self.io,
@@ -151,7 +138,6 @@ class MolmoAct2Profile(VLAProfile):
             compile_inputs,
             trt_backbone=handles.language,
             trt_diffusion=handles.action,
-            plugin_info=handles.plugin_info,
             seed=seed,
             device=device,
             io=self.io,

@@ -103,27 +103,12 @@ class VLAExportHooks(ABC):
     def build_diffusion_spec(self, ctx: ExportContext) -> DiffusionEngineSpec:
         ...
 
+    def compile_language_in_memory(
+        self,
+        ctx: ExportContext,
+        sink: ExportSink,
+    ) -> nn.Module | None:
+        return None
+
     def after_export(self, ctx: ExportContext, sink: ExportSink) -> None:
         """Parity checks, serialized runner smoke, fixture dumps."""
-
-    def finalize_plugin_info(self, ctx: ExportContext) -> dict:
-        info: dict = {
-            "engine_root": str(ctx.engine_root) if ctx.engine_root else None,
-            **ctx.io.to_plugin_info(),
-        }
-        if ctx.lang_spec is not None:
-            info["language_max_seq_len"] = int(ctx.lang_spec.max_seq_len)
-        if ctx.language_inputs.get("inputs_embeds") is not None:
-            info["language_seq_len"] = int(ctx.language_inputs["inputs_embeds"].shape[1])
-        if ctx.context_embs is not None:
-            info["context_seq_len"] = int(ctx.context_embs.shape[1])
-            info["context_hidden_size"] = int(ctx.context_embs.shape[2])
-        if ctx.lm_hidden_states is not None:
-            info["lm_hidden_size"] = int(ctx.lm_hidden_states.shape[2])
-        state = ctx.action_side.get("state")
-        if state is not None:
-            info["state_shape"] = list(state.shape)
-        embodiment_id = ctx.action_side.get("embodiment_id")
-        if embodiment_id is not None:
-            info["embodiment_id"] = embodiment_id.detach().cpu().tolist()
-        return info

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import torch
 
+from trt.inference.backends import EagerBackend, InferenceBackend
+from trt.inference.context import InferenceContext, InferenceResult
 from trt.inference.hooks import VLAInferenceHooks
 from trt.inference.mode import InferenceMode
 from trt.io_spec import PipelineIOSpec
@@ -74,7 +76,6 @@ class MolmoAct2InferencePipeline:
         *,
         mode: InferenceMode = InferenceMode.E2E,
         seed: int = 42,
-        plugin_info: dict | None = None,
         engine_root: str | Path | None = None,
     ) -> InferenceResult:
         del model, mode
@@ -87,10 +88,8 @@ class MolmoAct2InferencePipeline:
             seed=seed,
             engine_root=Path(engine_root) if engine_root else None,
         )
-        if plugin_info:
-            ctx.plugin_info.update(plugin_info)
-        elif getattr(backend, "handles", None) and backend.handles.plugin_info:
-            ctx.plugin_info.update(backend.handles.plugin_info)
+        if getattr(backend, "handles", None) is not None:
+            ctx.stage_handles = backend.handles
 
         self._seed(ctx)
         t0 = time.perf_counter()

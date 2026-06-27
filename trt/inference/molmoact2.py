@@ -76,12 +76,10 @@ class MolmoAct2InferenceHooks(VLAInferenceHooks):
         )
 
     def action_adapter(self, ctx: InferenceContext):
-        num_steps = int(
-            ctx.plugin_info.get(
-                "num_inference_steps",
-                flow_matching_steps(ctx.policy),
-            )
-        )
+        num_steps = flow_matching_steps(ctx.policy)
+        action = ctx.stage_handles.action if ctx.stage_handles else None
+        if action is not None and getattr(action, "engine", None) is not None:
+            num_steps = int(action.engine.config.get("num_inference_steps", num_steps))
         return EncoderKVFlowActionAdapter(num_steps_value=num_steps, dt_sign=1)
 
     def build_action_rollout_context(
@@ -153,7 +151,6 @@ def run_inference_molmoact2_engines(
     *,
     backbone_runner,
     diffusion_runner,
-    plugin_info: dict,
     seed: int,
     device: torch.device,
     io: PipelineIOSpec = MOLMOACT2_EDGE_IO,
@@ -162,7 +159,6 @@ def run_inference_molmoact2_engines(
         stage_handles_from_modules(
             language=backbone_runner,
             action=diffusion_runner,
-            plugin_info=plugin_info,
         )
     )
     result = _pipeline(io).run(
@@ -172,7 +168,6 @@ def run_inference_molmoact2_engines(
         batch,
         backend,
         seed=seed,
-        plugin_info=plugin_info,
     )
     result.actions = crop_policy_actions(policy, result.actions)
     return result.actions, result.extras, result.elapsed_s
@@ -186,7 +181,6 @@ def run_inference_trt_molmoact2(
     *,
     trt_backbone,
     trt_diffusion,
-    plugin_info: dict,
     seed: int,
     device: torch.device,
     io: PipelineIOSpec = MOLMOACT2_EDGE_IO,
@@ -195,7 +189,6 @@ def run_inference_trt_molmoact2(
         stage_handles_from_modules(
             language=trt_backbone,
             action=trt_diffusion,
-            plugin_info=plugin_info,
         )
     )
     result = _pipeline(io).run(
@@ -205,7 +198,6 @@ def run_inference_trt_molmoact2(
         batch,
         backend,
         seed=seed,
-        plugin_info=plugin_info,
     )
     result.actions = crop_policy_actions(policy, result.actions)
     return result.actions, result.extras, result.elapsed_s

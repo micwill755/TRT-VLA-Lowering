@@ -61,27 +61,6 @@ class PipelineIOSpec:
             return tuple(context_slot for _, context_slot in self.lm_to_action_context_slots)
         return tuple(action_slot for _, action_slot in self.lm_to_action_slots)
 
-    def to_plugin_info(self) -> dict[str, Any]:
-        info = {
-            "vision_input_names": list(self.vision.input_names),
-            "vision_output_names": list(self.vision.output_names),
-            "language_input_names": list(self.language.input_names),
-            "language_output_names": list(self.language.output_names),
-            "action_input_names": list(self.action.input_names),
-            "action_output_names": list(self.action.output_names),
-            "lm_to_action_slots": [list(pair) for pair in self.lm_to_action_slots],
-        }
-        if self.action_context is not None:
-            info["action_context_input_names"] = list(self.action_context.input_names)
-            info["action_context_output_names"] = list(self.action_context.output_names)
-            info["lm_to_action_context_slots"] = [
-                list(pair) for pair in self.lm_to_action_context_slots
-            ]
-            info["context_to_action_slots"] = [
-                list(pair) for pair in self.context_to_action_slots
-            ]
-        return info
-
 
 VLA_VISION_INPUT_NAMES = ("pixel_values",)
 VLA_VISION_OUTPUT_NAMES = ("visual_embeds",)

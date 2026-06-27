@@ -73,14 +73,17 @@ def run_language_prefill(
     prefill: LanguagePrefillInputs,
     io: ComponentIOSpec,
 ) -> LanguageOutputs:
-    outputs = module(
+    base_args = (
         prefill.inputs_embeds,
         prefill.rope_rotary_cos_sin,
         prefill.context_lengths,
         prefill.kvcache_start_index,
         prefill.last_token_ids,
-        *prefill.kv_caches,
     )
+    if getattr(module, "bundles_kv_caches", False):
+        outputs = module(*base_args, prefill.kv_caches)
+    else:
+        outputs = module(*base_args, *prefill.kv_caches)
     if not isinstance(outputs, tuple):
         outputs = (outputs,)
     return LanguageOutputs.from_tuple(outputs, io)

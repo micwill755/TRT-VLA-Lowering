@@ -307,12 +307,10 @@ class MolmoAct2ExportHooks(VLAExportHooks):
         *,
         io: PipelineIOSpec = MOLMOACT2_EDGE_IO,
         action_trt_settings: dict | None = None,
-        stage_parity: bool = True,
     ) -> None:
         self.io = io
         self.tokenizer = None
         self.action_trt_settings = action_trt_settings or dict(ACTION_TRT_SETTINGS)
-        self.stage_parity = stage_parity
 
     def preprocess(self, ctx: ExportContext) -> None:
         policy = ctx.policy
@@ -435,7 +433,7 @@ class MolmoAct2ExportHooks(VLAExportHooks):
         )
 
     def after_export(self, ctx: ExportContext, sink: ExportSink) -> None:
-        if not ctx.accuracy_check or not self.stage_parity or sink.mode is not ExportMode.SERIALIZED:
+        if not ctx.accuracy_check or sink.mode is not ExportMode.SERIALIZED:
             return
         action_runner = ctx.handles.get("action")
         if action_runner is None:
@@ -449,26 +447,3 @@ class MolmoAct2ExportHooks(VLAExportHooks):
             device=ctx.device,
             seed=ctx.seed,
         )
-
-    def finalize_plugin_info(self, ctx: ExportContext) -> dict:
-        info = super().finalize_plugin_info(ctx)
-        policy = ctx.policy
-        info["chunk_size"] = int(policy._generation_action_horizon())
-        info["max_action_dim"] = int(policy._backbone().config.max_action_dim)
-        info["output_action_dim"] = action_output_dim(policy)
-        info["num_inference_steps"] = flow_matching_steps(policy)
-        encoder_k = ctx.action_side.get("encoder_k")
-        if encoder_k is not None:
-            info["prefix_seq_len"] = int(encoder_k.shape[-2])
-            info["language_num_layers"] = int(encoder_k.shape[0])
-        root = ctx.engine_root
-        if root is not None:
-            info.update(
-                {
-                    "language_engine_dir": str(root / "language"),
-                    "action_engine_dir": str(root / "action"),
-                    "language_engine": str(root / "language" / "backbone.engine"),
-                    "diffusion_engine": str(root / "action" / "diffusion.engine"),
-                }
-            )
-        return info
