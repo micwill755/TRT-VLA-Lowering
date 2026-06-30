@@ -25,8 +25,7 @@ from trt import helper
 IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
 DEFAULT_DATASET_ID = "lerobot/libero"
 
-
-def _frame_from_test_data(
+def frame_from_test_data(
     data: dict[str, Any],
     policy,
     *,
@@ -72,7 +71,7 @@ def prepare_policy_batch(
         model_id,
         preprocessor_overrides={"device_processor": {"device": str(device)}},
     )
-    frame = _frame_from_test_data(data, policy, fill_missing=fill_missing)
+    frame = frame_from_test_data(data, policy, fill_missing=fill_missing)
     return preprocess(frame)
 
 

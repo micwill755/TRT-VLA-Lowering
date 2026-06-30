@@ -46,21 +46,3 @@ class ExportContext:
         if self.engine_root is None:
             return None
         return self.engine_root / name
-
-
-@dataclass
-class ComponentBuild:
-    """Module + trace inputs for a TRT export stage."""
-
-    module: nn.Module
-    sample_inputs: tuple[torch.Tensor, ...]
-    extra_config: dict[str, Any] = field(default_factory=dict)
-    trt_settings: dict[str, Any] | None = None
-    model_type: str = ""
-    component: str = ""
-    engine_file: str = ""
-
-
-@dataclass
-class PipelineResult:
-    handles: dict[str, Any]

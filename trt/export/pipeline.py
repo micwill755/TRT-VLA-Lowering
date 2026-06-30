@@ -50,7 +50,6 @@ class VLAExportPipeline:
             accuracy_check=accuracy_check,
         )
 
-        load_plugins_for_trt()
         self.hooks.preprocess(ctx)
 
         print("compiling vision")

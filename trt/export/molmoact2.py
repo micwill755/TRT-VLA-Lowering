@@ -36,7 +36,6 @@ MODEL_INPUT_KEYS = (
     "token_type_ids",
 )
 
-
 def molmoact2_model_inputs(batch: dict[str, Any], *, device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
     out: dict[str, torch.Tensor] = {}
     for key in MODEL_INPUT_KEYS:
@@ -49,7 +48,6 @@ def molmoact2_model_inputs(batch: dict[str, Any], *, device: torch.device, dtype
             out[key] = value.to(device=device)
     return out
 
-
 def stack_encoder_kv(
     kv_states: Sequence[tuple[torch.Tensor, torch.Tensor]],
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -57,13 +55,11 @@ def stack_encoder_kv(
     encoder_v = torch.stack([item[1] for item in kv_states], dim=0).contiguous()
     return encoder_k, encoder_v
 
-
 def unstack_encoder_kv(
     encoder_k: torch.Tensor,
     encoder_v: torch.Tensor,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
     return [(encoder_k[i].contiguous(), encoder_v[i].contiguous()) for i in range(int(encoder_k.shape[0]))]
-
 
 def action_output_dim(policy: Any) -> int:
     output_feature = policy.config.output_features.get(ACTION)
@@ -71,15 +67,12 @@ def action_output_dim(policy: Any) -> int:
         return int(output_feature.shape[0])
     return int(getattr(policy.config, "expected_max_action_dim", 32))
 
-
 def crop_policy_actions(policy: Any, actions: torch.Tensor) -> torch.Tensor:
     return actions[..., : action_output_dim(policy)]
-
 
 def flow_matching_steps(policy: Any) -> int:
     backbone = policy._backbone()
     return int(getattr(backbone.config, "flow_matching_num_steps", policy.config.num_inference_steps or 10))
-
 
 class MolmoAct2BackboneKVModule(nn.Module):
     """Fused MolmoAct2 multimodal prefill returning stacked encoder K/V."""

@@ -10,6 +10,8 @@ from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
 
 from trt.packing import compact_pi05_prefix
 
+# hugging face utils ----
+
 def force_hf_attention(module, attn):
     for m in module.modules():
         cfg = getattr(m, "config", None)
@@ -29,21 +31,12 @@ def force_hf_attention(module, attn):
                 if hasattr(sub_cfg, "attn_implementation"):
                     sub_cfg.attn_implementation = attn
 
-# hugging face utils ----
-
-def load_policy(policy_cls, model_id, device):
-    policy = policy_cls.from_pretrained(model_id, device=device)
-    force_hf_attention(policy, "eager")
-    return policy
-
-def _prepare_vision_module(
-    visual_model: nn.Module, 
-    model_inputs: dict[str, Any],
-    dtype: Any,
-    device: str
-) -> tuple[nn.Module, torch.Tensor, torch.Tensor]:
-    pass
-
+def find_pack_step(preprocessor):
+    for step in preprocessor.steps:
+        if step.__class__.__name__ == "MolmoAct2PackInputsProcessorStep":
+            return step
+    raise ValueError("MolmoAct2PackInputsProcessorStep not found in preprocessor pipeline")
+ 
 # hugging face utils ----
 
 # utils ----

@@ -138,7 +138,6 @@ def load_plugin():
 
     try:
         import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
-
         edge_plugins.load_edge_plugin(plugin_so)
     except ImportError:
         ctypes.CDLL(plugin_so)
