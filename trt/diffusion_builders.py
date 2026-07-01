@@ -5,13 +5,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from trt.diffusion import (
+from trt.modules.export.diffusion import (
     DEFAULT_DIFFUSION_TRT_SETTINGS,
     DiffusionEngineSpec,
-    GrootDiTStepEncoder,
-    PI05PrefixKVStepEncoder,
-    StaticActionVelocityStep,
-    TRTDynamicCategorySpecificMLP,
+    GrootDiTStepEncoderExportModule,
+    PI05PrefixKVStepEncoderExportModule,
+    StaticActionVelocityStepExportModule,
+    TRTDynamicCategorySpecificMLPExportModule,
 )
 from trt.io_spec import (
     GROOT_ACTION_ROLLOUT,
@@ -59,9 +59,11 @@ def make_groot_static_action_module(
 ) -> nn.Module:
     velocity_decoder = action_head.action_decoder
     if embodiment_id is not None:
-        velocity_decoder = TRTDynamicCategorySpecificMLP(action_head.action_decoder)
-    return StaticActionVelocityStep(
-        step_encoder=GrootDiTStepEncoder(action_head, embodiment_id),
+        velocity_decoder = TRTDynamicCategorySpecificMLPExportModule(
+            action_head.action_decoder
+        )
+    return StaticActionVelocityStepExportModule(
+        step_encoder=GrootDiTStepEncoderExportModule(action_head, embodiment_id),
         action_expert=action_head.model,
         velocity_decoder=velocity_decoder,
         output_tokens=action_head.config.action_horizon,
@@ -70,8 +72,8 @@ def make_groot_static_action_module(
 
 
 def make_pi05_static_action_module(core: nn.Module, device: torch.device) -> nn.Module:
-    return StaticActionVelocityStep(
-        step_encoder=PI05PrefixKVStepEncoder(core),
+    return StaticActionVelocityStepExportModule(
+        step_encoder=PI05PrefixKVStepEncoderExportModule(core),
         action_expert=core.paligemma_with_expert.gemma_expert.model,
         velocity_decoder=core.action_out_proj,
         output_tokens=core.config.chunk_size,
@@ -189,7 +191,10 @@ def build_smolvla_diffusion_export_params(
     trt_settings: dict | None = None,
     model_type: str = "smolvla",
 ) -> DiffusionEngineSpec:
-    from trt.diffusion import SmolVLAPrefixKVStepEncoder, StaticActionVelocityStep
+    from trt.modules.export.diffusion import (
+        SmolVLAPrefixKVStepEncoderExportModule,
+        StaticActionVelocityStepExportModule,
+    )
     from trt.utils import make_smolvla_runner_inputs
 
     class _SmolVLAActionExpert(nn.Module):
@@ -200,8 +205,8 @@ def build_smolvla_diffusion_export_params(
         def forward(self, **kwargs):
             return self.vlm_with_expert.forward(**kwargs)
 
-    action_module = StaticActionVelocityStep(
-        step_encoder=SmolVLAPrefixKVStepEncoder(core),
+    action_module = StaticActionVelocityStepExportModule(
+        step_encoder=SmolVLAPrefixKVStepEncoderExportModule(core),
         action_expert=_SmolVLAActionExpert(core),
         velocity_decoder=core.action_out_proj,
         output_tokens=int(core.config.chunk_size),

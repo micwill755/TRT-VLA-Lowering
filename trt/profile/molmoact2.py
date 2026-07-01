@@ -12,7 +12,7 @@ from lerobot.policies.molmoact2 import MolmoAct2Policy
 
 from trt.data import prepare_policy_batch
 from trt.export.molmoact2 import MolmoAct2ExportHooks
-from trt.export.settings import ACTION_TRT_SETTINGS
+from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
 from trt.inference.molmoact2 import (
     run_inference_molmoact2_engines,
     run_inference_pytorch_molmoact2,

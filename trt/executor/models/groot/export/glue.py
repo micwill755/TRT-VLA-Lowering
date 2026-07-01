@@ -16,15 +16,25 @@ def vision_to_language(ctx, upstream, stage_inputs):
     }
 
 
-def language_to_action(ctx, upstream, stage_inputs):
-    language, _vision = upstream[0], upstream[1]
-    export_state = getattr(ctx, "export_state", {})
-    action_side = export_state["action_side"]
-
+def language_to_action_context(ctx, upstream, stage_inputs):
+    del ctx
+    language = upstream[0]
+    lm_hidden = language.tensors.get("lm_hidden_states", language.tensors["hidden_states"])
     return {
         **stage_inputs,
-        "lm_hidden_states": language.tensors["hidden_states"],
-        "language_inputs": language.metadata["language_inputs"],
+        "lm_hidden_states": lm_hidden,
+        "language_inputs": language.metadata.get("language_inputs"),
+    }
+
+
+def action_context_to_action(ctx, upstream, stage_inputs):
+    context = upstream[0]
+    action_side = ctx.export_state["action_side"]
+    context_embs = context.tensors.get("context_embs", context.tensors["vl_embs"])
+    return {
+        **stage_inputs,
+        "context_embs": context_embs,
         "state": action_side["state"],
         "embodiment_id": action_side["embodiment_id"],
+        "language_inputs": context.metadata.get("language_inputs"),
     }

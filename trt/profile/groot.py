@@ -5,16 +5,19 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.groot import GrootPolicy
+from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.groot.groot_n1 import DEFAULT_TOKENIZER_ASSETS_REPO
-from lerobot.utils.constants import HF_LEROBOT_HOME
+from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STATE
 
 from trt.data import create_pil_messages, prepare_model_inputs
-from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
+from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
+from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
 from trt.helper import get_processor
 from trt.io_spec import GROOT_EDGE_IO
 from trt.profile import VLAProfile
-
+from trt.utils import force_hf_attention
 
 class GrootProfile(VLAProfile):
     name = "groot"
@@ -58,9 +61,10 @@ class GrootProfile(VLAProfile):
         self.policy = GrootPolicy(self.config).to(self.device).eval()
 
     def _init_models(self) -> None:
-        self.lm = self.policy.backbone.eagle_model.language_model
-        self.vision = self.policy.backbone.eagle_model.vision_model
-        self.action = self.policy.action_head
+        self.model = self.policy._groot_model
+        self.lm = self.model.backbone.eagle_model.language_model
+        self.vision = self.model.backbone.eagle_model.vision_model
+        self.action = self.model.action_head
 
         force_hf_attention(self.vision, "eager")
         force_hf_attention(self.lm, "eager")

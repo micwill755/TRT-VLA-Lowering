@@ -1,5 +1,5 @@
 from trt.config.load_config import LoadPipelineConfig, SerializedStageSpec
-from trt.serialize import (
+from trt.executor.models.groot.load.serialize import (
     SerializedGrootAction,
     SerializedGrootActionContext,
     SerializedGrootLanguage,

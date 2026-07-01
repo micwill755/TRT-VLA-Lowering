@@ -4,20 +4,19 @@ from collections.abc import Callable
 from typing import TypeAlias
 
 from trt.config.benchmark_config import BenchmarkPipelineConfig
-from trt.config.inference_config import HandleSource, InferenceRunConfig, InferenceRunHooks
 from trt.config.load_config import LoadPipelineConfig
 from trt.config.stage_config import PipelineConfig
 from trt.executor.models.groot.export.pipeline import GROOT_PIPELINE
 from trt.executor.models.groot.inference.pipeline import GROOT_INFERENCE_PIPELINE
-from trt.executor.models.groot.inference.run import run_eager, run_trt
 from trt.executor.models.groot.load.pipeline import GROOT_LOAD_PIPELINE
-from trt.pipelines.benchmark import default_groot_benchmark_config
+from trt.executor.models.pi05.load.pipeline import PI05_LOAD_PIPELINE
+from trt.executor.models.smolvla.load.pipeline import SMOLVLA_LOAD_PIPELINE
+from trt.executor.benchmark.pipeline import DEFAULT_BENCHMARK
 
 PipelineEntry: TypeAlias = PipelineConfig | Callable[[], PipelineConfig]
 
 _EXPORT: dict[str, PipelineEntry] = {}
 _INFERENCE: dict[str, PipelineEntry] = {}
-_BENCHMARK: dict[str, BenchmarkPipelineConfig] = {}
 _LOAD: dict[str, LoadPipelineConfig] = {}
 _ALIASES: dict[str, str] = {}
 
@@ -55,10 +54,6 @@ def register_inference_pipeline(
             _INFERENCE[alias_key] = config
 
 
-def register_benchmark_pipeline(model_type: str, config: BenchmarkPipelineConfig) -> None:
-    _BENCHMARK[model_type] = config
-
-
 def register_load_pipeline(
     model_type: str,
     config: LoadPipelineConfig,
@@ -91,35 +86,16 @@ def get_export_pipeline(model_type: str) -> PipelineConfig:
     return _resolve(_EXPORT[key])
 
 
-def get_inference_pipeline_config(model_type: str) -> PipelineConfig:
+def get_inference_pipeline(model_type: str) -> PipelineConfig:
     key = _canonical(model_type)
     if key not in _INFERENCE:
         raise KeyError(f"No inference pipeline for {model_type!r}")
     return _resolve(_INFERENCE[key])
 
 
-def get_inference_pipeline(model_type: str, handle_source: HandleSource) -> InferenceRunConfig:
-    key = _canonical(model_type)
-    if key not in _INFERENCE:
-        raise KeyError(f"No inference pipeline for {model_type!r}")
-    return InferenceRunConfig(
-        handle_source=handle_source,
-        hooks=InferenceRunHooks(run=run_trt),
-    )
-
-
-def get_eager_runner(model_type: str):
-    key = _canonical(model_type)
-    if key not in _INFERENCE:
-        raise KeyError(f"No eager runner for {model_type!r}")
-    return run_eager
-
-
-def get_benchmark_pipeline(model_type: str) -> BenchmarkPipelineConfig:
-    key = _canonical(model_type)
-    if key in _BENCHMARK:
-        return _BENCHMARK[key]
-    return default_groot_benchmark_config()
+def get_benchmark_pipeline(model_type: str | None = None) -> BenchmarkPipelineConfig:
+    del model_type
+    return DEFAULT_BENCHMARK
 
 
 def get_load_pipeline(model_type: str) -> LoadPipelineConfig:
@@ -138,53 +114,11 @@ def get_pipeline_for_profile(profile) -> PipelineConfig:
 
 
 def _register_builtin() -> None:
-    from trt.config.load_config import SerializedStageSpec
-    from trt.export.pi05 import PI05VisionEngineAdapter
-    from trt.export.smolvla import SerializedSmolVLAVision
-    from trt.export.molmoact2 import SerializedMolmoAct2Action, SerializedMolmoAct2Backbone
-    from trt.serialize import (
-        SerializedGrootAction,
-        SerializedGrootActionContext,
-        SerializedGrootLanguage,
-        SerializedGrootVision,
-        SerializedPI05Action,
-        SerializedPI05Language,
-    )
-
     register_export_pipeline("Gr00tN1d7", GROOT_PIPELINE, aliases=("gr00t", "groot"))
     register_load_pipeline("Gr00tN1d7", GROOT_LOAD_PIPELINE, aliases=("gr00t", "groot"))
     register_inference_pipeline("Gr00tN1d7", GROOT_INFERENCE_PIPELINE, aliases=("gr00t", "groot"))
-    register_benchmark_pipeline("Gr00tN1d7", default_groot_benchmark_config())
-
-    register_load_pipeline(
-        "pi05",
-        LoadPipelineConfig(
-            stages=(
-                SerializedStageSpec("vision", "visual", PI05VisionEngineAdapter),
-                SerializedStageSpec("language", "language", SerializedPI05Language),
-                SerializedStageSpec("action", "action", SerializedPI05Action),
-            ),
-        ),
-    )
-    register_load_pipeline(
-        "smolvla",
-        LoadPipelineConfig(
-            stages=(
-                SerializedStageSpec("vision", "visual", SerializedSmolVLAVision),
-                SerializedStageSpec("language", "language", SerializedPI05Language),
-                SerializedStageSpec("action", "action", SerializedPI05Action),
-            ),
-        ),
-    )
-    register_load_pipeline(
-        "molmoact2",
-        LoadPipelineConfig(
-            stages=(
-                SerializedStageSpec("language", "language", SerializedMolmoAct2Backbone),
-                SerializedStageSpec("action", "action", SerializedMolmoAct2Action),
-            ),
-        ),
-    )
+    register_load_pipeline("pi05", PI05_LOAD_PIPELINE)
+    register_load_pipeline("smolvla", SMOLVLA_LOAD_PIPELINE)
 
 
 _register_builtin()

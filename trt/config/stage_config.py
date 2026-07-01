@@ -15,7 +15,7 @@ StageConfig (per stage)
     hooks: StageHooks             export-specific logic the runner invokes
     io                            TRT engine I/O names/shapes
 
-Execution (VLAExportPipeline)
+Execution (ExportPipeline)
     1. config.hooks.preprocess(ctx)           once, before the stage loop
     2. for stage in config.stages:
            runner.run(ctx)                     generic TRT compile loop
@@ -58,11 +58,13 @@ class PipelineHooks:
 
 @dataclass(frozen=True)
 class StageHooks:
-    """Per-stage hooks; export runners use compile hooks, inference runners use glue/parity."""
+    """Per-stage hooks; export uses compile hooks, inference uses run_* hooks."""
 
     plan_export: str | None = None
     compile: str | None = None
-    run: str | None = None
+    run_eager: str | None = None
+    run_serialized: str | None = None
+    run_trt: str | None = None
     process_inputs: str | None = None
     save_artifacts: str | None = None
     metadata: str | None = None
@@ -90,5 +92,4 @@ class PipelineConfig:
     model_type: str
     stages: tuple[StageConfig, ...]
     hooks: PipelineHooks = field(default_factory=PipelineHooks)
-    use_legacy: bool = False
     io: PipelineIOSpec | None = None

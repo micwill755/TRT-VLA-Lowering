@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-import pathlib
 from typing import Any
 
 import torch
@@ -14,13 +12,13 @@ from transformers import AutoTokenizer
 from lerobot.policies.pi05 import PI05Policy
 
 from trt.data import prepare_policy_batch
-from trt.edge_llm_runtime import run_llm_inference_runtime_smoke
 from trt.export.pi05 import (
     PALIGEMMA_TOKENIZER_ID,
     Pi05ExportHooks,
     action_output_dim,
 )
-from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
+from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
+from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
 from trt.inference.pi05 import (
     run_inference_pi05_engines,
     run_inference_pytorch_pi05,
@@ -81,33 +79,6 @@ class Pi05Profile(VLAProfile):
             action_trt_settings=self.action_trt_settings,
             max_generate_length=0,
         )
-
-    def post_export(self, ctx: Any, engine_root: str | None = None) -> int | None:
-        args = ctx.args
-        root = engine_root or str(ctx.engine_root)
-        if not args.run_cpp_smoke or root is None:
-            return None
-
-        smoke_input = pathlib.Path(root) / "runtime_smoke" / "input.json"
-        if not smoke_input.exists():
-            raise FileNotFoundError(f"Missing runtime smoke input: {smoke_input}")
-
-        print(f"\nRunning C++ llm_inference smoke: {smoke_input}")
-        result = run_llm_inference_runtime_smoke(
-            engine_root=args.engine_dir,
-            input_file=smoke_input,
-            llm_inference_bin=args.llm_inference_bin,
-            max_generate_length=0,
-            dump_output=True,
-        )
-        print(result.stdout)
-        if result.stderr:
-            print(result.stderr, file=os.sys.stderr)
-        if result.returncode != 0:
-            print(f"C++ smoke failed with exit code {result.returncode}")
-            return result.returncode
-        print("C++ smoke completed successfully.")
-        return None
 
     def run_inference_eager(
         self,

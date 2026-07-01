@@ -14,16 +14,12 @@ from trt.config.pipeline_registry import (
 from trt.context import EdgeContext
 from trt.data import load_test_data
 from trt.pipelines.benchmark import BenchmarkPipeline
-from trt.pipelines.export import VLAExportPipeline
+from trt.pipelines.export import ExportPipeline
 from trt.pipelines.load import LoadPipeline
 from trt.profile import VLAProfile
 from trt.utils import load_plugins_for_trt
 
 DATASET_ID = "lerobot/libero"
-DEFAULT_LLM_INFERENCE_BIN = (
-    Path(__file__).resolve().parents[1]
-    / "gitlab/TensorRT-Edge-LLM/build-plugin-trt11/examples/llm/llm_inference"
-)
 
 
 class EdgeOrchestrator:
@@ -57,13 +53,6 @@ class EdgeOrchestrator:
             action="store_true",
             help="Load engines from --engine-dir and benchmark; skip export.",
         )
-        parser.add_argument(
-            "--llm-inference-bin",
-            type=str,
-            default=str(DEFAULT_LLM_INFERENCE_BIN),
-        )
-        parser.add_argument("--run-cpp-smoke", action="store_true")
-        profile_cls.add_arguments(parser)
         return parser
 
     def run(self) -> int:
@@ -75,9 +64,7 @@ class EdgeOrchestrator:
 
         if self._should_export():
             export_cfg = get_export_pipeline(get_pipeline_for_profile(self.profile).model_type)
-            export = VLAExportPipeline(export_cfg)
-            in_memory = not self.args.export_only
-            export.run(ctx, disk=True, in_memory=in_memory)
+            ExportPipeline(export_cfg).run(ctx)
 
         if self._should_benchmark():
             model_type = getattr(self.profile, "pipeline_model_type", None) or self.profile.name
@@ -85,8 +72,6 @@ class EdgeOrchestrator:
             bench_cfg = get_benchmark_pipeline(model_type)
             BenchmarkPipeline(bench_cfg).run(ctx)
 
-        if code := self.profile.post_export(ctx):
-            return code
         return 0
 
     def _should_export(self) -> bool:

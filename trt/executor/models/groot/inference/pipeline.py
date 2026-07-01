@@ -23,7 +23,11 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             runner="trt.runner.inference:InferenceStageRunner",
             io=GROOT_EDGE_IO.vision,
             engine_subdir="visual",
-            hooks=StageHooks(run=f"{_I}.vision:run"),
+            hooks=StageHooks(
+                run_eager=f"{_I}.vision:run_eager",
+                run_serialized=f"{_I}.vision:run_serialized",
+                run_trt=f"{_I}.vision:run_trt",
+            ),
         ),
         StageConfig(
             stage_id=1,
@@ -34,7 +38,9 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             engine_subdir="language",
             hooks=StageHooks(
                 process_inputs=f"{_I}.glue:vision_to_language",
-                run=f"{_I}.language:run",
+                run_eager=f"{_I}.language:run_eager",
+                run_serialized=f"{_I}.language:run_serialized",
+                run_trt=f"{_I}.language:run_trt",
             ),
         ),
         StageConfig(
@@ -42,11 +48,13 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             kind=StageKind.ACTION_CONTEXT,
             input_sources=(1,),
             runner="trt.runner.inference:InferenceStageRunner",
-            io=GROOT_EDGE_IO.action,
+            io=GROOT_EDGE_IO.action_context,
             engine_subdir="action_context",
             hooks=StageHooks(
                 process_inputs=f"{_I}.glue:language_to_action_context",
-                run=f"{_I}.action_context:run",
+                run_eager=f"{_I}.action_context:run_eager",
+                run_serialized=f"{_I}.action_context:run_serialized",
+                run_trt=f"{_I}.action_context:run_trt",
             ),
         ),
         StageConfig(
@@ -57,7 +65,11 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             io=GROOT_EDGE_IO.action,
             engine_subdir="action",
             final_output=True,
-            hooks=StageHooks(run=f"{_I}.action:run"),
+            hooks=StageHooks(
+                run_eager=f"{_I}.action:run_eager",
+                run_serialized=f"{_I}.action:run_serialized",
+                run_trt=f"{_I}.action:run_trt",
+            ),
         ),
     ),
 )

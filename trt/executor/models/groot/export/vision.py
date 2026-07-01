@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from trt.compile import save_trt_engine_module
-from trt.export.settings import VISION_TRT_SETTINGS
+from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
 from trt.hooks.export.plan import ExportPlan
 from trt.modules.export.vision import GridVisionExportModule
 from trt.plugin_utils import patch_vision_attention, restore_attention

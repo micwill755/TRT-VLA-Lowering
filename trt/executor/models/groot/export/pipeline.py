@@ -6,13 +6,11 @@ from trt.config.stage_config import (
     StageKind,
 )
 from trt.io_spec import GROOT_EDGE_IO
-from trt.executor.models.groot.load.pipeline import GROOT_LOAD_PIPELINE
 
 _E = "trt.executor.models.groot.export"
 
 GROOT_PIPELINE = PipelineConfig(
     model_type="Gr00tN1d7",
-    use_legacy=True,
     hooks=PipelineHooks(
         preprocess=f"{_E}.preprocess:preprocess",
         postprocess=f"{_E}.postprocess:postprocess",
@@ -48,15 +46,31 @@ GROOT_PIPELINE = PipelineConfig(
         ),
         StageConfig(
             stage_id=2,
+            kind=StageKind.ACTION_CONTEXT,
+            input_sources=(1,),
+            runner="trt.runner.export:ExportRunner",
+            io=GROOT_EDGE_IO.action_context,
+            engine_subdir="action_context",
+            hooks=StageHooks(
+                process_inputs=f"{_E}.glue:language_to_action_context",
+                plan_export=f"{_E}.action_context:plan_export",
+                compile=f"{_E}.action_context:compile",
+                metadata=f"{_E}.action_context:metadata",
+            ),
+        ),
+        StageConfig(
+            stage_id=3,
             kind=StageKind.ACTION_ROLLOUT,
-            input_sources=(1, 0),
+            input_sources=(2,),
             runner="trt.runner.export:ExportRunner",
             io=GROOT_EDGE_IO.action,
             engine_subdir="action",
             final_output=True,
             hooks=StageHooks(
-                process_inputs=f"{_E}.glue:language_to_action",
+                process_inputs=f"{_E}.glue:action_context_to_action",
                 plan_export=f"{_E}.action:plan_export",
+                compile=f"{_E}.action:compile",
+                metadata=f"{_E}.action:metadata",
             ),
         ),
     ),

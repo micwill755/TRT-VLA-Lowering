@@ -31,7 +31,7 @@ def create_sinusoidal_pos_embedding(  # see openpi `create_sinusoidal_pos_embedd
     sin_input = scaling_factor[None, :] * time[:, None]
     return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
 
-class TRTFixedCategorySpecificLinear(nn.Module):
+class TRTFixedCategorySpecificLinearExportModule(nn.Module):
     """Freeze one GR00T embodiment-specific Linear into a normal Linear.
 
     GR00T stores one weight matrix per robot embodiment and selects it with
@@ -68,7 +68,7 @@ class TRTFixedCategorySpecificLinear(nn.Module):
         x = F.linear(x, self.weight, self.bias)
         return x.reshape(batch_size, seq_len, self.out_features)
 
-class TRTDynamicCategorySpecificLinear(nn.Module):
+class TRTDynamicCategorySpecificLinearExportModule(nn.Module):
     """TensorRT-friendly dynamic version of GR00T CategorySpecificLinear.
 
     Unlike the fixed wrapper, this keeps the full embodiment weight bank and
@@ -106,11 +106,11 @@ class TRTDynamicCategorySpecificLinear(nn.Module):
 class TRTFixedCategorySpecificMLP(nn.Module):
     def __init__(self, mlp: nn.Module, embodiment_id: torch.Tensor):
         super().__init__()
-        self.layer1 = TRTFixedCategorySpecificLinear(
+        self.layer1 = TRTFixedCategorySpecificLinearExportModule(
             mlp.layer1,
             embodiment_id,
         )
-        self.layer2 = TRTFixedCategorySpecificLinear(
+        self.layer2 = TRTFixedCategorySpecificLinearExportModule(
             mlp.layer2,
             embodiment_id,
         )
@@ -121,7 +121,7 @@ class TRTFixedCategorySpecificMLP(nn.Module):
         hidden = F.relu(self.layer1(x))
         return self.layer2(hidden)
 
-class TRTDynamicCategorySpecificMLP(nn.Module):
+class TRTDynamicCategorySpecificMLPExportModule(nn.Module):
     """Dynamic two-layer category-specific MLP used by GR00T.
 
     GR00T state encoders and action decoders are CategorySpecificMLP modules:
@@ -131,19 +131,19 @@ class TRTDynamicCategorySpecificMLP(nn.Module):
 
     def __init__(self, mlp: nn.Module):
         super().__init__()
-        self.layer1 = TRTDynamicCategorySpecificLinear(mlp.layer1)
-        self.layer2 = TRTDynamicCategorySpecificLinear(mlp.layer2)
+        self.layer1 = TRTDynamicCategorySpecificLinearExportModule(mlp.layer1)
+        self.layer2 = TRTDynamicCategorySpecificLinearExportModule(mlp.layer2)
 
     def forward(self, x, embodiment_id):
         hidden = F.relu(self.layer1(x, embodiment_id))
         return self.layer2(hidden, embodiment_id)
 
-class TRTGrootActionEncoder(nn.Module):
+class TRTGrootActionEncoderExportModule(nn.Module):
     def __init__(self, action_encoder: nn.Module, embodiment_id: torch.Tensor):
         super().__init__()
-        self.W1 = TRTFixedCategorySpecificLinear(action_encoder.W1, embodiment_id)
-        self.W2 = TRTFixedCategorySpecificLinear(action_encoder.W2, embodiment_id)
-        self.W3 = TRTFixedCategorySpecificLinear(action_encoder.W3, embodiment_id)
+        self.W1 = TRTFixedCategorySpecificLinearExportModule(action_encoder.W1, embodiment_id)
+        self.W2 = TRTFixedCategorySpecificLinearExportModule(action_encoder.W2, embodiment_id)
+        self.W3 = TRTFixedCategorySpecificLinearExportModule(action_encoder.W3, embodiment_id)
         self.pos_encoding = action_encoder.pos_encoding
 
     def forward(self, actions, timesteps, embodiment_id):
@@ -160,7 +160,7 @@ class TRTGrootActionEncoder(nn.Module):
         hidden = F.silu(self.W2(hidden))
         return self.W3(hidden)
 
-class TRTDynamicGrootActionEncoder(nn.Module):
+class TRTDynamicGrootActionEncoderExportModule(nn.Module):
     """Dynamic GR00T noisy-action encoder.
 
     The original action encoder uses three embodiment-specific linear layers
@@ -171,9 +171,9 @@ class TRTDynamicGrootActionEncoder(nn.Module):
 
     def __init__(self, action_encoder: nn.Module):
         super().__init__()
-        self.W1 = TRTDynamicCategorySpecificLinear(action_encoder.W1)
-        self.W2 = TRTDynamicCategorySpecificLinear(action_encoder.W2)
-        self.W3 = TRTDynamicCategorySpecificLinear(action_encoder.W3)
+        self.W1 = TRTDynamicCategorySpecificLinearExportModule(action_encoder.W1)
+        self.W2 = TRTDynamicCategorySpecificLinearExportModule(action_encoder.W2)
+        self.W3 = TRTDynamicCategorySpecificLinearExportModule(action_encoder.W3)
         self.pos_encoding = action_encoder.pos_encoding
 
     def forward(self, actions, timesteps, embodiment_id):
@@ -188,7 +188,7 @@ class TRTDynamicGrootActionEncoder(nn.Module):
         hidden = F.silu(self.W2(hidden, embodiment_id))
         return self.W3(hidden, embodiment_id)
 
-class ActionStepEncoder(nn.Module):
+class ActionStepEncoderExportModule(nn.Module):
     """Base contract for model-specific action-step encoding.
 
     Subclasses implement forward() to turn noisy actions, timestep, and
@@ -217,7 +217,7 @@ class ActionStepEncoder(nn.Module):
         # velocity shape. Override for models that need reshaping or cropping.
         return velocity
 
-class StaticActionVelocityStep(nn.Module):
+class StaticActionVelocityStepExportModule(nn.Module):
     """One static denoising step shared by VLA action diffusion modules.
 
     The model-specific step_encoder owns the messy part: converting noisy
@@ -229,7 +229,7 @@ class StaticActionVelocityStep(nn.Module):
     def __init__(
         self,
         *,
-        step_encoder: ActionStepEncoder,
+        step_encoder: ActionStepEncoderExportModule,
         action_expert: nn.Module,
         velocity_decoder: nn.Module,
         output_tokens: int,
@@ -272,7 +272,7 @@ class StaticActionVelocityStep(nn.Module):
 
         return self.step_encoder.process_velocity(velocity)
 
-class PrefixKVStepEncoder(ActionStepEncoder):
+class PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
     def __init__(self, action_embedder: nn.Module):
         super().__init__()
         self.action_embedder = action_embedder
@@ -302,7 +302,7 @@ class PrefixKVStepEncoder(ActionStepEncoder):
 
         return expert_args, expert_kwargs, decoder_args, decoder_kwargs
 
-class PI05PrefixKVStepEncoder(ActionStepEncoder):
+class PI05PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
     def __init__(self, core):
         super().__init__()
         self.action_in_proj = core.action_in_proj
@@ -346,7 +346,7 @@ class PI05PrefixKVStepEncoder(ActionStepEncoder):
 
         return (), expert_kwargs, (), {}
 
-class SmolVLAPrefixKVStepEncoder(ActionStepEncoder):
+class SmolVLAPrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
     def __init__(self, core):
         super().__init__()
         self.action_in_proj = core.action_in_proj
@@ -388,7 +388,7 @@ class SmolVLAPrefixKVStepEncoder(ActionStepEncoder):
         suffix_out = outputs_embeds[1]
         return suffix_out[:, -output_tokens:]
 
-class AlpamayoPrefixKVStepEncoder(ActionStepEncoder):
+class AlpamayoPrefixKVStepEncoderExportModule(ActionStepEncoder):
     def __init__(self, model):
         super().__init__()
         self.action_in_proj = model.action_in_proj
@@ -413,7 +413,7 @@ class AlpamayoPrefixKVStepEncoder(ActionStepEncoder):
     def process_velocity(self, velocity):
         return velocity.view(-1, *self.action_space_dims)
 
-class GrootDiTStepEncoder(ActionStepEncoder):
+class GrootDiTStepEncoderExportModule(ActionStepEncoderExportModule):
     def __init__(self, action_head, embodiment_id: torch.Tensor | None = None):
         super().__init__()
         if embodiment_id is None:
@@ -422,10 +422,10 @@ class GrootDiTStepEncoder(ActionStepEncoder):
         else:
             # Keep embodiment_id as a runtime input while replacing GR00T's
             # category-specific modules with Torch-TRT-friendly dynamic wrappers.
-            self.state_encoder = TRTDynamicCategorySpecificMLP(
+            self.state_encoder = TRTDynamicCategorySpecificMLPExportModule(
                 action_head.state_encoder
             )
-            self.action_encoder = TRTDynamicGrootActionEncoder(
+            self.action_encoder = TRTDynamicGrootActionEncoderExportModule(
                 action_head.action_encoder
             )
         self.future_tokens = action_head.future_tokens
