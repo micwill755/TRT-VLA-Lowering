@@ -20,7 +20,8 @@ Execution (VLAExportPipeline)
     2. for stage in config.stages:
            runner.run(ctx)                     generic TRT compile loop
                hooks.process_inputs(...)      optional inter-stage glue
-               hooks.plan_export(...)         clone subgraph, build typed ExportPlan
+               hooks.plan_export(...)         clone subgraph, build ExportPlan
+               hooks.compile(...)             trace → TRT engine (per stage)
                [trace → compile → artifacts]
                hooks.metadata / save_artifacts / after_stage
            ctx.artifacts[f"stage_{id}"] = result
@@ -60,6 +61,7 @@ class StageHooks:
     """Per-stage hooks; export runners use compile hooks, inference runners use glue/parity."""
 
     plan_export: str | None = None
+    compile: str | None = None
     run: str | None = None
     process_inputs: str | None = None
     save_artifacts: str | None = None

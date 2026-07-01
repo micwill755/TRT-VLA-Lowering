@@ -5,12 +5,7 @@ from pathlib import Path
 import torch
 
 from trt.context import StageResult
-from trt.export_compile import compile_export_plan
-from trt.hooks.export import (
-    ExportPlanUnion,
-    LanguageExportPlan,
-    VisionExportPlan,
-)
+from trt.hooks.export.plan import ExportPlan
 from trt.hooks.resolve import resolve
 from trt.runner.base import StageRunner
 from trt.utils import free_cuda_memory
@@ -32,12 +27,16 @@ class ExportRunner(StageRunner):
             raise ValueError(
                 f"export stage {self.stage_cfg.stage_id} ({self.stage_cfg.kind}) missing plan_export hook"
             )
-        plan: ExportPlanUnion = resolve(self.hooks.plan_export)(ctx, stage_inputs)
+        plan: ExportPlan = resolve(self.hooks.plan_export)(ctx, stage_inputs)
 
         with torch.no_grad():
             eager_output = plan.module(*plan.sample_inputs)
 
-        engine_path = compile_export_plan(plan)
+        if not self.hooks.compile:
+            raise ValueError(
+                f"export stage {self.stage_cfg.stage_id} ({self.stage_cfg.kind}) missing compile hook"
+            )
+        engine_path = resolve(self.hooks.compile)(plan, eager_output)
 
         metadata: dict = {}
         if self.hooks.metadata:
@@ -48,7 +47,7 @@ class ExportRunner(StageRunner):
 
         result = StageResult(
             engine_path=Path(engine_path),
-            spec=plan if isinstance(plan, LanguageExportPlan) else None,
+            spec=plan,
             tensors=self._named_outputs(plan, eager_output),
             metadata=metadata,
         )
@@ -62,7 +61,7 @@ class ExportRunner(StageRunner):
         return result
 
     @staticmethod
-    def _named_outputs(plan: ExportPlanUnion, output) -> dict[str, torch.Tensor]:
+    def _named_outputs(plan: ExportPlan, output) -> dict[str, torch.Tensor]:
         names = plan.output_names
         if isinstance(output, (tuple, list)):
             tensors = {name: value for name, value in zip(names, output)}
@@ -71,12 +70,13 @@ class ExportRunner(StageRunner):
         else:
             tensors = {"output": output}
 
-        if isinstance(plan, VisionExportPlan):
-            if "image_embeddings" in tensors and "image_embs" not in tensors:
-                tensors["image_embs"] = tensors["image_embeddings"]
-        if isinstance(plan, LanguageExportPlan):
-            if "lm_hidden_states" in tensors and "hidden_states" not in tensors:
-                tensors["hidden_states"] = tensors["lm_hidden_states"]
-            elif isinstance(output, (tuple, list)) and len(output) > 1 and "hidden_states" not in tensors:
-                tensors["hidden_states"] = output[1]
+        for src, dst in plan.args.get("tensor_aliases", {}).items():
+            if src in tensors and dst not in tensors:
+                tensors[dst] = tensors[src]
+
+        extra = plan.args.get("extra_tensors", {})
+        for name, value in extra.items():
+            if isinstance(value, torch.Tensor):
+                tensors[name] = value
+
         return tensors

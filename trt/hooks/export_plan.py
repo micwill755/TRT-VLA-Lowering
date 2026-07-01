@@ -1,25 +1,25 @@
-"""Typed staged export plans and compile entrypoints."""
+from __future__ import annotations
 
-from trt.export_compile import compile_export_plan
-from trt.hooks.export import (
-    ActionContextExportPlan,
-    ActionExportPlan,
-    ExportPlanBase,
-    ExportPlanUnion,
-    LanguageExportPlan,
-    VisionExportPlan,
-)
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
-# Backward-compatible alias (prefer typed plans).
-ExportPlan = ExportPlanBase
+import torch
+import torch.nn as nn
 
-__all__ = [
-    "ActionContextExportPlan",
-    "ActionExportPlan",
-    "ExportPlan",
-    "ExportPlanBase",
-    "ExportPlanUnion",
-    "LanguageExportPlan",
-    "VisionExportPlan",
-    "compile_export_plan",
-]
+
+@dataclass
+class ExportPlan:
+    """Single export plan for all stages. Stage-specific fields live in ``args``."""
+
+    module: nn.Module
+    sample_inputs: tuple[torch.Tensor, ...]
+    input_names: tuple[str, ...]
+    output_names: tuple[str, ...]
+    engine_dir: Path
+    engine_file: str
+    args: dict[str, Any] = field(default_factory=dict)
+    trt_settings: dict[str, Any] = field(default_factory=dict)
+    cleanup_modules: tuple[nn.Module, ...] = ()
+    model_type: str = ""
+    component: str = ""

@@ -3,13 +3,11 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-
 def _as_tensor(x):
     """Unwrap tuple/list outputs from patched attention modules."""
     if isinstance(x, (tuple, list)):
         return x[0]
     return x
-
 
 def gather_last_token_hidden(
     hidden_states: torch.Tensor,
@@ -101,13 +99,3 @@ class CausalLMExportModule(nn.Module):
             dim=0,
         )
         return logits, context_hidden, prefix_k, prefix_v
-
-
-# Backward-compatible alias for legacy export paths.
-PluginLMForCausalLM = CausalLMExportModule
-
-__all__ = [
-    "CausalLMExportModule",
-    "PluginLMForCausalLM",
-    "gather_last_token_hidden",
-]

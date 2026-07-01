@@ -1,4 +1,4 @@
-"""PI0.5 Edge-LLM compile profile."""
+"""SmolVLA Edge-LLM compile profile."""
 
 from __future__ import annotations
 
@@ -11,33 +11,29 @@ import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
 
-from lerobot.policies.pi05 import PI05Policy
+from lerobot.policies.smolvla import SmolVLAPolicy
 
 from trt.data import prepare_policy_batch
 from trt.edge_llm_runtime import run_llm_inference_runtime_smoke
-from trt.export.pi05 import (
-    PALIGEMMA_TOKENIZER_ID,
-    Pi05ExportHooks,
-    action_output_dim,
-)
+from trt.export.smolvla import SmolVLAExportHooks
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
-from trt.inference.pi05 import (
-    run_inference_pi05_engines,
-    run_inference_pytorch_pi05,
-    run_inference_trt_plugin,
+from trt.inference.smolvla import (
+    run_inference_pytorch_smolvla,
+    run_inference_smolvla_engines,
 )
+
 from trt.io_spec import PI05_EDGE_IO
 from trt.measure import compute_action_parity_metrics
-
 from trt.profile import InMemoryHandles, SerializedHandles, VLAProfile
 
-class Pi05Profile(VLAProfile):
-    name = "pi05"
-    model_id = "lerobot/pi05_libero"
-    engine_dir_default = "/tmp/pi05_edge_llm"
-    display_name = "PyTorch PI0.5"
 
-    policy_cls = PI05Policy
+class SmolVLAProfile(VLAProfile):
+    name = "smolvla"
+    model_id = "lerobot/smolvla_base"
+    engine_dir_default = "/tmp/smolvla_edge_llm"
+    display_name = "PyTorch SmolVLA"
+
+    policy_cls = SmolVLAPolicy
     io = PI05_EDGE_IO
     fill_missing_cameras = True
 
@@ -50,8 +46,13 @@ class Pi05Profile(VLAProfile):
     def _init_models(self) -> None:
         self.model = self.policy.model.to(self.device).eval()
 
+    def _processor_pretrained_path(self) -> str | None:
+        return self.model_id
+
     def _init_tokenizers(self) -> None:
-        self.text_tok = AutoTokenizer.from_pretrained(PALIGEMMA_TOKENIZER_ID)
+        super()._init_tokenizers()
+        if self.text_tok is None:
+            self.text_tok = AutoTokenizer.from_pretrained(self.policy.model.config.vlm_model_name)
 
     def prepare_compile_inputs(
         self,
@@ -67,9 +68,9 @@ class Pi05Profile(VLAProfile):
             fill_missing=self.fill_missing_cameras,
         )
 
-    def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> Pi05ExportHooks:
+    def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> SmolVLAExportHooks:
         del args
-        return Pi05ExportHooks(
+        return SmolVLAExportHooks(
             io=self.io,
             tokenizer=tokenizer,
             vision_trt_settings=self.vision_trt_settings,
@@ -115,7 +116,7 @@ class Pi05Profile(VLAProfile):
         vision_module=None,
     ) -> tuple[torch.Tensor, dict, float]:
         del vision_module
-        return run_inference_pytorch_pi05(
+        return run_inference_pytorch_smolvla(
             model,
             policy,
             compile_inputs,
@@ -134,25 +135,15 @@ class Pi05Profile(VLAProfile):
         seed: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict, float]:
-        if isinstance(handles, SerializedHandles):
-            return run_inference_pi05_engines(
-                model,
-                policy,
-                compile_inputs,
-                vision_runner=handles.vision,
-                language_runner=handles.language,
-                diffusion_runner=handles.action,
-                seed=seed,
-                device=device,
-                io=self.io,
-            )
-        return run_inference_trt_plugin(
+        if handles.vision is None:
+            raise RuntimeError("SmolVLA serialized inference requires loaded vision handles")
+        return run_inference_smolvla_engines(
             model,
             policy,
             compile_inputs,
-            trt_vision=handles.vision,
-            trt_lm=handles.language,
-            trt_diffusion=handles.action,
+            vision_runner=handles.vision,
+            language_runner=handles.language,
+            diffusion_runner=handles.action,
             seed=seed,
             device=device,
             io=self.io,
@@ -164,9 +155,5 @@ class Pi05Profile(VLAProfile):
         target_actions: torch.Tensor,
         policy: Any,
     ) -> dict[str, float]:
-        from trt.export.pi05 import crop_policy_actions
-
-        return compute_action_parity_metrics(
-            crop_policy_actions(policy, pred_actions),
-            crop_policy_actions(policy, target_actions),
-        )
+        del policy
+        return compute_action_parity_metrics(pred_actions, target_actions)

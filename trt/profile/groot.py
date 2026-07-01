@@ -10,7 +10,6 @@ from lerobot.policies.groot.groot_n1 import DEFAULT_TOKENIZER_ASSETS_REPO
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
 from trt.data import create_pil_messages, prepare_model_inputs
-from trt.export.groot import GrootExportHooks
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
 from trt.helper import get_processor
 from trt.io_spec import GROOT_EDGE_IO
@@ -31,10 +30,40 @@ class GrootProfile(VLAProfile):
     action_trt_settings = dict(ACTION_TRT_SETTINGS)
 
     def _init_policy(self) -> None:
-        self.policy = self.policy_cls.from_pretrained(self.model_id).to(self.device).eval()
+        self.config = GrootConfig(
+            base_model_path=self.model_id,
+            device=str(self.device),
+            embodiment_tag="new_embodiment",  # or "gr1", "oxe_droid", etc.
+            chunk_size=50,
+            n_action_steps=50,
+            max_state_dim=64,
+            max_action_dim=32,
+            image_size=(224, 224),
+            tokenizer_assets_repo="lerobot/eagle2hg-processor-groot-n1p5",
+            # Match lerobot/libero camera keys (see Test/trt/data.py IMAGE_KEYS)
+            input_features={
+                "observation.images.image": PolicyFeature(
+                    type=FeatureType.VISUAL, shape=(3, 224, 224)
+                ),
+                "observation.images.image2": PolicyFeature(
+                    type=FeatureType.VISUAL, shape=(3, 224, 224)
+                ),
+                OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(7,)),
+            },
+            output_features={
+                # GROOT predicts action chunks, not a single 7-d vector
+                ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(50, 32)),
+            },
+        )
+        self.policy = GrootPolicy(self.config).to(self.device).eval()
 
     def _init_models(self) -> None:
-        self.model = self.policy._groot_model.to(self.device).eval()
+        self.lm = self.policy.backbone.eagle_model.language_model
+        self.vision = self.policy.backbone.eagle_model.vision_model
+        self.action = self.policy.action_head
+
+        force_hf_attention(self.vision, "eager")
+        force_hf_attention(self.lm, "eager")
 
     def prepare_compile_inputs(
         self,
@@ -42,7 +71,6 @@ class GrootProfile(VLAProfile):
         data: dict[str, Any],
         args: argparse.Namespace,
     ) -> dict[str, Any]:
-        del args
         pil_messages = create_pil_messages(data)
         cache_dir = HF_LEROBOT_HOME / DEFAULT_TOKENIZER_ASSETS_REPO
         processor = get_processor(
@@ -70,17 +98,6 @@ class GrootProfile(VLAProfile):
         )
 
     def get_tokenizer(self, *, policy: Any = None, args: argparse.Namespace | None = None) -> Any:
-        del policy, args
         if self.text_tok is None:
             raise RuntimeError("prepare_compile_inputs must run before get_tokenizer")
         return self.text_tok
-
-    def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> GrootExportHooks:
-        del args
-        return GrootExportHooks(
-            io=self.io,
-            tokenizer=tokenizer,
-            vision_trt_settings=self.vision_trt_settings,
-            action_trt_settings=self.action_trt_settings,
-        )
-

@@ -27,6 +27,7 @@ GROOT_PIPELINE = PipelineConfig(
             engine_subdir="visual",
             hooks=StageHooks(
                 plan_export=f"{_E}.vision:plan_export",
+                compile=f"{_E}.vision:compile",
                 metadata=f"{_E}.vision:metadata",
             ),
         ),
@@ -40,6 +41,7 @@ GROOT_PIPELINE = PipelineConfig(
             hooks=StageHooks(
                 process_inputs=f"{_E}.glue:vision_to_language",
                 plan_export=f"{_E}.language:plan_export",
+                compile=f"{_E}.language:compile",
                 save_artifacts=f"{_E}.language:save_artifacts",
                 metadata=f"{_E}.language:metadata",
             ),
