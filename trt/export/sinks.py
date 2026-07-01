@@ -16,10 +16,10 @@ from trt.export.mode import ExportMode
 from trt.export.settings import in_memory_settings
 from trt.language import (
     LanguageEngineSpec,
-    PluginLMForCausalLM,
     compile_language_trt_with_plugin,
     save_language_engine_for_edge_llm,
 )
+from trt.modules.export.language import CausalLMExportModule
 from trt.plugin_utils import patch_vision_attention, restore_attention
 from trt.vision import VisionEngineSpec, VisualFixedInput, nchw_to_hwc, save_visual_engine_for_edge_llm
 
@@ -123,7 +123,7 @@ class InMemorySink:
         if self.language_trt_settings:
             settings.update(self.language_trt_settings)
 
-        wrapper = PluginLMForCausalLM(
+        wrapper = CausalLMExportModule(
             spec.decoder,
             spec.lm_head,
             select_layer=spec.select_layer,

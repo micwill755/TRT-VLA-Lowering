@@ -1,8 +1,10 @@
-# trt/executor/models/molmo2/vision.py
+# trt/models/molmo2/export/vision.py
 
+from trt.hooks.export.vision_plan import VisionExportPlan
 from trt.modules.export.vision import TokenPoolingExportModule
 
-def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
+
+def plan_export(ctx, stage_inputs: dict) -> VisionExportPlan:
     backbone = ctx.model.model
     media, pooling = backbone.merge_visual_inputs(
         stage_inputs["images"],
@@ -16,12 +18,11 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
         sample_pooling_indices=pooling,
     ).eval().to(ctx.device)
 
-    return ExportPlan(
+    return VisionExportPlan(
         module=module,
         sample_inputs=(media, pooling),
         engine_dir=ctx.engine_root / "visual",
         engine_file="visual.engine",
         input_names=("media", "pooling_indices"),
         output_names=("image_embeddings",),
-        ...
     )

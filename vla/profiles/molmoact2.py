@@ -11,14 +11,8 @@ import torch.nn as nn
 from lerobot.policies.molmoact2 import MolmoAct2Policy
 
 from trt.data import prepare_policy_batch
-from trt.export import MolmoAct2ExportHooks
-from trt.export.molmoact2 import (
-    SerializedMolmoAct2Action,
-    SerializedMolmoAct2Backbone,
-)
-from trt.export.molmoact2_pipeline import MolmoAct2ExportPipeline
+from trt.export.molmoact2 import MolmoAct2ExportHooks
 from trt.export.settings import ACTION_TRT_SETTINGS
-from trt.inference import MolmoAct2InferenceHooks
 from trt.inference.molmoact2 import (
     run_inference_molmoact2_engines,
     run_inference_pytorch_molmoact2,
@@ -27,7 +21,7 @@ from trt.inference.molmoact2 import (
 from trt.io_spec import MOLMOACT2_EDGE_IO
 from trt.measure import compute_action_parity_metrics
 
-from vla.profile import InMemoryHandles, SerializedHandles, SerializedStageSpec, VLAProfile
+from trt.profile import InMemoryHandles, SerializedHandles, VLAProfile
 
 
 class MolmoAct2Profile(VLAProfile):
@@ -39,47 +33,31 @@ class MolmoAct2Profile(VLAProfile):
     policy_cls = MolmoAct2Policy
     io = MOLMOACT2_EDGE_IO
     fill_missing_cameras = False
-    prefer_same_iter_reference = True
-    in_memory_trt_stage = "language"
-    serialized_benchmark_stage = "language"
-
-    serialized_stages = (
-        SerializedStageSpec("language", "language", SerializedMolmoAct2Backbone),
-        SerializedStageSpec("action", "action", SerializedMolmoAct2Action),
-    )
 
     action_trt_settings = dict(ACTION_TRT_SETTINGS)
 
-    def on_run_start(self, device: torch.device, args: argparse.Namespace) -> None:
-        del device, args
+    def _init_policy(self) -> None:
+        self.policy = self.policy_cls.from_pretrained(self.model_id).to(self.device).eval()
+        if self.policy.config.inference_action_mode is None:
+            self.policy.config.inference_action_mode = "continuous"
 
-    def load_policy(self, model_id: str, device: torch.device) -> tuple[Any, nn.Module]:
-        from trt.utils import load_policy
-
-        policy = load_policy(self.policy_cls, model_id, device).to(device).eval()
-        if policy.config.inference_action_mode is None:
-            policy.config.inference_action_mode = "continuous"
-        model = policy.model.to(device).eval()
-        return policy, model
+    def _init_models(self) -> None:
+        self.model = self.policy.model.to(self.device).eval()
+        self.vision = self.model.model.vision_backbone
 
     def prepare_compile_inputs(
         self,
         *,
-        policy: Any,
         data: dict[str, Any],
-        device: torch.device,
         args: argparse.Namespace,
     ) -> dict[str, Any]:
         return prepare_policy_batch(
-            policy,
+            self.policy,
             data,
-            device,
+            self.device,
             args.model_id,
             fill_missing=self.fill_missing_cameras,
         )
-
-    def export_pipeline_cls(self):
-        return MolmoAct2ExportPipeline
 
     def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> MolmoAct2ExportHooks:
         del tokenizer, args
@@ -87,9 +65,6 @@ class MolmoAct2Profile(VLAProfile):
             io=self.io,
             action_trt_settings=self.action_trt_settings,
         )
-
-    def make_inference_hooks(self) -> MolmoAct2InferenceHooks:
-        return MolmoAct2InferenceHooks()
 
     def run_inference_eager(
         self,

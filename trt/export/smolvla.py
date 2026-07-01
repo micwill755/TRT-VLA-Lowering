@@ -21,7 +21,8 @@ from trt.export.mode import ExportMode
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
 from trt.export.sinks import ExportSink
 from trt.io_spec import PI05_EDGE_IO, PipelineIOSpec
-from trt.language import PluginLMForCausalLM, language_head_dim
+from trt.modules.export.language import CausalLMExportModule
+from trt.language import language_head_dim
 from trt.language_builders import build_smolvla_language_export_params
 from trt.measure import compare_language, compute_action_parity_metrics, tensor_error_metrics
 from trt.packing import pack_smolvla_prefix
@@ -209,7 +210,7 @@ def run_smolvla_plugin_language_eager(
         enable_bidirectional_prefill=1,
         name="smolvla",
     )
-    lm_wrapper = PluginLMForCausalLM(decoder, lm_head).to(device=device, dtype=torch.float16).eval()
+    lm_wrapper = CausalLMExportModule(decoder, lm_head).to(device=device, dtype=torch.float16).eval()
 
     kv_caches = [
         torch.zeros(

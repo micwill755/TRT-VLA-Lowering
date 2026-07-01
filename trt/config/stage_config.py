@@ -20,7 +20,7 @@ Execution (VLAExportPipeline)
     2. for stage in config.stages:
            runner.run(ctx)                     generic TRT compile loop
                hooks.process_inputs(...)      optional inter-stage glue
-               hooks.plan_export(...)         clone subgraph, build ExportPlan
+               hooks.plan_export(...)         clone subgraph, build typed ExportPlan
                [trace → compile → artifacts]
                hooks.metadata / save_artifacts / after_stage
            ctx.artifacts[f"stage_{id}"] = result
@@ -37,7 +37,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from trt.io_spec import ComponentIOSpec
+from trt.io_spec import ComponentIOSpec, PipelineIOSpec
+
 
 class StageKind(str, Enum):
     VISION_ENCODE = "vision_encode"
@@ -56,13 +57,14 @@ class PipelineHooks:
 
 @dataclass(frozen=True)
 class StageHooks:
-    """Per-stage export hooks invoked by the generic runner."""
+    """Per-stage hooks; export runners use compile hooks, inference runners use glue/parity."""
 
-    plan_export: str                # required: build ExportPlan for TRT trace
-    process_inputs: str | None = None   # glue upstream StageResults → stage inputs
-    save_artifacts: str | None = None   # sidecars (tokenizer, embedding table, ...)
-    metadata: str | None = None         # dict for downstream stages
-    after_stage: str | None = None      # optional per-stage parity
+    plan_export: str | None = None
+    run: str | None = None
+    process_inputs: str | None = None
+    save_artifacts: str | None = None
+    metadata: str | None = None
+    after_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,8 +83,10 @@ class StageConfig:
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Frozen export topology for one VLA (e.g. GROOT_PIPELINE, MOLMO2_PIPELINE)."""
+    """Frozen stage graph for one VLA (export, inference, or both)."""
 
     model_type: str
     stages: tuple[StageConfig, ...]
     hooks: PipelineHooks = field(default_factory=PipelineHooks)
+    use_legacy: bool = False
+    io: PipelineIOSpec | None = None

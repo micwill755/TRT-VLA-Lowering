@@ -182,15 +182,6 @@ def make_smolvla_runner_inputs(
 
 # pi05 utils ----
 
-def free_cuda_memory(*objs: object) -> None:
-    """Drop references and return cached GPU memory to the allocator."""
-    for obj in objs:
-        del obj
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
 def clone_hf_module_for_export(
     module: nn.Module,
     device: torch.device,

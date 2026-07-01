@@ -15,19 +15,16 @@ from lerobot.policies.smolvla import SmolVLAPolicy
 
 from trt.data import prepare_policy_batch
 from trt.edge_llm_runtime import run_llm_inference_runtime_smoke
-from trt.export.smolvla import SerializedSmolVLAVision, SmolVLAExportHooks
+from trt.export.smolvla import SmolVLAExportHooks
 from trt.export.settings import ACTION_TRT_SETTINGS, VISION_TRT_SETTINGS
 from trt.inference.smolvla import (
-    SmolVLAInferenceHooks,
     run_inference_pytorch_smolvla,
     run_inference_smolvla_engines,
 )
+
 from trt.io_spec import PI05_EDGE_IO
 from trt.measure import compute_action_parity_metrics
-from trt.serialize import SerializedPI05Action, SerializedPI05Language
-from trt.utils import load_policy
-
-from vla.profile import InMemoryHandles, SerializedHandles, SerializedStageSpec, VLAProfile
+from trt.profile import InMemoryHandles, SerializedHandles, VLAProfile
 
 
 class SmolVLAProfile(VLAProfile):
@@ -39,41 +36,32 @@ class SmolVLAProfile(VLAProfile):
     policy_cls = SmolVLAPolicy
     io = PI05_EDGE_IO
     fill_missing_cameras = True
-    prefer_same_iter_reference = True
-
-    serialized_stages = (
-        SerializedStageSpec("vision", "visual", SerializedSmolVLAVision),
-        SerializedStageSpec("language", "language", SerializedPI05Language),
-        SerializedStageSpec("action", "action", SerializedPI05Action),
-    )
 
     vision_trt_settings = dict(VISION_TRT_SETTINGS)
     action_trt_settings = dict(ACTION_TRT_SETTINGS)
 
-    def load_policy(self, model_id: str, device: torch.device) -> tuple[Any, nn.Module]:
-        policy = load_policy(self.policy_cls, model_id, device).to(device).eval()
-        model = policy.model.to(device).eval()
-        return policy, model
+    def _init_policy(self) -> None:
+        self.policy = self.policy_cls.from_pretrained(self.model_id).to(self.device).eval()
+
+    def _init_models(self) -> None:
+        self.model = self.policy.model.to(self.device).eval()
+
+    def _init_tokenizers(self) -> None:
+        self.text_tok = AutoTokenizer.from_pretrained(self.policy.model.config.vlm_model_name)
 
     def prepare_compile_inputs(
         self,
         *,
-        policy: Any,
         data: dict[str, Any],
-        device: torch.device,
         args: argparse.Namespace,
     ) -> dict[str, Any]:
         return prepare_policy_batch(
-            policy,
+            self.policy,
             data,
-            device,
+            self.device,
             args.model_id,
             fill_missing=self.fill_missing_cameras,
         )
-
-    def get_tokenizer(self, *, policy: Any, args: argparse.Namespace) -> Any:
-        del args
-        return AutoTokenizer.from_pretrained(policy.model.config.vlm_model_name)
 
     def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> SmolVLAExportHooks:
         del args
@@ -85,19 +73,13 @@ class SmolVLAProfile(VLAProfile):
             max_generate_length=0,
         )
 
-    def make_inference_hooks(self) -> SmolVLAInferenceHooks:
-        return SmolVLAInferenceHooks()
-
-    def post_export(
-        self,
-        runner: Any,
-        engine_root: str | None,
-    ) -> int | None:
-        args = runner.args
-        if not args.run_cpp_smoke or engine_root is None:
+    def post_export(self, ctx: Any, engine_root: str | None = None) -> int | None:
+        args = ctx.args
+        root = engine_root or str(ctx.engine_root)
+        if not args.run_cpp_smoke or root is None:
             return None
 
-        smoke_input = pathlib.Path(engine_root) / "runtime_smoke" / "input.json"
+        smoke_input = pathlib.Path(root) / "runtime_smoke" / "input.json"
         if not smoke_input.exists():
             raise FileNotFoundError(f"Missing runtime smoke input: {smoke_input}")
 

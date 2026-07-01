@@ -1,3 +1,25 @@
-from trt.hooks.export.export_plan import ExportPlan
+"""Typed staged export plans and compile entrypoints."""
 
-__all__ = ["ExportPlan"]
+from trt.export_compile import compile_export_plan
+from trt.hooks.export import (
+    ActionContextExportPlan,
+    ActionExportPlan,
+    ExportPlanBase,
+    ExportPlanUnion,
+    LanguageExportPlan,
+    VisionExportPlan,
+)
+
+# Backward-compatible alias (prefer typed plans).
+ExportPlan = ExportPlanBase
+
+__all__ = [
+    "ActionContextExportPlan",
+    "ActionExportPlan",
+    "ExportPlan",
+    "ExportPlanBase",
+    "ExportPlanUnion",
+    "LanguageExportPlan",
+    "VisionExportPlan",
+    "compile_export_plan",
+]

@@ -25,7 +25,6 @@ from trt.data import (
 
 from trt.plugin_utils import load_plugins_for_trt
 from trt.profile import VLAProfile
-from trt.pipeline import VLAExportPipeline
 
 class MolmoAct2Profile(VLAProfile):
     name = "molmo2"

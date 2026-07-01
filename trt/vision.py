@@ -40,40 +40,6 @@ DEFAULT_VISION_TRT_SETTINGS: dict[str, Any] = {
     "offload_module_to_cpu": True,
 }
 
-
-@dataclass
-class VisionEngineSpec:
-    """Model-specific vision export configuration for ``save_visual_engine_for_edge_llm``."""
-
-    visual_vision_model: nn.Module
-    patch_vision_model: nn.Module
-    projector: nn.Module
-
-    input_dtype: torch.dtype
-    patch_batch_size: int
-    patch_seq_len: int
-    vocab_size: int
-    image_token_id: int
-    config_seq_len: int = 0
-    output_hidden_size: int = 0
-    # VitRunner flat output [B*S, H] and per-image [B, S, H]; set by save_visual_engine_for_edge_llm.
-    image_embed_flat_shape: tuple[int, int] = ()
-    image_embed_shape: tuple[int, int, int] = ()
-
-    select_layer: int = -1
-    pixel_shuffle: bool = False
-    downsample_ratio: float = 0.5
-    force_float32_input: bool = False
-    cast_output_to_input_dtype: bool = False
-    vision_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    patch_name: str = "SigLIP"
-    allow_attention_mask: bool = False
-
-    io: ComponentIOSpec = VLA_VISION_IO
-    trt_settings: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_VISION_TRT_SETTINGS))
-    model_type: str = "vit"
-
 def nchw_to_hwc(pixel_values: torch.Tensor) -> torch.Tensor:
     """Convert LeRobot/HF NCHW pixels to VitRunner HWC layout.
 

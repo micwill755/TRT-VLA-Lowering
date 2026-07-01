@@ -1,4 +1,4 @@
-# trt/executor/models/molmo2/pipeline.py
+# trt/models/molmo2/pipelines.py
 
 from trt.config.stage_config import (
     PipelineConfig,
@@ -8,7 +8,7 @@ from trt.config.stage_config import (
     StageKind,
 )
 
-_M = "trt.executor.models.molmo2"
+_M = "trt.models.molmo2.export"
 
 MOLMO2_PIPELINE = PipelineConfig(
     model_type="MolmoAct2",
@@ -23,11 +23,9 @@ MOLMO2_PIPELINE = PipelineConfig(
             runner="trt.runner.export:ExportRunner",
             io=...,
             hooks=StageHooks(
-                plan_export=f"{_M}.vision:plan_export",   # TokenPoolingExportModule
+                plan_export=f"{_M}.vision:plan_export",
                 metadata=f"{_M}.vision:metadata",
             ),
         ),
-        # language + action hooks differ too, but runner is identical
-        ...
     ),
 )

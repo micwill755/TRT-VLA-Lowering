@@ -74,6 +74,7 @@ class InferenceContext:
 
     extras: dict[str, Any] = field(default_factory=dict)
     stage_ms: dict[str, float] = field(default_factory=dict)
+    stage_results: dict[int, Any] = field(default_factory=dict)
     engine_root: Path | None = None
 
 

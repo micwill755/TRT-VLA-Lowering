@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vla.profile import VLAProfile
+from trt.profile import VLAProfile
 
 MODEL_REGISTRY: dict[str, str] = {
     "groot": "vla.profiles.groot:GrootProfile",
@@ -12,7 +12,7 @@ MODEL_REGISTRY: dict[str, str] = {
 }
 
 
-def _load_profile_cls(name: str) -> type[VLAProfile]:
+def get_profile_class(name: str) -> type[VLAProfile]:
     try:
         target = MODEL_REGISTRY[name]
     except KeyError as exc:
@@ -26,5 +26,6 @@ def _load_profile_cls(name: str) -> type[VLAProfile]:
     return getattr(module, class_name)
 
 
-def get_profile(name: str) -> VLAProfile:
-    return _load_profile_cls(name)()
+def get_profile(name: str) -> type[VLAProfile]:
+    """Return the profile class (instantiate with device + model_id in the orchestrator)."""
+    return get_profile_class(name)

@@ -21,14 +21,11 @@ class StageContext:
 
     # filled by stages
     artifacts: dict[str, Any] = field(default_factory=dict)
+    export_state: dict[str, Any] = field(default_factory=dict)
     handles: dict[str, Any] = field(default_factory=dict)
 
-@dataclass
-class StageResult:
-    engine_path: Path | None = None
-    spec: Any = None
-    tensors: dict[str, torch.Tensor] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+from trt.context import StageResult
+
 
 class StageRunner(ABC):
     @abstractmethod

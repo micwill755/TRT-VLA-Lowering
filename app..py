@@ -1,31 +1,34 @@
 from __future__ import annotations
-from pathlib import Path
 
-import sys
 import argparse
-import torch
+import sys
+from pathlib import Path
 
 _TEST_ROOT = Path(__file__).resolve().parents[1]
 _VLA_ROOT = Path(__file__).resolve().parent
 
 while str(_VLA_ROOT) in sys.path:
-    sys.path.remove(_VLA_ROOT)
+    sys.path.remove(str(_VLA_ROOT))
 if str(_TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(_TEST_ROOT))
 
-from vla.edge_compile_runner import EdgeCompileRunner
-from vla.profiles import MODEL_REGISTRY, get_profile
+from vla.edge_orchestrator import EdgeOrchestrator
+from vla.profiles import get_profile
+
+def build_entry_parser() -> argparse.ArgumentParser:
+    from vla.profiles import MODEL_REGISTRY
+
+    known = ", ".join(sorted(MODEL_REGISTRY))
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--model", required=True, help=f"VLA profile ({known})")
+    return parser
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--model", required=True)
-    entry, rest = p.parse_known_args(argv)
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-
-    profile = get_profile(entry.model)
-    args = EdgeCompileRunner.build_arg_parser(profile).parse_args(rest)
-    return EdgeCompileRunner(device, profile, args).run()
+    entry, rest = build_entry_parser().parse_known_args(argv)
+    profile_cls = get_profile(entry.model)
+    args = EdgeOrchestrator.build_arg_parser(profile_cls).parse_args(rest)
+    return EdgeOrchestrator(profile_cls, args).run()
 
 if __name__ == "__main__":
     raise SystemExit(main())
