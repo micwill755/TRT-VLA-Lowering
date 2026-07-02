@@ -22,9 +22,9 @@ def build_entry_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     entry, rest = build_entry_parser().parse_known_args(argv)
-    profile_cls = get_profile(entry.model)
-    args = EdgeOrchestrator.build_arg_parser(profile_cls).parse_args(rest)
-    return EdgeOrchestrator(profile_cls, args).run()
+    profile = get_profile(entry.model)
+    args = EdgeOrchestrator.build_arg_parser(profile).parse_args(rest)
+    return EdgeOrchestrator(profile, args).run()
 
 
 if __name__ == "__main__":

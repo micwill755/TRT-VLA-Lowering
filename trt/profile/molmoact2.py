@@ -59,6 +59,14 @@ class MolmoAct2Profile(VLAProfile):
         force_hf_attention(self.vision, "eager")
         force_hf_attention(self.lm, "eager")
 
+    def _init_tokenizers(self) -> None:
+        pack = next(
+            s for s in self.pre_processor.steps
+            if isinstance(s, MolmoAct2PackInputsProcessorStep)
+        )
+        self.text_tokenizer = pack.processor.tokenizer
+        self.action_tokenizer = pack.action_processor or getattr(self.policy, "action_tokenizer", None)
+
     def prepare_compile_inputs(
         self,
         *,

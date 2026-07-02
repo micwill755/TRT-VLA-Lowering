@@ -14,17 +14,16 @@ from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STATE
 from trt.data import create_pil_messages, prepare_model_inputs
 from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
 from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
-from trt.helper import get_processor
 from trt.io_spec import GROOT_EDGE_IO
 from trt.profile import VLAProfile
 from trt.utils import force_hf_attention
 
 class GrootProfile(VLAProfile):
-    name = "groot"
+    name = "gr00t"
     pipeline_model_type = "Gr00tN1d7"
     model_id = "nvidia/GR00T-N1.5-3B"
     engine_dir_default = "/tmp/groot_edge_llm"
-    display_name = "PyTorch GR00T"
+    display_name = "gr00t"
 
     policy_cls = GrootPolicy
     io = GROOT_EDGE_IO
@@ -54,8 +53,7 @@ class GrootProfile(VLAProfile):
                 OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(7,)),
             },
             output_features={
-                # GROOT predicts action chunks, not a single 7-d vector
-                ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(50, 32)),
+                ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(32,)),
             },
         )
         self.policy = GrootPolicy(self.config).to(self.device).eval()
@@ -69,6 +67,15 @@ class GrootProfile(VLAProfile):
         force_hf_attention(self.vision, "eager")
         force_hf_attention(self.lm, "eager")
 
+    def _init_tokenizers(self) -> None:
+        from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
+        eagle_step = next(
+            s for s in self.pre_processor.steps
+            if isinstance(s, GrootEagleEncodeStep)
+        )
+        proc = eagle_step.proc
+        self.text_tok = getattr(proc, "tokenizer", proc)
+
     def prepare_compile_inputs(
         self,
         *,
@@ -76,18 +83,9 @@ class GrootProfile(VLAProfile):
         args: argparse.Namespace,
     ) -> dict[str, Any]:
         pil_messages = create_pil_messages(data)
-        cache_dir = HF_LEROBOT_HOME / DEFAULT_TOKENIZER_ASSETS_REPO
-        processor = get_processor(
-            str(cache_dir),
-            {
-                "trust_remote_code": True,
-                "fix_mistral_regex": False,
-            },
-        )
-        self.text_tok = getattr(processor, "tokenizer", processor)
         return prepare_model_inputs(
-            processor,
-            processor.process_vision_info,
+            self.eagle_processor,
+            self.eagle_processor.process_vision_info,
             {"add_generation_prompt": True},
             {
                 "images_kwargs": {
@@ -100,8 +98,3 @@ class GrootProfile(VLAProfile):
             pil_messages,
             self.device,
         )
-
-    def get_tokenizer(self, *, policy: Any = None, args: argparse.Namespace | None = None) -> Any:
-        if self.text_tok is None:
-            raise RuntimeError("prepare_compile_inputs must run before get_tokenizer")
-        return self.text_tok

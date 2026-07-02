@@ -28,13 +28,19 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
         device=ctx.device,
         dtype=dtype,
     ).contiguous()
+    batch_size = int(lm_hidden_states.shape[0])
+    max_seq_len = int(lm_hidden_states.shape[1])
+    hidden_size = int(lm_hidden_states.shape[2])
 
-    module = GROOTContextProjectionWrapper(
-        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=dtype).eval(),
-    ).eval()
-    
+    vlln = ctx.model.action_head.vlln
+    if getattr(vlln, "weight", None) is not None:
+        context_hidden_size = int(vlln.weight.shape[0])
+    else:
+        context_hidden_size = int(
+            ctx.model.backbone.eagle_model.language_model.config.hidden_size
+        )
+
+    module = make_action_context_module(ctx.model, device=ctx.device, dtype=dtype)
     io = GROOT_EDGE_IO.action_context
 
     return ExportPlan(
@@ -49,10 +55,12 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
         trt_settings=DEFAULT_ACTION_CONTEXT_TRT_SETTINGS,
         cleanup_modules=(module,),
         args={
+            "batch_size": batch_size,
             "extra_config": {
                 "engine_role": "action_context",
-                "max_seq_len": int(lm_hidden_states.shape[1]),
-                "hidden_size": int(lm_hidden_states.shape[2]),
+                "max_seq_len": max_seq_len,
+                "hidden_size": hidden_size,
+                "context_hidden_size": context_hidden_size,
             },
             "language_inputs": stage_inputs.get("language_inputs"),
             "tensor_aliases": {"context_embs": "vl_embs"},
@@ -60,11 +68,7 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
     )
 
 
-def compile(plan: ExportPlan, eager_output) -> Path:
-    output = eager_output[0] if isinstance(eager_output, (tuple, list)) else eager_output
-    extra_config = dict(plan.args["extra_config"])
-    extra_config["context_hidden_size"] = int(output.shape[-1])
-
+def compile(plan: ExportPlan) -> Path:
     return save_trt_engine_module(
         plan.module,
         plan.sample_inputs,
@@ -74,17 +78,18 @@ def compile(plan: ExportPlan, eager_output) -> Path:
         component=plan.component or "context",
         input_names=list(plan.input_names),
         output_names=list(plan.output_names),
-        example_output=eager_output,
-        extra_config=extra_config,
+        example_output=None,
+        extra_config=plan.args["extra_config"],
         trt_settings=plan.trt_settings,
     )
 
 
-def metadata(ctx: StageContext, plan: ExportPlan, output) -> dict:
+def metadata(ctx: StageContext, plan: ExportPlan) -> dict:
     del ctx
-    vl_embs = output[0] if isinstance(output, (tuple, list)) else output
+    extra = plan.args["extra_config"]
     return {
+        "batch_size": plan.args["batch_size"],
         "language_inputs": plan.args.get("language_inputs"),
-        "context_seq_len": int(vl_embs.shape[1]),
-        "context_hidden_size": int(vl_embs.shape[2]),
+        "context_seq_len": int(extra["max_seq_len"]),
+        "context_hidden_size": int(extra["context_hidden_size"]),
     }

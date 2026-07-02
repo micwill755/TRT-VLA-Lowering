@@ -50,31 +50,6 @@ def frame_from_test_data(
 
     return frame
 
-
-def prepare_policy_batch(
-    policy,
-    data: dict[str, Any],
-    device: str | torch.device,
-    model_id: str,
-    *,
-    fill_missing: bool = False,
-) -> dict[str, Any]:
-    """Run LeRobot policy preprocessors on raw ``load_test_data`` output.
-
-    Returns a batch dict with policy-specific keys such as ``OBS_LANGUAGE_TOKENS``,
-    ``OBS_LANGUAGE_ATTENTION_MASK``, and normalized image tensors. Used by PI0.5
-    and SmolVLA export paths — not by GR00T or MolmoAct2 (they use their own
-    processor APIs).
-    """
-    preprocess, _ = make_pre_post_processors(
-        policy.config,
-        model_id,
-        preprocessor_overrides={"device_processor": {"device": str(device)}},
-    )
-    frame = frame_from_test_data(data, policy, fill_missing=fill_missing)
-    return preprocess(frame)
-
-
 def load_test_data(
     dataset_id: str = DEFAULT_DATASET_ID,
     *,

@@ -32,8 +32,8 @@ class VLAProfile(ABC):
         self.model: nn.Module | None = None
         self.pre_processor: Any = None
         self.post_processor: Any = None
-        self.text_tok: Any = None
-        self.action_tok: Any = None
+        self.text_tokenizer: Any = None
+        self.action_tokenizer: Any = None
         self._init_policy()
         self._init_models()
         self._init_processors()
@@ -47,24 +47,16 @@ class VLAProfile(ABC):
     def _init_models(self) -> None:
         """Set ``self.model`` to the export/inference core module."""
 
+    @abstractmethod
+    def _init_tokenizers(self) -> None:
+        """Each profile finds text_tokenizer / action_tokenizer from its own pipeline layout."""
+
     def _init_processors(self) -> None:
-        """Build LeRobot pre/post processor pipelines from ``self.policy.config``."""
         self.pre_processor, self.post_processor = make_pre_post_processors(
             self.config,
             None,
             preprocessor_overrides={"device_processor": {"device": str(self.device)}},
         )
-
-    def _init_tokenizers(self) -> None:
-        pack = find_pack_step(self.pre_processor)
-        if pack is not None:
-            self.text_tok = getattr(pack.processor, "tokenizer", None)
-            self.action_tok = getattr(pack, "action_processor", None) or getattr(
-                self.policy, "action_tokenizer", None
-            )
-            return
-
-        self.text_tok = getattr(self.pre_processor, "tokenizer", None)
 
     @abstractmethod
     def prepare_compile_inputs(
@@ -74,6 +66,3 @@ class VLAProfile(ABC):
         args: argparse.Namespace,
     ) -> dict[str, Any]:
         """Build ``model_inputs`` passed to export and benchmark."""
-
-    def get_tokenizer(self, *, policy: Any = None, args: argparse.Namespace | None = None) -> Any:
-        return self.text_tok

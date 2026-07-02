@@ -41,6 +41,13 @@ def find_pack_step(preprocessor):
 
 # utils ----
 
+def free_cuda_memory(*objects: Any) -> None:
+    for obj in objects:
+        del obj
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 def prepare_policy_inputs_groot(policy, batch, device):
     allowed_base = {"state", "state_mask", "embodiment_id"}
     model_inputs = {
@@ -189,18 +196,47 @@ def clone_hf_module_for_export(
     dtype: torch.dtype | None = None,
     config: Any | None = None,
 ) -> nn.Module:
-    """Rebuild a module without a GPU ``deepcopy`` peak."""
+    """Build a disposable copy of an HF submodule for TRT export only.
+
+    **Do not use the live policy module for export.** One ``EdgeContext`` keeps
+    ``ctx.policy`` loaded for the whole orchestrator run: later export stages
+    (language, action), eager PyTorch benchmarking, and parity checks all still
+    need the original weights on GPU and unmodified.
+
+    Export is destructive on the trace target:
+
+    - ``compile()`` hooks patch attention layers (``patch_vision_attention`` /
+      ``patch_language_attention``) so torch→TRT can capture custom ops.
+    - TRT settings use ``offload_module_to_cpu=True``, moving the traced module
+      to CPU during engine build to free GPU for TensorRT.
+    - ``ExportRunner`` deletes ``ExportPlan.cleanup_modules`` after the engine
+      is written (``free_cuda_memory``).
+
+    Clones are listed in ``cleanup_modules`` so export can patch, offload, and
+    free GPU memory without touching ``ctx.policy``. Inference loads serialized
+    engines only — it never uses clones.
+
+    **Memory:** weights are copied to CPU first, CUDA cache is cleared, then a
+    fresh module is instantiated from ``config`` (or ``deepcopy`` fallback) and
+    loaded back on ``device`` / ``dtype``. This avoids a peak GPU ``deepcopy`` of
+    large vision / LM weights while duplicating the subgraph for trace.
+    """
+    # Snapshot weights on CPU and release GPU before rebuilding the clone.
     cpu_state = {k: v.detach().cpu() for k, v in module.state_dict().items()}
     free_cuda_memory()
+
     init_config = config if config is not None else getattr(module, "config", None)
     if init_config is not None:
+        # Preferred path for HF modules: new instance from config + state_dict.
         clone = module.__class__(init_config)
         clone.load_state_dict(cpu_state, assign=True)
     else:
+        # Fallback when the module has no ``config`` (rare submodules).
         clone = copy.deepcopy(module)
         clone.load_state_dict(cpu_state, assign=True)
         clone = clone.cpu()
     del cpu_state
+
     if dtype is not None:
         return clone.to(device=device, dtype=dtype).eval()
     return clone.to(device=device).eval()

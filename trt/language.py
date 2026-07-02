@@ -24,7 +24,6 @@ from trt.compile import compile_trt_module, save_trt_engine_module
 from trt.io_spec import ComponentIOSpec, VLA_LANGUAGE_IO
 from trt.modules.export.language import (
     CausalLMExportModule,
-    PluginLMForCausalLM,
     _as_tensor,
     gather_last_token_hidden,
 )
@@ -54,6 +53,33 @@ DEFAULT_LANGUAGE_TRT_SETTINGS: dict[str, Any] = {
     "offload_module_to_cpu": True,
     "assume_dynamic_shape_support": True,
 }
+
+
+@dataclass
+class LanguageEngineSpec:
+    decoder: nn.Module
+    lm_head: nn.Module
+    language_model: nn.Module
+    prefix_embs: torch.Tensor
+    batch_size: int
+    max_seq_len: int
+    hidden_size: int
+    num_layers: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    image_token_id: int
+    enable_bidirectional_prefill: int
+    static_prefill_seq_len: bool
+    export_dtype: torch.dtype
+    io: ComponentIOSpec
+    trt_settings: dict[str, Any]
+    model_type: str
+    position_ids: torch.Tensor | None = None
+    seq_len_per_image: int | None = None
+    select_layer: int = -1
+    context_hidden_size: int | None = None
+    log_prefix: str = ""
 
 # ---------------------------------------------------------------------------
 # GR00T: causal LM + context projection (dual outputs)
@@ -407,7 +433,7 @@ def make_language_context_wrapper(
 
     language_model = core.backbone.eagle_model.language_model
     lm_head = copy.deepcopy(language_model.lm_head).to(device=device, dtype=dtype).eval()
-    causal_lm = PluginLMForCausalLM(
+    causal_lm = CausalLMExportModule(
         spec.decoder,
         spec.lm_head,
         select_layer=spec.select_layer,
@@ -686,7 +712,7 @@ def save_language_engine_for_edge_llm(
     dtype = spec.export_dtype
     prefix_embs = spec.prefix_embs.to(device=device, dtype=dtype).contiguous()
 
-    lm_wrapper = PluginLMForCausalLM(
+    lm_wrapper = CausalLMExportModule(
         spec.decoder,
         spec.lm_head,
         select_layer=spec.select_layer,

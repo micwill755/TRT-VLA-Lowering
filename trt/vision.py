@@ -11,23 +11,19 @@ Layout conventions
 from __future__ import annotations
 
 import logging
-import pathlib
-from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn as nn
 
-from trt.compile import save_trt_engine_module
-from trt.io_spec import ComponentIOSpec, VLA_VISION_IO
-from trt.plugin_utils import patch_vision_attention, restore_attention
-from trt.utils import free_cuda_memory
+from trt.io_spec import VLA_VISION_IO
 
 logger = logging.getLogger(__name__)
 
 # Canonical VitRunner engine binding names (shared by PI0.5 and GR00T).
 VIT_ENGINE_INPUT_NAME = VLA_VISION_IO.input_names[0]
 VIT_ENGINE_OUTPUT_NAME = VLA_VISION_IO.output_names[0]
+
 
 DEFAULT_VISION_TRT_SETTINGS: dict[str, Any] = {
     "disable_tf32": True,

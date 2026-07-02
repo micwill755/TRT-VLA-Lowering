@@ -24,15 +24,19 @@ class SerializedGrootLanguage:
         self.engine = engine
         self.max_seq_len = int(engine.config["max_seq_len"])
 
-    def __call__(
-        self,
-        input_embs,
-        rope_rotary_cos_sin,
-        ctx_len,
-        kvcache_start_index,
-        last_token_ids,
-        kv_caches,
-    ):
+    def __call__(self, *args):
+        if len(args) < 6:
+            raise ValueError(
+                f"SerializedGrootLanguage expected at least 6 inputs, got {len(args)}"
+            )
+        (
+            input_embs,
+            rope_rotary_cos_sin,
+            ctx_len,
+            kvcache_start_index,
+            last_token_ids,
+            *kv_caches,
+        ) = args
         inputs = {
             "inputs_embeds": input_embs,
             "rope_rotary_cos_sin": rope_rotary_cos_sin,

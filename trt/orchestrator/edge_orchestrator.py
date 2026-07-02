@@ -6,39 +6,33 @@ from typing import Type
 
 import torch
 
-from trt.config.pipeline_registry import (
-    get_benchmark_pipeline,
-    get_export_pipeline,
-    get_pipeline_for_profile,
-)
+from trt.config.pipeline_registry import get_benchmark_pipeline, get_export_pipeline
 from trt.context import EdgeContext
 from trt.data import load_test_data
 from trt.pipelines.benchmark import BenchmarkPipeline
 from trt.pipelines.export import ExportPipeline
 from trt.pipelines.load import LoadPipeline
 from trt.profile import VLAProfile
-from trt.utils import load_plugins_for_trt
+from trt.plugin_utils import load_plugins_for_trt
 
 DATASET_ID = "lerobot/libero"
 
-
 class EdgeOrchestrator:
-    def __init__(self, profile_cls: Type[VLAProfile], args: argparse.Namespace):
-        self.profile_cls = profile_cls
+    def __init__(self, profile: Type[VLAProfile], args: argparse.Namespace):
         self.args = args
         self.device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-        self.profile = profile_cls(self.device, args.model_id)
+        self.profile = profile(self.device, args.model_id)
 
     @classmethod
-    def build_arg_parser(cls, profile_cls: Type[VLAProfile]) -> argparse.ArgumentParser:
+    def build_arg_parser(profile: Type[VLAProfile]) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
-            description=f"Export and benchmark {profile_cls.display_name} TensorRT Edge-LLM engines",
+            description=f"Export and benchmark {profile.display_name} TensorRT Edge-LLM engines",
         )
-        parser.add_argument("--model-id", default=profile_cls.model_id)
+        parser.add_argument("--model-id", default=profile.model_id)
         parser.add_argument("--dataset-id", default=DATASET_ID)
         parser.add_argument("--episode-index", type=int, default=0)
         parser.add_argument("--frame-index", type=int, default=0)
-        parser.add_argument("--engine-dir", default=profile_cls.engine_dir_default)
+        parser.add_argument("--engine-dir", default=profile.engine_dir_default)
         parser.add_argument("--device", default="cuda")
         parser.add_argument("--max-seq-len", type=int, default=None)
         parser.add_argument("--num-iterations", type=int, default=12)
@@ -63,7 +57,7 @@ class EdgeOrchestrator:
         ctx = self._build_context()
 
         if self._should_export():
-            export_cfg = get_export_pipeline(get_pipeline_for_profile(self.profile).model_type)
+            export_cfg = get_export_pipeline(self.profile.name)
             ExportPipeline(export_cfg).run(ctx)
 
         if self._should_benchmark():
@@ -83,8 +77,8 @@ class EdgeOrchestrator:
     def _build_context(self) -> EdgeContext:
         data = load_test_data(
             self.args.dataset_id,
-            self.args.episode_index,
-            self.args.frame_index,
+            episode_index=self.args.episode_index,
+            frame_index=self.args.frame_index,
         )
         model_inputs = self.profile.prepare_compile_inputs(
             data=data,

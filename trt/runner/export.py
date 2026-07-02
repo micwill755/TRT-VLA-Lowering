@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import torch
-
 from trt.context import StageResult
 from trt.hooks.export.plan import ExportPlan
 from trt.hooks.resolve import resolve
@@ -29,18 +27,15 @@ class ExportRunner(StageRunner):
             )
         plan: ExportPlan = resolve(self.hooks.plan_export)(ctx, stage_inputs)
 
-        with torch.no_grad():
-            eager_output = plan.module(*plan.sample_inputs)
-
         if not self.hooks.compile:
             raise ValueError(
                 f"export stage {self.stage_cfg.stage_id} ({self.stage_cfg.kind}) missing compile hook"
             )
-        engine_path = resolve(self.hooks.compile)(plan, eager_output)
+        engine_path = resolve(self.hooks.compile)(plan)
 
         metadata: dict = {}
         if self.hooks.metadata:
-            metadata = resolve(self.hooks.metadata)(ctx, plan, eager_output)
+            metadata = resolve(self.hooks.metadata)(ctx, plan)
 
         if self.hooks.save_artifacts:
             resolve(self.hooks.save_artifacts)(ctx, plan, engine_path)
@@ -48,7 +43,7 @@ class ExportRunner(StageRunner):
         result = StageResult(
             engine_path=Path(engine_path),
             spec=plan,
-            tensors=self._named_outputs(plan, eager_output),
+            tensors=dict(plan.args.get("stage_tensors", {})),
             metadata=metadata,
         )
 
@@ -59,24 +54,3 @@ class ExportRunner(StageRunner):
             free_cuda_memory(module)
 
         return result
-
-    @staticmethod
-    def _named_outputs(plan: ExportPlan, output) -> dict[str, torch.Tensor]:
-        names = plan.output_names
-        if isinstance(output, (tuple, list)):
-            tensors = {name: value for name, value in zip(names, output)}
-        elif len(names) == 1:
-            tensors = {names[0]: output}
-        else:
-            tensors = {"output": output}
-
-        for src, dst in plan.args.get("tensor_aliases", {}).items():
-            if src in tensors and dst not in tensors:
-                tensors[dst] = tensors[src]
-
-        extra = plan.args.get("extra_tensors", {})
-        for name, value in extra.items():
-            if isinstance(value, torch.Tensor):
-                tensors[name] = value
-
-        return tensors

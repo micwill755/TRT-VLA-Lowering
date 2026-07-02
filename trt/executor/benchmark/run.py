@@ -23,3 +23,27 @@ def _has_in_memory(ctx: EdgeContext) -> bool:
 
 def _has_serialized(ctx: EdgeContext) -> bool:
     return ctx.handles.serialized.vision is not None
+
+
+def report_action_parity(ctx: EdgeContext) -> None:
+    result = ctx.benchmark
+    if result is None:
+        return
+
+    reference = result.actions.get("pytorch")
+    if reference is None:
+        return
+
+    from trt.measure import compute_action_parity_metrics
+
+    print("Action parity vs pytorch:")
+    for name, pred in result.actions.items():
+        if name == "pytorch":
+            continue
+        metrics = compute_action_parity_metrics(pred, reference)
+        print(
+            f"  {name:<22} ade={metrics['action_ade']:.6f}  "
+            f"fde={metrics['action_fde']:.6f}  "
+            f"mean_abs={metrics['mean_abs']:.6f}  "
+            f"max_abs={metrics['max_abs']:.6f}"
+        )

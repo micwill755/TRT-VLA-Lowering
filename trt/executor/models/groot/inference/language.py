@@ -40,6 +40,7 @@ def _build_language_prefill_inputs(
         max_seq_len=max_seq_len,
         device=device,
         language_model=language_model,
+        position_ids=language_inputs.get("position_ids"),
     )
 
     flat_tensors, _ = make_language_edge_flat_tensors(
@@ -103,11 +104,12 @@ def run_eager(ctx: EdgeContext) -> InferenceStageResult:
         use_cache=False,
         return_dict=True,
     )
-    select_layer = int(getattr(eagle, "select_layer", -1))
-    if select_layer == -1:
-        lm_hidden = outputs.last_hidden_state
-    else:
-        lm_hidden = outputs.hidden_states[select_layer]
+    if outputs.hidden_states is None:
+        raise RuntimeError("language_model returned no hidden_states")
+
+    decoder = getattr(language_model, "model", language_model)
+    hidden = outputs.hidden_states[-1]
+    lm_hidden = decoder.norm(hidden) if hasattr(decoder, "norm") else hidden
 
     ctx.inference.lm = LanguageOutputs(lm_hidden_states=lm_hidden)
     return InferenceStageResult(

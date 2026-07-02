@@ -1,74 +1,24 @@
-"""Per-model builders for ``DiffusionEngineSpec``."""
+"""Per-model helpers for action/diffusion ``plan_export`` hooks (pi05, smolvla)."""
 
 from __future__ import annotations
+
+from typing import Any
 
 import torch
 import torch.nn as nn
 
 from trt.modules.export.diffusion import (
     DEFAULT_DIFFUSION_TRT_SETTINGS,
-    DiffusionEngineSpec,
-    GrootDiTStepEncoderExportModule,
     PI05PrefixKVStepEncoderExportModule,
     StaticActionVelocityStepExportModule,
-    TRTDynamicCategorySpecificMLPExportModule,
 )
 from trt.io_spec import (
-    GROOT_ACTION_ROLLOUT,
-    GROOT_EDGE_IO,
     PI05_ACTION_ROLLOUT,
     PI05_EDGE_IO,
     PipelineIOSpec,
     action_rollout_extra_config,
 )
 from trt.utils import make_suffix_position_and_mask
-
-
-def make_groot_action_compile_inputs(
-    action_horizon: int,
-    action_dim: int,
-    vl_embs: torch.Tensor,
-    state: torch.Tensor,
-    embodiment_id: torch.Tensor,
-    device: torch.device,
-) -> tuple[torch.Tensor, ...]:
-    batch_size = vl_embs.shape[0]
-    dtype = vl_embs.dtype
-    actions = torch.randn(
-        batch_size,
-        action_horizon,
-        action_dim,
-        device=device,
-        dtype=dtype,
-    )
-    timestep = torch.zeros(batch_size, device=device, dtype=torch.long)
-    return (
-        actions,
-        timestep,
-        vl_embs.to(device=device, dtype=dtype),
-        state.to(device=device, dtype=dtype),
-        embodiment_id.to(device=device),
-    )
-
-
-def make_groot_static_action_module(
-    action_head: nn.Module,
-    device: torch.device,
-    dtype: torch.dtype,
-    embodiment_id: torch.Tensor | None,
-) -> nn.Module:
-    velocity_decoder = action_head.action_decoder
-    if embodiment_id is not None:
-        velocity_decoder = TRTDynamicCategorySpecificMLPExportModule(
-            action_head.action_decoder
-        )
-    return StaticActionVelocityStepExportModule(
-        step_encoder=GrootDiTStepEncoderExportModule(action_head, embodiment_id),
-        action_expert=action_head.model,
-        velocity_decoder=velocity_decoder,
-        output_tokens=action_head.config.action_horizon,
-        cast_hidden_fp32=False,
-    ).eval().to(device=device, dtype=dtype)
 
 
 def make_pi05_static_action_module(core: nn.Module, device: torch.device) -> nn.Module:
@@ -127,61 +77,6 @@ def make_pi05_action_compile_inputs(
     )
 
 
-def build_groot_diffusion_export_params(
-    model: nn.Module,
-    *,
-    context_embs: torch.Tensor,
-    state: torch.Tensor,
-    embodiment_id: torch.Tensor,
-    device: torch.device,
-    io: PipelineIOSpec = GROOT_EDGE_IO,
-    trt_settings: dict | None = None,
-    dtype: torch.dtype = torch.float16,
-) -> DiffusionEngineSpec:
-    action_head = model.action_head
-    context_embs = context_embs.to(device=device, dtype=dtype).contiguous()
-    state = state.to(device=device, dtype=dtype).contiguous()
-    embodiment_id = embodiment_id.to(device=device).contiguous()
-
-    diffusion_module = make_groot_static_action_module(
-        action_head,
-        device,
-        dtype,
-        embodiment_id,
-    )
-    sample_inputs = make_groot_action_compile_inputs(
-        action_head.config.action_horizon,
-        action_head.config.action_dim,
-        context_embs,
-        state,
-        embodiment_id,
-        device,
-    )
-    cfg = action_head.config
-    return DiffusionEngineSpec(
-        diffusion_module=diffusion_module,
-        sample_inputs=sample_inputs,
-        extra_config={
-            "engine_role": "single_action_denoising_step",
-            **action_rollout_extra_config(
-                io,
-                GROOT_ACTION_ROLLOUT,
-                num_steps=int(action_head.num_inference_timesteps),
-                num_timestep_buckets=int(action_head.num_timestep_buckets),
-                action_horizon=int(cfg.action_horizon),
-                action_dim=int(cfg.action_dim),
-                context_seq_len=int(context_embs.shape[1]),
-                context_hidden_size=int(context_embs.shape[2]),
-                state_horizon=int(state.shape[1]),
-                state_dim=int(state.shape[2]),
-            ),
-        },
-        io=io.action,
-        trt_settings=dict(trt_settings or DEFAULT_DIFFUSION_TRT_SETTINGS),
-        model_type="action",
-    )
-
-
 def build_smolvla_diffusion_export_params(
     core: nn.Module,
     *,
@@ -190,7 +85,7 @@ def build_smolvla_diffusion_export_params(
     io: PipelineIOSpec = PI05_EDGE_IO,
     trt_settings: dict | None = None,
     model_type: str = "smolvla",
-) -> DiffusionEngineSpec:
+) -> dict[str, Any]:
     from trt.modules.export.diffusion import (
         SmolVLAPrefixKVStepEncoderExportModule,
         StaticActionVelocityStepExportModule,
@@ -244,10 +139,10 @@ def build_smolvla_diffusion_export_params(
     )
     sample_inputs = tuple(x.contiguous() if isinstance(x, torch.Tensor) else x for x in sample_inputs)
 
-    return DiffusionEngineSpec(
-        diffusion_module=action_module,
-        sample_inputs=sample_inputs,
-        extra_config={
+    return {
+        "diffusion_module": action_module,
+        "sample_inputs": sample_inputs,
+        "extra_config": {
             "engine_role": "single_action_denoising_step",
             **action_rollout_extra_config(
                 io,
@@ -261,11 +156,11 @@ def build_smolvla_diffusion_export_params(
                 head_dim=int(text_cfg.head_dim),
             ),
         },
-        io=io.action,
-        trt_settings=dict(trt_settings or DEFAULT_DIFFUSION_TRT_SETTINGS),
-        model_type=model_type,
-        engine_file="diffusion.engine",
-    )
+        "io": io.action,
+        "trt_settings": dict(trt_settings or DEFAULT_DIFFUSION_TRT_SETTINGS),
+        "model_type": model_type,
+        "engine_file": "diffusion.engine",
+    }
 
 
 def build_pi05_diffusion_export_params(
@@ -277,7 +172,7 @@ def build_pi05_diffusion_export_params(
     io: PipelineIOSpec = PI05_EDGE_IO,
     trt_settings: dict | None = None,
     model_type: str = "action",
-) -> DiffusionEngineSpec:
+) -> dict[str, Any]:
     diffusion_module = make_pi05_static_action_module(core, device)
     sample_inputs = make_pi05_action_compile_inputs(
         core,
@@ -286,10 +181,10 @@ def build_pi05_diffusion_export_params(
         device=device,
     )
     expert_cfg = core.paligemma_with_expert.gemma_expert.model.config
-    return DiffusionEngineSpec(
-        diffusion_module=diffusion_module,
-        sample_inputs=sample_inputs,
-        extra_config={
+    return {
+        "diffusion_module": diffusion_module,
+        "sample_inputs": sample_inputs,
+        "extra_config": {
             "engine_role": "single_action_denoising_step",
             **action_rollout_extra_config(
                 io,
@@ -303,7 +198,7 @@ def build_pi05_diffusion_export_params(
                 head_dim=int(expert_cfg.head_dim),
             ),
         },
-        io=io.action,
-        trt_settings=dict(trt_settings or DEFAULT_DIFFUSION_TRT_SETTINGS),
-        model_type=model_type,
-    )
+        "io": io.action,
+        "trt_settings": dict(trt_settings or DEFAULT_DIFFUSION_TRT_SETTINGS),
+        "model_type": model_type,
+    }

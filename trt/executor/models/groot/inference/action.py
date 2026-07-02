@@ -4,7 +4,11 @@ import torch
 
 from trt.action_rollout import ActionRolloutContext, GROOTActionAdapter, sample_actions_raw
 from trt.context import EdgeContext
-from trt.diffusion_builders import make_groot_static_action_module
+from trt.modules.export.diffusion import (
+    GrootDiTStepEncoderExportModule,
+    StaticActionVelocityStepExportModule,
+    TRTDynamicCategorySpecificMLPExportModule,
+)
 from trt.runner.inference import InferenceStageResult
 
 
@@ -51,12 +55,20 @@ def _prepare_action(ctx: EdgeContext) -> _ActionRolloutHooks:
 def run_eager(ctx: EdgeContext) -> InferenceStageResult:
     rollout_hooks = _prepare_action(ctx)
     with torch.autocast("cuda", dtype=torch.float16):
-        action_module = make_groot_static_action_module(
-            ctx.model.action_head,
-            ctx.device,
-            torch.float16,
-            ctx.inference.action_side["embodiment_id"],
-        )
+        action_head = ctx.model.action_head
+        embodiment_id = ctx.inference.action_side["embodiment_id"]
+        velocity_decoder = action_head.action_decoder
+        if embodiment_id is not None:
+            velocity_decoder = TRTDynamicCategorySpecificMLPExportModule(
+                action_head.action_decoder
+            )
+        action_module = StaticActionVelocityStepExportModule(
+            step_encoder=GrootDiTStepEncoderExportModule(action_head, embodiment_id),
+            action_expert=action_head.model,
+            velocity_decoder=velocity_decoder,
+            output_tokens=action_head.config.action_horizon,
+            cast_hidden_fp32=False,
+        ).eval().to(device=ctx.device, dtype=torch.float16)
         actions = sample_actions_raw(
             action_module,
             rollout_hooks.build_action_rollout_context(
