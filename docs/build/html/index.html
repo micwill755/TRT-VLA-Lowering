@@ -351,7 +351,14 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/pipeline-runtime.html">Pipeline Runtime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/pipelines-and-stages.html">Pipelines and Stages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/runners.html">Runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/hooks.html">Hooks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html">Export Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -403,11 +410,59 @@ load, inference, and benchmark orchestration for VLA models on top of
 <div class="toctree-wrapper compound">
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/pipeline-runtime.html">Pipeline Runtime</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipeline-runtime.html#architecture">Architecture</a></li>
-<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipeline-runtime.html#key-components">Key Components</a></li>
-<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipeline-runtime.html#inference-workflow">Inference Workflow</a></li>
-<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipeline-runtime.html#export-workflow">Export Workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/overview.html">Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/overview.html#orchestrator-flow">Orchestrator flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/overview.html#key-files">Key files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/pipelines-and-stages.html">Pipelines and Stages</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipelines-and-stages.html#what-is-a-pipeline">What is a pipeline?</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipelines-and-stages.html#what-is-a-stage">What is a stage?</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipelines-and-stages.html#stage-graph-gr00t-example">Stage graph (GR00T example)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipelines-and-stages.html#pipelineconfig-structure">PipelineConfig structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/pipelines-and-stages.html#inter-stage-data">Inter-stage data</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/runners.html">Runners</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/runners.html#what-is-a-runner">What is a runner?</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/runners.html#exportrunner">ExportRunner</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/runners.html#inferencerunner">InferenceRunner</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/runners.html#runner-vs-pipeline">Runner vs pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/hooks.html">Hooks</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/hooks.html#what-are-hooks">What are hooks?</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/hooks.html#hook-resolution">Hook resolution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/hooks.html#pipeline-hooks-vs-stage-hooks">Pipeline hooks vs stage hooks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/hooks.html#stage-hook-catalog">Stage hook catalog</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/hooks.html#where-hooks-live">Where hooks live</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html">Export Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#flow">Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#per-stage-compile-loop">Per-stage compile loop</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#outputs">Outputs</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#cli">CLI</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#flow">Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#execution-modes">Execution modes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#gr00t-stage-sequence">GR00T stage sequence</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#invocation">Invocation</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html">Load Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html#flow">Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html#stage-specs">Stage specs</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html#directory-layout">Directory layout</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#flow">Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#default-backends">Default backends</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#reporting">Reporting</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#cli">CLI</a></li>
 </ul>
 </li>
 </ul>

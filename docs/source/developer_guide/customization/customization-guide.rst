@@ -40,7 +40,7 @@ under ``trt/executor/models/<model>/``.
    for stage in stages:
        process_inputs? (glue)
        plan_export  → ExportPlan (module, sample_inputs, engine_dir, cleanup_modules)
-       compile      → trace + TensorRT engine + config.json
+       compile      → torch.export trace + TensorRT engine + config.json
        metadata / save_artifacts?
        ctx.artifacts["stage_N"] = StageResult
    postprocess?(ctx)

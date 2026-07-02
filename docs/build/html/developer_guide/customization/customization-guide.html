@@ -63,7 +63,7 @@
 
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="prev" title="Pipeline Runtime" href="../architecture/pipeline-runtime.html" />
+    <link rel="prev" title="Benchmark Pipeline" href="../architecture/benchmark-pipeline.html" />
 
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -351,7 +351,14 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../architecture/pipeline-runtime.html">Pipeline Runtime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/pipelines-and-stages.html">Pipelines and Stages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/runners.html">Runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/hooks.html">Hooks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/export-pipeline.html">Export Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/inference-pipeline.html">Inference Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="current nav bd-sidenav">
@@ -414,12 +421,6 @@ in this repository. Export compiles TensorRT engines compatible with
 <a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/">TensorRT Edge-LLM</a>;
 inference and benchmark load those engines and run parity checks against eager
 PyTorch.</p>
-<p>This guide mirrors the structure of the upstream
-<a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/customization-guide.html">TensorRT Edge-LLM Customization Guide</a>
-and maps each extension point to files in <strong>this</strong> codebase.</p>
-<p>For upstream engine layout, multimodal preprocessing, and C++ runtime contracts,
-see the Edge-LLM docs. This guide covers the Python orchestration layer that
-sits on top.</p>
 <section id="architecture-overview">
 <h2>Architecture Overview<a class="headerlink" href="#architecture-overview" title="Link to this heading">#</a></h2>
 <p>A single run is driven by <code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeOrchestrator</span></code> and one shared
@@ -445,7 +446,7 @@ under <code class="docutils literal notranslate"><span class="pre">trt/executor/
 for stage in stages:
     process_inputs? (glue)
     plan_export  → ExportPlan (module, sample_inputs, engine_dir, cleanup_modules)
-    compile      → trace + TensorRT engine + config.json
+    compile      → torch.export trace + TensorRT engine + config.json
     metadata / save_artifacts?
     ctx.artifacts[&quot;stage_N&quot;] = StageResult
 postprocess?(ctx)
@@ -1043,12 +1044,12 @@ upstream reference for vision + language + action engine layout</p></li>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="../architecture/pipeline-runtime.html"
+       href="../architecture/benchmark-pipeline.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">Pipeline Runtime</p>
+        <p class="prev-next-title">Benchmark Pipeline</p>
       </div>
     </a>
 </div>

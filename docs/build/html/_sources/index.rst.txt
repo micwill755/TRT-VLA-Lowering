@@ -17,7 +17,14 @@ load, inference, and benchmark orchestration for VLA models on top of
    :maxdepth: 2
    :caption: Architecture
 
-   developer_guide/architecture/pipeline-runtime
+   developer_guide/architecture/overview
+   developer_guide/architecture/pipelines-and-stages
+   developer_guide/architecture/runners
+   developer_guide/architecture/hooks
+   developer_guide/architecture/export-pipeline
+   developer_guide/architecture/inference-pipeline
+   developer_guide/architecture/load-pipeline
+   developer_guide/architecture/benchmark-pipeline
 
 .. toctree::
    :maxdepth: 2

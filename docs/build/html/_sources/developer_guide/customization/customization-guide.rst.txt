@@ -7,15 +7,6 @@ in this repository. Export compiles TensorRT engines compatible with
 inference and benchmark load those engines and run parity checks against eager
 PyTorch.
 
-This guide mirrors the structure of the upstream
-`TensorRT Edge-LLM Customization Guide
-<https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/customization-guide.html>`_
-and maps each extension point to files in **this** codebase.
-
-For upstream engine layout, multimodal preprocessing, and C++ runtime contracts,
-see the Edge-LLM docs. This guide covers the Python orchestration layer that
-sits on top.
-
 
 Architecture Overview
 ---------------------
@@ -49,7 +40,7 @@ under ``trt/executor/models/<model>/``.
    for stage in stages:
        process_inputs? (glue)
        plan_export  → ExportPlan (module, sample_inputs, engine_dir, cleanup_modules)
-       compile      → trace + TensorRT engine + config.json
+       compile      → torch.export trace + TensorRT engine + config.json
        metadata / save_artifacts?
        ctx.artifacts["stage_N"] = StageResult
    postprocess?(ctx)
