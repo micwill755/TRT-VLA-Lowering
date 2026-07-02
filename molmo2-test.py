@@ -23,7 +23,7 @@ from trt.data import (
     frame_from_test_data
 )
 
-from trt.plugin_utils import load_plugins_for_trt
+from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.profile import VLAProfile
 
 class MolmoAct2Profile(VLAProfile):

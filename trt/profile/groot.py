@@ -74,6 +74,7 @@ class GrootProfile(VLAProfile):
             if isinstance(s, GrootEagleEncodeStep)
         )
         proc = eagle_step.proc
+        self.eagle_processor = proc
         self.text_tok = getattr(proc, "tokenizer", proc)
 
     def prepare_compile_inputs(

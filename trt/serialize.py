@@ -158,7 +158,7 @@ def load_serialized_modules(
     *,
     specs: tuple[SerializedModuleSpec, ...],
 ) -> tuple[Any, ...]:
-    from trt.plugin_utils import load_plugins_for_trt
+    from trt.plugin.plugin_utils import load_plugins_for_trt
 
     load_plugins_for_trt()
 

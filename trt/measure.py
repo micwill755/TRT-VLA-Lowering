@@ -37,17 +37,25 @@ def tensor_health_report(name, tensor):
 def tensor_error_metrics(name, trt, eager):
     tensor_health_report(f"{name} TRT", trt)
     tensor_health_report(f"{name} eager", eager)
+    metrics = tensor_parity_metrics(trt, eager)
+    print(f"{name} mean diff:", metrics["mean_abs"])
+    print(f"{name} max diff:", metrics["max_abs"])
+    print(f"{name} relative L2:", metrics["relative_l2"])
+    print(f"{name} relative mean %:", metrics["relative_mean_pct"])
+
+
+def tensor_parity_metrics(trt: torch.Tensor, eager: torch.Tensor) -> dict[str, float]:
     trt = trt.float()
     eager = eager.float()
     diff = (trt - eager).abs()
-
     rel_l2 = (trt - eager).norm() / eager.norm().clamp_min(1e-8)
     relmean_pct = diff.mean() / eager.abs().mean().clamp_min(1e-8) * 100
-
-    print(f"{name} mean diff:", diff.mean().item())
-    print(f"{name} max diff:", diff.max().item())
-    print(f"{name} relative L2:", rel_l2.item())
-    print(f"{name} relative mean %:", relmean_pct.item())
+    return {
+        "mean_abs": float(diff.mean().item()),
+        "max_abs": float(diff.max().item()),
+        "relative_l2": float(rel_l2.item()),
+        "relative_mean_pct": float(relmean_pct.item()),
+    }
 
 def _select_hidden_valid(x, valid):
     valid = valid.to(device=x.device, dtype=torch.bool)
@@ -66,7 +74,6 @@ def compute_action_chunk_ade(pred, target):
 
 def compute_action_chunk_minade(pred, target):
     return compute_action_chunk_ade(pred, target)
-
 
 @torch.no_grad()
 def compare_action_rollout_to_eager(eager_actions, trt_actions, *, action_dim=None, name=None):

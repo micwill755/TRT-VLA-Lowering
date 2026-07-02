@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from trt.config.benchmark_config import BenchmarkPipelineConfig, BenchmarkStageConfig, BenchmarkStageHooks
 from trt.config.execution_mode import ExecutionMode
-from trt.executor.benchmark.run import _has_in_memory, _has_serialized, _run_inference, report_action_parity
+from trt.executor.benchmark.run import (
+    _has_in_memory,
+    _has_serialized,
+    _run_inference,
+    report_groot_benchmark,
+)
 
 DEFAULT_BENCHMARK = BenchmarkPipelineConfig(
-    backends=(
+    stages=(
         BenchmarkStageConfig("pytorch", lambda ctx: True, lambda ctx: _run_inference(ctx, ExecutionMode.EAGER)),
         BenchmarkStageConfig(
             "in_memory_trt",
@@ -18,5 +23,5 @@ DEFAULT_BENCHMARK = BenchmarkPipelineConfig(
             lambda ctx: _run_inference(ctx, ExecutionMode.SERIALIZED),
         ),
     ),
-    hooks=BenchmarkStageHooks(report=report_action_parity),
+    hooks=BenchmarkStageHooks(report=report_groot_benchmark),
 )

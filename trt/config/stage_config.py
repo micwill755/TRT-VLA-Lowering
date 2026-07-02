@@ -10,10 +10,8 @@ PipelineConfig (per model, frozen)
 
 StageConfig (per stage)
     input_sources                 upstream stage ids (graph edges)
-    kind                          VISION_ENCODE | LANGUAGE_PREFILL | ACTION_ROLLOUT | ...
     runner                        generic executor class (usually ExportRunner)
     hooks: StageHooks             export-specific logic the runner invokes
-    io                            TRT engine I/O names/shapes
 
 Execution (ExportPipeline)
     1. config.hooks.preprocess(ctx)           once, before the stage loop
@@ -35,17 +33,8 @@ Inter-stage glue (hooks.process_inputs) is analogous to omni's custom_process_in
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
 
-from trt.io_spec import ComponentIOSpec, PipelineIOSpec
-
-
-class StageKind(str, Enum):
-    VISION_ENCODE = "vision_encode"
-    LANGUAGE_PREFILL = "language_prefill"
-    ACTION_ROLLOUT = "action_rollout"
-    ACTION_CONTEXT = "action_context"
+from trt.io_spec import PipelineIOSpec
 
 
 @dataclass(frozen=True)
@@ -76,11 +65,9 @@ class StageConfig:
     """One node in the export graph."""
 
     stage_id: int
-    kind: StageKind
     input_sources: tuple[int, ...]  # upstream stage ids; () = entry point
     runner: str                     # e.g. "trt.runner.export:ExportRunner"
     hooks: StageHooks
-    io: ComponentIOSpec
     final_output: bool = False
     engine_subdir: str | None = None
 

@@ -13,7 +13,7 @@ from trt.pipelines.benchmark import BenchmarkPipeline
 from trt.pipelines.export import ExportPipeline
 from trt.pipelines.load import LoadPipeline
 from trt.profile import VLAProfile
-from trt.plugin_utils import load_plugins_for_trt
+from trt.plugin.plugin_utils import load_plugins_for_trt
 
 DATASET_ID = "lerobot/libero"
 
@@ -23,7 +23,7 @@ class EdgeOrchestrator:
         self.device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         self.profile = profile(self.device, args.model_id)
 
-    @classmethod
+    @staticmethod
     def build_arg_parser(profile: Type[VLAProfile]) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
             description=f"Export and benchmark {profile.display_name} TensorRT Edge-LLM engines",

@@ -25,6 +25,28 @@ def _has_serialized(ctx: EdgeContext) -> bool:
     return ctx.handles.serialized.vision is not None
 
 
+def report_language_logits_parity(ctx: EdgeContext) -> None:
+    if ctx.handles.serialized.language is None or ctx.inference.image_embs is None:
+        return
+
+    from trt.executor.models.groot.inference.language import compare_language_logits
+
+    print("\nLanguage logits parity (serialized TRT vs eager):")
+    try:
+        metrics = compare_language_logits(ctx, print_metrics=True)
+        print(
+            f"  summary               mean_abs={metrics['mean_abs']:.6f}  "
+            f"max_abs={metrics['max_abs']:.6f}  rel_l2={metrics['relative_l2']:.6f}"
+        )
+    except Exception as exc:
+        print(f"  skipped: {exc}")
+
+
+def report_groot_benchmark(ctx: EdgeContext) -> None:
+    report_language_logits_parity(ctx)
+    report_action_parity(ctx)
+
+
 def report_action_parity(ctx: EdgeContext) -> None:
     result = ctx.benchmark
     if result is None:

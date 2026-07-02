@@ -12,7 +12,7 @@ from torch_tensorrt.dynamo.conversion import ConversionContext, dynamo_tensorrt_
 from torch_tensorrt.dynamo.conversion._ConverterRegistry import ConverterPriority
 from torch_tensorrt.dynamo.conversion.converter_utils import get_trt_tensor
 
-from trt.plugin_utils import get_plugin_config, get_trt_plugin_creator
+from trt.plugin.plugin_utils import get_plugin_config, get_trt_plugin_creator
 
 
 @dynamo_tensorrt_converter(

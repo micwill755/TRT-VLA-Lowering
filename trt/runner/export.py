@@ -23,13 +23,13 @@ class ExportRunner(StageRunner):
 
         if not self.hooks.plan_export:
             raise ValueError(
-                f"export stage {self.stage_cfg.stage_id} ({self.stage_cfg.kind}) missing plan_export hook"
+                f"export stage {self.stage_cfg.stage_id} missing plan_export hook"
             )
         plan: ExportPlan = resolve(self.hooks.plan_export)(ctx, stage_inputs)
 
         if not self.hooks.compile:
             raise ValueError(
-                f"export stage {self.stage_cfg.stage_id} ({self.stage_cfg.kind}) missing compile hook"
+                f"export stage {self.stage_cfg.stage_id} missing compile hook"
             )
         engine_path = resolve(self.hooks.compile)(plan)
 

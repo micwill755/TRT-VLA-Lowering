@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from trt.io_spec import PI05_EDGE_IO, PipelineIOSpec
-from trt.plugin_utils import infer_smolvlm_seq_len
+from trt.plugin.plugin_utils import infer_smolvlm_seq_len
 from trt.utils import clone_hf_module_for_export
 from trt.vision import DEFAULT_VISION_TRT_SETTINGS
 

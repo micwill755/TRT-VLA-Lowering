@@ -17,14 +17,14 @@ class BenchmarkPipeline:
         iterations = int(getattr(ctx.args, "num_iterations", 12))
 
         for iter_idx in range(iterations):
-            for backend in self.config.backends:
-                if not backend.enabled(ctx):
+            for stage in self.config.stages:
+                if not stage.enabled(ctx):
                     continue
                 t0 = time.perf_counter()
-                backend.run(ctx)
-                result.record(backend.name, time.perf_counter() - t0)
+                stage.run(ctx)
+                result.record(stage.name, time.perf_counter() - t0)
                 if iter_idx == iterations - 1 and ctx.actions is not None:
-                    result.record_actions(backend.name, ctx.actions)
+                    result.record_actions(stage.name, ctx.actions)
 
         ctx.benchmark = result
         for name, samples in result.timings.items():

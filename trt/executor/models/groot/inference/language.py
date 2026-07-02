@@ -4,6 +4,7 @@ import torch
 
 from trt.context import EdgeContext, LanguageOutputs
 from trt.language import language_head_dim, make_language_edge_flat_tensors
+from trt.modules.export.language import gather_last_token_hidden
 from trt.packing import pack_groot_language_inputs
 from trt.rope import make_rope_rotary_cos_sin
 from trt.runner.inference import InferenceStageResult
@@ -58,7 +59,10 @@ def _build_language_prefill_inputs(
     return flat_tensors
 
 
-def _run_trt_language(ctx: EdgeContext, language_module) -> None:
+def _language_prefill_bundle(
+    ctx: EdgeContext,
+    language_module,
+) -> tuple[torch.nn.Module, tuple[torch.Tensor, ...]]:
     language_model = ctx.model.backbone.eagle_model.language_model
     decoder = getattr(language_model, "model", language_model)
     seq_len = int(ctx.inference.language_inputs["inputs_embeds"].shape[1])
@@ -76,6 +80,83 @@ def _run_trt_language(ctx: EdgeContext, language_module) -> None:
         max_seq_len=max(max_seq_len, seq_len),
         device=ctx.device,
     )
+    return language_model, prefill
+
+
+@torch.no_grad()
+def _eager_last_token_logits(
+    language_model,
+    language_inputs: dict,
+    last_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Last-token logits from HF eager forward, gathered at ``last_token_ids``."""
+    inputs_embeds = language_inputs["inputs_embeds"]
+    attention_mask = language_inputs.get("attention_mask")
+    if attention_mask is None:
+        attention_mask = language_inputs["pad_mask"].to(dtype=torch.long)
+
+    outputs = language_model(
+        inputs_embeds=inputs_embeds,
+        attention_mask=attention_mask,
+        output_hidden_states=False,
+        use_cache=False,
+        return_dict=True,
+    )
+    logits = outputs.logits
+    if logits.ndim == 3:
+        return gather_last_token_hidden(logits, last_token_ids).float()
+    return logits.float()
+
+
+@torch.no_grad()
+def _trt_last_token_logits(language_module, prefill: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    outputs = language_module(*prefill)
+    if isinstance(outputs, tuple):
+        return outputs[0].float()
+    return outputs.float()
+
+
+@torch.no_grad()
+def compare_language_logits(
+    ctx: EdgeContext,
+    language_module=None,
+    *,
+    print_metrics: bool = True,
+) -> dict[str, float]:
+    """Compare last-token language logits: serialized TRT engine vs eager HF.
+
+    Requires ``ctx.inference.image_embs`` (run vision first or set manually).
+    Uses the same packed ``inputs_embeds`` and Edge-LLM prefill bindings as
+    ``run_serialized``, including ``last_token_ids`` from ``make_language_edge_flat_tensors``.
+    """
+    if ctx.inference.image_embs is None:
+        raise RuntimeError("compare_language_logits requires ctx.inference.image_embs")
+
+    if language_module is None:
+        language_module = ctx.handles.serialized.language
+    if language_module is None:
+        raise RuntimeError("compare_language_logits requires a loaded language engine")
+
+    _prepare_language(ctx)
+    language_model, prefill = _language_prefill_bundle(ctx, language_module)
+    last_token_ids = prefill[4]
+
+    trt_logits = _trt_last_token_logits(language_module, prefill)
+    eager_logits = _eager_last_token_logits(
+        language_model,
+        ctx.inference.language_inputs,
+        last_token_ids,
+    )
+
+    from trt.measure import tensor_error_metrics, tensor_parity_metrics
+
+    if print_metrics:
+        tensor_error_metrics("language logits", trt_logits, eager_logits)
+    return tensor_parity_metrics(trt_logits, eager_logits)
+
+
+def _run_trt_language(ctx: EdgeContext, language_module) -> None:
+    language_model, prefill = _language_prefill_bundle(ctx, language_module)
     outputs = language_module(*prefill)
     if isinstance(outputs, LanguageOutputs):
         ctx.inference.lm = outputs

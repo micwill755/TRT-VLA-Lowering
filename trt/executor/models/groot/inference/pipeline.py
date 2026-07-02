@@ -3,7 +3,6 @@ from trt.config.stage_config import (
     PipelineHooks,
     StageConfig,
     StageHooks,
-    StageKind,
 )
 from trt.io_spec import GROOT_EDGE_IO
 
@@ -18,10 +17,8 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
     stages=(
         StageConfig(
             stage_id=0,
-            kind=StageKind.VISION_ENCODE,
             input_sources=(),
-            runner="trt.runner.inference:InferenceStageRunner",
-            io=GROOT_EDGE_IO.vision,
+            runner="trt.runner.inference:InferenceRunner",
             engine_subdir="visual",
             hooks=StageHooks(
                 run_eager=f"{_I}.vision:run_eager",
@@ -31,10 +28,8 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
         ),
         StageConfig(
             stage_id=1,
-            kind=StageKind.LANGUAGE_PREFILL,
             input_sources=(0,),
-            runner="trt.runner.inference:InferenceStageRunner",
-            io=GROOT_EDGE_IO.language,
+            runner="trt.runner.inference:InferenceRunner",
             engine_subdir="language",
             hooks=StageHooks(
                 process_inputs=f"{_I}.glue:vision_to_language",
@@ -45,10 +40,8 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
         ),
         StageConfig(
             stage_id=2,
-            kind=StageKind.ACTION_CONTEXT,
             input_sources=(1,),
-            runner="trt.runner.inference:InferenceStageRunner",
-            io=GROOT_EDGE_IO.action_context,
+            runner="trt.runner.inference:InferenceRunner",
             engine_subdir="action_context",
             hooks=StageHooks(
                 process_inputs=f"{_I}.glue:language_to_action_context",
@@ -59,10 +52,8 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
         ),
         StageConfig(
             stage_id=3,
-            kind=StageKind.ACTION_ROLLOUT,
             input_sources=(2,),
-            runner="trt.runner.inference:InferenceStageRunner",
-            io=GROOT_EDGE_IO.action,
+            runner="trt.runner.inference:InferenceRunner",
             engine_subdir="action",
             final_output=True,
             hooks=StageHooks(

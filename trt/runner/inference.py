@@ -19,10 +19,7 @@ class InferenceStageResult:
 
 
 def _stage_timing_key(stage_cfg: StageConfig) -> str:
-    if stage_cfg.engine_subdir == "visual":
-        return "vision"
     return stage_cfg.engine_subdir or f"stage_{stage_cfg.stage_id}"
-
 
 def _run_hook_for_mode(mode: ExecutionMode) -> str:
     return {
@@ -31,8 +28,7 @@ def _run_hook_for_mode(mode: ExecutionMode) -> str:
         ExecutionMode.IN_MEMORY: "run_trt",
     }[mode]
 
-
-class InferenceStageRunner:
+class InferenceRunner:
     def __init__(self, stage_cfg: StageConfig):
         self.stage_cfg = stage_cfg
         self.hooks = stage_cfg.hooks
@@ -47,7 +43,7 @@ class InferenceStageRunner:
         hook_path = getattr(self.hooks, hook_name)
         if not hook_path:
             raise ValueError(
-                f"inference stage {self.stage_cfg.stage_id} ({self.stage_cfg.kind}) "
+                f"inference stage {self.stage_cfg.stage_id} "
                 f"missing {hook_name} hook for {ctx.execution_mode.value}"
             )
 

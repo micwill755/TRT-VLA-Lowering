@@ -15,7 +15,7 @@ from trt.compile import save_trt_engine_module
 from trt.hooks.export.plan import ExportPlan
 from trt.io_spec import GROOT_EDGE_IO
 from trt.modules.export.vision import GridVisionExportModule
-from trt.plugin_utils import patch_vision_attention, restore_attention
+from trt.plugin.plugin_utils import patch_vision_attention, restore_attention
 from trt.runner.base import StageContext
 from trt.utils import clone_hf_module_for_export
 from trt.vision import (

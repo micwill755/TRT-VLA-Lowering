@@ -5,7 +5,6 @@ from trt.config.stage_config import (
     PipelineHooks,
     StageConfig,
     StageHooks,
-    StageKind,
 )
 
 _M = "trt.models.molmo2.export"
@@ -18,10 +17,8 @@ MOLMO2_PIPELINE = PipelineConfig(
     stages=(
         StageConfig(
             stage_id=0,
-            kind=StageKind.VISION_ENCODE,
             input_sources=(),
             runner="trt.runner.export:ExportRunner",
-            io=...,
             hooks=StageHooks(
                 plan_export=f"{_M}.vision:plan_export",
                 metadata=f"{_M}.vision:metadata",

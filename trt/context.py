@@ -82,9 +82,9 @@ class EdgeHandles:
 
 @dataclass
 class BenchmarkResult:
-    """Timing and action outputs collected across benchmark backends.
+    """Timing and action outputs collected across benchmark stages.
 
-    Each backend (eager, TRT in-memory, serialized engines, etc.) appends
+    Each stage (eager, TRT in-memory, serialized engines, etc.) appends
     latencies and optional predicted actions for parity reporting.
     """
 

@@ -28,7 +28,7 @@ from trt.language import (
     make_language_edge_input_specs,
 )
 from trt.modules.export.language import CausalLMExportModule
-from trt.plugin_utils import patch_language_attention, restore_attention
+from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.rope import make_rope_rotary_cos_sin
 from trt.runner.base import StageContext
 from trt.tokenizer import save_embedding_table, save_tokenizer_for_edge_llm

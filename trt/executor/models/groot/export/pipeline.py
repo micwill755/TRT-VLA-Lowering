@@ -3,9 +3,7 @@ from trt.config.stage_config import (
     PipelineHooks,
     StageConfig,
     StageHooks,
-    StageKind,
 )
-from trt.io_spec import GROOT_EDGE_IO
 
 _E = "trt.executor.models.groot.export"
 
@@ -18,10 +16,8 @@ GROOT_PIPELINE = PipelineConfig(
     stages=(
         StageConfig(
             stage_id=0,
-            kind=StageKind.VISION_ENCODE,
             input_sources=(),
             runner="trt.runner.export:ExportRunner",
-            io=GROOT_EDGE_IO.vision,
             engine_subdir="visual",
             hooks=StageHooks(
                 plan_export=f"{_E}.vision:plan_export",
@@ -31,10 +27,8 @@ GROOT_PIPELINE = PipelineConfig(
         ),
         StageConfig(
             stage_id=1,
-            kind=StageKind.LANGUAGE_PREFILL,
             input_sources=(0,),
             runner="trt.runner.export:ExportRunner",
-            io=GROOT_EDGE_IO.language,
             engine_subdir="language",
             hooks=StageHooks(
                 process_inputs=f"{_E}.glue:vision_to_language",
@@ -46,10 +40,8 @@ GROOT_PIPELINE = PipelineConfig(
         ),
         StageConfig(
             stage_id=2,
-            kind=StageKind.ACTION_CONTEXT,
             input_sources=(1,),
             runner="trt.runner.export:ExportRunner",
-            io=GROOT_EDGE_IO.action_context,
             engine_subdir="action_context",
             hooks=StageHooks(
                 process_inputs=f"{_E}.glue:language_to_action_context",
@@ -60,10 +52,8 @@ GROOT_PIPELINE = PipelineConfig(
         ),
         StageConfig(
             stage_id=3,
-            kind=StageKind.ACTION_ROLLOUT,
             input_sources=(2,),
             runner="trt.runner.export:ExportRunner",
-            io=GROOT_EDGE_IO.action,
             engine_subdir="action",
             final_output=True,
             hooks=StageHooks(

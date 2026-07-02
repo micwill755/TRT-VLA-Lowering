@@ -35,7 +35,7 @@ from trt.rope import (
     make_rope_rotary_cos_sin,
 )
 from trt.utils import free_cuda_memory
-from trt.plugin_utils import (
+from trt.plugin.plugin_utils import (
     patch_language_attention, 
     restore_attention
 )
@@ -493,7 +493,6 @@ def language_edge_output_names(
     num_kv_layers: int | None = None,
 ) -> list[str]:
     """Language engine pipeline output bindings (excludes in-place past_key_values I/O)."""
-    del num_kv_layers
     return list(language_output_names)
 
 

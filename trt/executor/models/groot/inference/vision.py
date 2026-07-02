@@ -7,7 +7,6 @@ from trt.modules.export.vision import GridVisionExportModule
 from trt.runner.inference import InferenceStageResult
 from trt.vision import nchw_to_hwc
 
-
 def run_eager(ctx: EdgeContext) -> InferenceStageResult:
     infer = ctx.inference
     pixel_values = infer.pixel_values.to(device=ctx.device, dtype=torch.float16).contiguous()
@@ -28,7 +27,6 @@ def run_eager(ctx: EdgeContext) -> InferenceStageResult:
     infer.image_embs = image_embs
     return InferenceStageResult(tensors={"image_embs": image_embs})
 
-
 def run_serialized(ctx: EdgeContext) -> InferenceStageResult:
     module = ctx.handles.serialized.vision
     if module is None:
@@ -36,7 +34,6 @@ def run_serialized(ctx: EdgeContext) -> InferenceStageResult:
     image_embs = module(ctx.inference.pixel_values.contiguous())
     ctx.inference.image_embs = image_embs
     return InferenceStageResult(tensors={"image_embs": image_embs})
-
 
 def run_trt(ctx: EdgeContext) -> InferenceStageResult:
     module = ctx.handles.in_memory.vision

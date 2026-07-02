@@ -6,7 +6,7 @@ from typing import Any, Optional, Sequence, Tuple
 import tensorrt as trt
 import torch
 
-from trt.attention import PluginAttention, ViTPluginAttention
+from trt.plugin.attention import PluginAttention, ViTPluginAttention
 
 _PLUGIN_CONFIG: dict[str, Any] = {}
 
@@ -149,7 +149,7 @@ def load_plugins_for_trt():
     _register_attention_plugin_op()
     _register_vit_attention_plugin_op()
     load_plugin()
-    from trt import plugin_converter as _plugin_converter  # noqa: F401,E402
+    from trt.plugin import plugin_converter as _plugin_converter  # noqa: F401,E402
 
 
 def restore_attention(patched):

@@ -20,5 +20,5 @@ class BenchmarkStageHooks:
 
 @dataclass(frozen=True)
 class BenchmarkPipelineConfig:
-    backends: tuple[BenchmarkStageConfig, ...]
+    stages: tuple[BenchmarkStageConfig, ...]
     hooks: BenchmarkStageHooks = field(default_factory=BenchmarkStageHooks)
