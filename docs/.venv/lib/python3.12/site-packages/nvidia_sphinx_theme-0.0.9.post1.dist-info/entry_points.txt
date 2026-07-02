@@ -1,0 +1,2 @@
+[sphinx.html_themes]
+nvidia_sphinx_theme = nvidia_sphinx_theme

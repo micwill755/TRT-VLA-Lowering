@@ -1,0 +1,32 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+//
+// NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+// property and proprietary rights in and to this material, related
+// documentation and any modifications thereto. Any use, reproduction,
+// disclosure or distribution of this material and related documentation
+// without an express license agreement from NVIDIA CORPORATION or
+// its affiliates is strictly prohibited.
+
+.bd-sidebar-primary {
+  // make the two sidebars the same size
+  flex-basis: 20%;
+  min-width: var(--pst-sidebar-secondary);
+}
+
+.bd-sidebar-secondary {
+  // make the two sidebars the same size
+  flex-basis: 25%;
+  min-width: var(--pst-sidebar-secondary);
+}
+
+.bd-sidebar .nav-item__separator {
+  // hide sidebar header item separators
+  display: none;
+}
+
+nav.bd-links .current > a,
+.toc-entry a.nav-link.active {
+  // use nvgreen to highlight active sections
+  box-shadow: inset max(3px,.1875rem,.12em) 0 0 var(--nv-color-green);
+}

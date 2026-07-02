@@ -1,0 +1,1192 @@
+
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Customization Guide &#8212; Torch-TRT pipelines</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../../_static/styles/theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+<link href="../../_static/styles/pydata-sphinx-theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../../_static/styles/nvidia-sphinx-theme.css?v=933278ad" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=3ad11fa9" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../../_static/scripts/fontawesome.js?digest=a95f357e85573c9b56d5"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5" />
+<link rel="preload" as="script" href="../../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5" />
+
+
+
+    <script src="../../_static/documentation_options.js?v=c6e86fd7"></script>
+    <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../_static/copybutton.js?v=18b33a23"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'developer_guide/customization/customization-guide';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.19.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = '_static/switcher.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'latest';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            false;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+
+    <link rel="icon" href="../../_static/favicon.png"/>
+
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="prev" title="Pipeline Runtime" href="../architecture/pipeline-runtime.html" />
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="latest" />
+  
+    
+    <script src="../../_static/searchtools.js"></script>
+    <script src="../../_static/language_data.js"></script>
+    <script src="../../searchindex.js"></script>
+  
+
+
+  </head>
+
+  <body data-default-mode="">
+
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a>
+
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-3"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-3"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-3"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-3">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+
+
+<nav class="bd-docs-nav bd-links"
+     aria-label="Table of Contents">
+  <p class="bd-links__title" role="heading" aria-level="1">Table of Contents</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/getting_started/overview.html">Overview</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../user_guide/getting_started/supported-models.html">Supported Models</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../user_guide/getting_started/models/gr00t.html">GR00T</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../user_guide/getting_started/models/pi05.html">Pi0.5</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../user_guide/getting_started/models/molmo2.html">Molmo2</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../user_guide/getting_started/models/smolvla.html">SmolVLA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../user_guide/getting_started/models/alpamayo.html">Alpamayo</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/getting_started/installation.html">Installation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../architecture/pipeline-runtime.html">Pipeline Runtime</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Customization Guide</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Customization Guide</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="customization-guide">
+<h1>Customization Guide<a class="headerlink" href="#customization-guide" title="Link to this heading">#</a></h1>
+<p>New VLA model enablement should follow the <strong>profile + pipeline + hooks</strong> workflow
+in this repository. Export compiles TensorRT engines compatible with
+<a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/">TensorRT Edge-LLM</a>;
+inference and benchmark load those engines and run parity checks against eager
+PyTorch.</p>
+<p>This guide mirrors the structure of the upstream
+<a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/customization-guide.html">TensorRT Edge-LLM Customization Guide</a>
+and maps each extension point to files in <strong>this</strong> codebase.</p>
+<p>For upstream engine layout, multimodal preprocessing, and C++ runtime contracts,
+see the Edge-LLM docs. This guide covers the Python orchestration layer that
+sits on top.</p>
+<section id="architecture-overview">
+<h2>Architecture Overview<a class="headerlink" href="#architecture-overview" title="Link to this heading">#</a></h2>
+<p>A single run is driven by <code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeOrchestrator</span></code> and one shared
+<code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeContext</span></code>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>app.py --model &lt;profile&gt;
+     │
+     ▼
+VLAProfile (policy, model, prepare_compile_inputs)
+     │
+     ▼
+EdgeContext  ──► ExportPipeline   (compile engines → engine_root/)
+     │          LoadPipeline      (deserialize engines → handles.serialized)
+     │          BenchmarkPipeline   (eager vs TRT timing + parity)
+     │
+     └── artifacts, export_state, inference, benchmark
+</pre></div>
+</div>
+<p>Each <strong>model</strong> defines three pipeline configs (export, inference, load) as a
+<strong>linear or DAG stage graph</strong>. Stages are generic; behavior lives in <strong>hooks</strong>
+under <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/</span></code>.</p>
+<p><strong>Export stage loop</strong> (<code class="docutils literal notranslate"><span class="pre">ExportRunner</span></code>):</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>preprocess(ctx)
+for stage in stages:
+    process_inputs? (glue)
+    plan_export  → ExportPlan (module, sample_inputs, engine_dir, cleanup_modules)
+    compile      → trace + TensorRT engine + config.json
+    metadata / save_artifacts?
+    ctx.artifacts[&quot;stage_N&quot;] = StageResult
+postprocess?(ctx)
+</pre></div>
+</div>
+<p><strong>Inference stage loop</strong> (<code class="docutils literal notranslate"><span class="pre">InferenceRunner</span></code>):</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>preprocess(ctx)
+for stage in stages:
+    process_inputs? (glue)
+    run_eager | run_serialized | run_trt  (selected by ExecutionMode)
+    ctx.stage_results[N] = InferenceStageResult
+pick final_output stage → ctx.actions
+postprocess?(ctx)
+</pre></div>
+</div>
+<p>Reference implementation: <strong>GR00T</strong> (<code class="docutils literal notranslate"><span class="pre">Gr00tN1d7</span></code>) — four engines:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 12.0%" />
+<col style="width: 18.0%" />
+<col style="width: 30.0%" />
+<col style="width: 40.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Stage</p></th>
+<th class="head"><p><code class="docutils literal notranslate"><span class="pre">engine_subdir</span></code></p></th>
+<th class="head"><p>Export hooks</p></th>
+<th class="head"><p>Inference hooks</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>0 Vision</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/export/vision.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/inference/vision.py</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>1 Language</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/export/language.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/inference/language.py</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>2 Action context</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action_context/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/export/action_context.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/inference/action_context.py</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>3 Action (diffusion step)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/export/action.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/inference/action.py</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="pipeline-customization-points">
+<h2>Pipeline Customization Points<a class="headerlink" href="#pipeline-customization-points" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 35.0%" />
+<col style="width: 43.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Area</p></th>
+<th class="head"><p>Files</p></th>
+<th class="head"><p>What to update</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Orchestrator</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/orchestrator/edge_orchestrator.py</span></code>, <code class="docutils literal notranslate"><span class="pre">app.py</span></code></p></td>
+<td><p>CLI entry, <code class="docutils literal notranslate"><span class="pre">EdgeContext</span></code> construction, export/load/benchmark sequencing.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Pipeline registry</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/config/pipeline_registry.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">register_export_pipeline</span></code>, <code class="docutils literal notranslate"><span class="pre">register_inference_pipeline</span></code>,
+<code class="docutils literal notranslate"><span class="pre">register_load_pipeline</span></code>; aliases (e.g. <code class="docutils literal notranslate"><span class="pre">gr00t</span></code> → <code class="docutils literal notranslate"><span class="pre">Gr00tN1d7</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p>Export topology</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/export/pipeline.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PipelineConfig</span></code>: ordered <code class="docutils literal notranslate"><span class="pre">StageConfig</span></code> list, <code class="docutils literal notranslate"><span class="pre">PipelineHooks</span></code>,
+stage <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> (DAG edges).</p></td>
+</tr>
+<tr class="row-odd"><td><p>Inference topology</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/inference/pipeline.py</span></code></p></td>
+<td><p>Same graph as export; <code class="docutils literal notranslate"><span class="pre">StageHooks</span></code> use <code class="docutils literal notranslate"><span class="pre">run_eager</span></code> /
+<code class="docutils literal notranslate"><span class="pre">run_serialized</span></code> / <code class="docutils literal notranslate"><span class="pre">run_trt</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>Load topology</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/load/pipeline.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">load/serialize.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">SerializedStageSpec(key,</span> <span class="pre">engine_subdir,</span> <span class="pre">wrapper_cls)</span></code> per engine.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Generic runners</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/pipelines/{export,inference,load,benchmark}.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/runner/{export,inference}.py</span></code></p></td>
+<td><p>Usually unchanged; new models plug in via hooks + config.</p></td>
+</tr>
+<tr class="row-even"><td><p>Benchmark</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/pipeline.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/run.py</span></code></p></td>
+<td><p>Benchmark stages (eager, serialized TRT), parity reports.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="profile-customization-points">
+<h2>Profile Customization Points<a class="headerlink" href="#profile-customization-points" title="Link to this heading">#</a></h2>
+<p>Profiles own <strong>HuggingFace / LeRobot setup</strong> and <strong>compile sample inputs</strong>.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 35.0%" />
+<col style="width: 43.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Area</p></th>
+<th class="head"><p>Files</p></th>
+<th class="head"><p>What to update</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Profile base</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/profile/base.py</span></code></p></td>
+<td><p>Abstract <code class="docutils literal notranslate"><span class="pre">VLAProfile</span></code>: policy, model, processors, tokenizers,
+<code class="docutils literal notranslate"><span class="pre">prepare_compile_inputs</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Model profile</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/profile/&lt;model&gt;.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">GrootProfile</span></code>, <code class="docutils literal notranslate"><span class="pre">Pi05Profile</span></code>, etc.: config, <code class="docutils literal notranslate"><span class="pre">_init_policy</span></code>,
+<code class="docutils literal notranslate"><span class="pre">_init_models</span></code>, <code class="docutils literal notranslate"><span class="pre">_init_tokenizers</span></code>, input packing.</p></td>
+</tr>
+<tr class="row-even"><td><p>Registration</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/profile/registry.py</span></code></p></td>
+<td><p>Add <code class="docutils literal notranslate"><span class="pre">&quot;&lt;cli_name&gt;&quot;:</span> <span class="pre">&quot;trt.profile.&lt;module&gt;:&lt;ProfileClass&gt;&quot;</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Sample data</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/data.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">load_test_data</span></code>, <code class="docutils literal notranslate"><span class="pre">prepare_model_inputs</span></code>, model-specific packers
+(e.g. <code class="docutils literal notranslate"><span class="pre">pack_groot_language_inputs</span></code> in <code class="docutils literal notranslate"><span class="pre">trt/packing.py</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p>IO contract</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/io_spec.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> / <code class="docutils literal notranslate"><span class="pre">GROOT_EDGE_IO</span></code>: TRT binding names, slot wiring
+between language → action_context → action.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="stage-hook-customization-points">
+<h2>Stage Hook Customization Points<a class="headerlink" href="#stage-hook-customization-points" title="Link to this heading">#</a></h2>
+<p>Each stage is a <strong>node</strong> with a <strong>runner</strong> and <strong>hooks</strong> (string paths resolved
+at runtime via <code class="docutils literal notranslate"><span class="pre">trt.hooks.resolve</span></code>).</p>
+<p><strong>Export</strong> (<code class="docutils literal notranslate"><span class="pre">StageHooks</span></code>):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 18.0%" />
+<col style="width: 22.0%" />
+<col style="width: 60.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Hook</p></th>
+<th class="head"><p>Typical module</p></th>
+<th class="head"><p>Responsibility</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plan_export</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
+<td><p>Clone subgraph, build <code class="docutils literal notranslate"><span class="pre">ExportPlan</span></code> (module, <code class="docutils literal notranslate"><span class="pre">sample_inputs</span></code>,
+<code class="docutils literal notranslate"><span class="pre">engine_dir</span></code>, <code class="docutils literal notranslate"><span class="pre">cleanup_modules</span></code>).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compile</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
+<td><p>Patch attention plugins if needed, <code class="docutils literal notranslate"><span class="pre">save_trt_engine_module</span></code>, write
+<code class="docutils literal notranslate"><span class="pre">config.json</span></code> sidecars.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
+<td><p>Shapes and fields stored on <code class="docutils literal notranslate"><span class="pre">StageResult.metadata</span></code> for downstream
+stages / load.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
+<td><p>Non-TRT files (e.g. embedding table, tokenizer JSON beside
+<code class="docutils literal notranslate"><span class="pre">language.engine</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">process_inputs</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export/glue.py</span></code></p></td>
+<td><p>Inter-stage tensor wiring; may use dummy tensors for trace.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><strong>Inference</strong> (<code class="docutils literal notranslate"><span class="pre">StageHooks</span></code>):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 18.0%" />
+<col style="width: 22.0%" />
+<col style="width: 60.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Hook</p></th>
+<th class="head"><p>Typical module</p></th>
+<th class="head"><p>Responsibility</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">run_eager</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code></p></td>
+<td><p>PyTorch parity path on live <code class="docutils literal notranslate"><span class="pre">ctx.model</span></code> / <code class="docutils literal notranslate"><span class="pre">ctx.policy</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">run_serialized</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code></p></td>
+<td><p>Call <code class="docutils literal notranslate"><span class="pre">ctx.handles.serialized.&lt;key&gt;</span></code> (loaded <code class="docutils literal notranslate"><span class="pre">.engine</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">run_trt</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code></p></td>
+<td><p>In-process TRT module (<code class="docutils literal notranslate"><span class="pre">ctx.handles.in_memory</span></code>) when populated.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">process_inputs</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference/glue.py</span></code></p></td>
+<td><p>Copy upstream <code class="docutils literal notranslate"><span class="pre">StageResult</span></code> tensors into <code class="docutils literal notranslate"><span class="pre">ctx.inference</span></code> scratch.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="shared-module-customization-points">
+<h2>Shared Module Customization Points<a class="headerlink" href="#shared-module-customization-points" title="Link to this heading">#</a></h2>
+<p>Reusable export wrappers and builders live outside per-model hooks.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 35.0%" />
+<col style="width: 43.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Area</p></th>
+<th class="head"><p>Files</p></th>
+<th class="head"><p>What to update</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Vision export</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/modules/export/vision.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/vision.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">GridVisionExportModule</span></code>, ViT TRT settings, <code class="docutils literal notranslate"><span class="pre">vit_visual_edge_config</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Language export</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/modules/export/language.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/language.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">CausalLMExportModule</span></code>, flat Edge-LLM prefill tensors, RoPE, KV layout.</p></td>
+</tr>
+<tr class="row-even"><td><p>Action / diffusion export</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/modules/export/diffusion.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/action_rollout.py</span></code></p></td>
+<td><p>Static velocity step, <code class="docutils literal notranslate"><span class="pre">sample_actions_raw</span></code>, rollout adapters.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Compile helpers</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/compile.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/hooks/export/plan.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">save_trt_engine_module</span></code>, <code class="docutils literal notranslate"><span class="pre">ExportPlan</span></code> dataclass.</p></td>
+</tr>
+<tr class="row-even"><td><p>Clone / memory</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/utils.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">clone_hf_module_for_export</span></code> — disposable compile targets; <code class="docutils literal notranslate"><span class="pre">ctx.policy</span></code>
+must survive for later stages and eager benchmark.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="tensorrt-plugin-customization-points">
+<h2>TensorRT Plugin Customization Points<a class="headerlink" href="#tensorrt-plugin-customization-points" title="Link to this heading">#</a></h2>
+<p>Attention and ViT lowering use Edge-LLM TensorRT plugins. See also the upstream
+<a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/plugins-guide.html">TensorRT Plugins Guide</a>.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 35.0%" />
+<col style="width: 43.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Area</p></th>
+<th class="head"><p>Files</p></th>
+<th class="head"><p>What to update</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Plugin modules</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/plugin/attention.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/plugin/plugin_utils.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PluginAttention</span></code> (decoder), <code class="docutils literal notranslate"><span class="pre">ViTPluginAttention</span></code> (SigLIP/ViT).</p></td>
+</tr>
+<tr class="row-odd"><td><p>Patch helpers</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/plugin/plugin_utils.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">patch_language_attention</span></code>, <code class="docutils literal notranslate"><span class="pre">patch_vision_attention</span></code>,
+<code class="docutils literal notranslate"><span class="pre">restore_attention</span></code>, <code class="docutils literal notranslate"><span class="pre">load_plugins_for_trt</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>Dynamo converter</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/plugin/plugin_converter.py</span></code></p></td>
+<td><p>Torch-TensorRT custom op lowering for <code class="docutils literal notranslate"><span class="pre">attention_plugin</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Environment</p></td>
+<td><p>Shell / CI</p></td>
+<td><p>Set <code class="docutils literal notranslate"><span class="pre">EDGE_LLM_PLUGIN_SO</span></code> to <code class="docutils literal notranslate"><span class="pre">libNvInfer_edgellm_plugin.so</span></code> before
+export or benchmark.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="adding-a-new-vla-model">
+<h2>Adding A New VLA Model<a class="headerlink" href="#adding-a-new-vla-model" title="Link to this heading">#</a></h2>
+<p>Follow these steps in order. Use GR00T as the template
+(<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/</span></code>).</p>
+<ol class="arabic">
+<li><p><strong>Define the IO contract</strong></p>
+<ul class="simple">
+<li><p>Add or reuse a <code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> in <code class="docutils literal notranslate"><span class="pre">trt/io_spec.py</span></code>.</p></li>
+<li><p>List TRT <strong>input_names</strong> / <strong>output_names</strong> per engine (vision, language,
+action_context if used, action).</p></li>
+<li><p>Define <code class="docutils literal notranslate"><span class="pre">lm_to_action_context_slots</span></code> / <code class="docutils literal notranslate"><span class="pre">context_to_action_slots</span></code> if
+outputs are spliced by index.</p></li>
+</ul>
+</li>
+<li><p><strong>Add a profile</strong></p>
+<ul class="simple">
+<li><p>Create <code class="docutils literal notranslate"><span class="pre">trt/profile/&lt;model&gt;.py</span></code> subclassing <code class="docutils literal notranslate"><span class="pre">VLAProfile</span></code>.</p></li>
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">name</span></code>, <code class="docutils literal notranslate"><span class="pre">pipeline_model_type</span></code>, <code class="docutils literal notranslate"><span class="pre">model_id</span></code>, <code class="docutils literal notranslate"><span class="pre">engine_dir_default</span></code>,
+<code class="docutils literal notranslate"><span class="pre">io</span></code>.</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">_init_policy</span></code>, <code class="docutils literal notranslate"><span class="pre">_init_models</span></code>, <code class="docutils literal notranslate"><span class="pre">_init_tokenizers</span></code>,
+<code class="docutils literal notranslate"><span class="pre">prepare_compile_inputs</span></code>.</p></li>
+<li><p>Register in <code class="docutils literal notranslate"><span class="pre">trt/profile/registry.py</span></code>.</p></li>
+</ul>
+</li>
+<li><p><strong>Create the export pipeline</strong></p>
+<ul class="simple">
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/export/pipeline.py</span></code> with
+<code class="docutils literal notranslate"><span class="pre">PipelineConfig(stages=...)</span></code>.</p></li>
+<li><p>For each stage, implement <code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code>:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">plan_export(ctx,</span> <span class="pre">stage_inputs)</span> <span class="pre">-&gt;</span> <span class="pre">ExportPlan</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">compile(plan)</span> <span class="pre">-&gt;</span> <span class="pre">Path</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">metadata</span></code> / <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> as needed</p></li>
+</ul>
+</li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">export/glue.py</span></code> for <code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> between stages.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">export/preprocess.py</span></code> / <code class="docutils literal notranslate"><span class="pre">postprocess.py</span></code> if the whole pipeline
+needs bookends.</p></li>
+</ul>
+</li>
+<li><p><strong>Create the inference pipeline</strong></p>
+<ul class="simple">
+<li><p>Mirror the <strong>same</strong> <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> and <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> graph in
+<code class="docutils literal notranslate"><span class="pre">inference/pipeline.py</span></code>.</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">run_eager</span></code>, <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code>, <code class="docutils literal notranslate"><span class="pre">run_trt</span></code> per stage in
+<code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code>.</p></li>
+<li><p>Reuse or share packing logic with export (e.g. <code class="docutils literal notranslate"><span class="pre">pack_*_language_inputs</span></code>).</p></li>
+</ul>
+</li>
+<li><p><strong>Create the load pipeline</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">load/pipeline.py</span></code>: tuple of <code class="docutils literal notranslate"><span class="pre">SerializedStageSpec</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">load/serialize.py</span></code>: thin wrappers around <code class="docutils literal notranslate"><span class="pre">SerializedTRTEngine</span></code> with
+correct positional args per engine.</p></li>
+</ul>
+</li>
+<li><p><strong>Register pipelines</strong></p>
+<ul>
+<li><p>In <code class="docutils literal notranslate"><span class="pre">trt/config/pipeline_registry.py</span></code> <code class="docutils literal notranslate"><span class="pre">_register_builtin()</span></code> (or a
+model-specific import):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">register_export_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_PIPELINE</span><span class="p">,</span> <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;mymodel&quot;</span><span class="p">,))</span>
+<span class="n">register_inference_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_INFERENCE_PIPELINE</span><span class="p">,</span> <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;mymodel&quot;</span><span class="p">,))</span>
+<span class="n">register_load_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_LOAD_PIPELINE</span><span class="p">,</span> <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;mymodel&quot;</span><span class="p">,))</span>
+</pre></div>
+</div>
+</li>
+<li><p>Ensure <code class="docutils literal notranslate"><span class="pre">profile.pipeline_model_type</span></code> or <code class="docutils literal notranslate"><span class="pre">profile.name</span></code> resolves via
+aliases.</p></li>
+</ul>
+</li>
+<li><p><strong>Export and verify</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">EDGE_LLM_PLUGIN_SO</span><span class="o">=</span>/path/to/libNvInfer_edgellm_plugin.so
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>mymodel<span class="w"> </span>--export-only<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/my_model_edge_llm
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>Confirm <code class="docutils literal notranslate"><span class="pre">engine_root/&lt;subdir&gt;/*.engine</span></code> and <code class="docutils literal notranslate"><span class="pre">config.json</span></code> match
+Edge-LLM expectations.</p></li>
+</ul>
+</li>
+<li><p><strong>Benchmark and parity</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>mymodel<span class="w"> </span>--benchmark-only<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/my_model_edge_llm
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>Review timing summary, action ADE vs eager, and language logits parity
+(<code class="docutils literal notranslate"><span class="pre">compare_language_logits</span></code> in <code class="docutils literal notranslate"><span class="pre">groot/inference/language.py</span></code> as
+reference).</p></li>
+</ul>
+</li>
+</ol>
+</section>
+<section id="adding-a-pipeline-stage">
+<h2>Adding A Pipeline Stage<a class="headerlink" href="#adding-a-pipeline-stage" title="Link to this heading">#</a></h2>
+<p>To insert a new engine into an existing model (e.g. a preprocessor between
+language and action):</p>
+<ol class="arabic simple">
+<li><p>Assign the next <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> and set <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> to upstream stage
+id(s).</p></li>
+<li><p>Add export + inference hook modules and glue functions.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">SerializedStageSpec</span></code> and wrapper in <code class="docutils literal notranslate"><span class="pre">load/</span></code>.</p></li>
+<li><p>Append <code class="docutils literal notranslate"><span class="pre">StageConfig</span></code> to export and inference <code class="docutils literal notranslate"><span class="pre">pipeline.py</span></code> tuples.</p></li>
+<li><p>Update <code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> and any <code class="docutils literal notranslate"><span class="pre">plan_export</span></code> metadata consumed by
+downstream glue.</p></li>
+</ol>
+</section>
+<section id="component-reference">
+<h2>Component Reference<a class="headerlink" href="#component-reference" title="Link to this heading">#</a></h2>
+<p>Typical Edge-LLM VLA layout (GR00T-style):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 18.0%" />
+<col style="width: 22.0%" />
+<col style="width: 30.0%" />
+<col style="width: 30.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Component</p></th>
+<th class="head"><p>Output directory</p></th>
+<th class="head"><p>Primary TRT outputs</p></th>
+<th class="head"><p>Downstream consumer</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Vision</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual_embeds</span></code> <code class="docutils literal notranslate"><span class="pre">[N,</span> <span class="pre">H]</span></code></p></td>
+<td><p>Language packing (image token slots in <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Language</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">logits</span></code>, <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code>, <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code>, <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code></p></td>
+<td><p>Action context (<code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code>)</p></td>
+</tr>
+<tr class="row-even"><td><p>Action context</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action_context/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">vl_embs</span></code> / <code class="docutils literal notranslate"><span class="pre">context_embs</span></code></p></td>
+<td><p>Action diffusion rollout</p></td>
+</tr>
+<tr class="row-odd"><td><p>Action</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">velocity</span></code> (single denoising step)</p></td>
+<td><p>Python loop: <code class="docutils literal notranslate"><span class="pre">sample_actions_raw</span></code> over <code class="docutils literal notranslate"><span class="pre">num_inference_timesteps</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>PI0.5 / SmolVLA may omit <code class="docutils literal notranslate"><span class="pre">action_context</span></code> and wire <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code>
+directly into the action engine; see <code class="docutils literal notranslate"><span class="pre">PI05_EDGE_IO</span></code> in <code class="docutils literal notranslate"><span class="pre">trt/io_spec.py</span></code>.</p>
+</section>
+<section id="stageconfig-fields">
+<h2>StageConfig Fields<a class="headerlink" href="#stageconfig-fields" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 78.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">stage_id</span></code></p></td>
+<td><p>Unique index; referenced by <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> and <code class="docutils literal notranslate"><span class="pre">ctx.artifacts</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">input_sources</span></code></p></td>
+<td><p>Tuple of upstream <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> values; <code class="docutils literal notranslate"><span class="pre">()</span></code> = graph entry (uses
+<code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">runner</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt.runner.export:ExportRunner</span></code> or
+<code class="docutils literal notranslate"><span class="pre">trt.runner.inference:InferenceRunner</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">hooks</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">StageHooks</span></code> string paths to callables.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">engine_subdir</span></code></p></td>
+<td><p>Subdirectory under <code class="docutils literal notranslate"><span class="pre">engine_root</span></code> (e.g. <code class="docutils literal notranslate"><span class="pre">visual</span></code>, <code class="docutils literal notranslate"><span class="pre">language</span></code>).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">final_output</span></code></p></td>
+<td><p>Inference only: stage whose <code class="docutils literal notranslate"><span class="pre">actions</span></code> tensor becomes <code class="docutils literal notranslate"><span class="pre">ctx.actions</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="benchmark-customization-points">
+<h2>Benchmark Customization Points<a class="headerlink" href="#benchmark-customization-points" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 35.0%" />
+<col style="width: 43.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Area</p></th>
+<th class="head"><p>Files</p></th>
+<th class="head"><p>What to update</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Benchmark stages</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/pipeline.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">BenchmarkStageConfig(name,</span> <span class="pre">enabled,</span> <span class="pre">run)</span></code> per execution mode.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Inference dispatch</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/run.py</span></code></p></td>
+<td><p>Sets <code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span></code>, runs <code class="docutils literal notranslate"><span class="pre">InferencePipeline</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>Parity metrics</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/measure.py</span></code>, <code class="docutils literal notranslate"><span class="pre">report_*</span></code> in <code class="docutils literal notranslate"><span class="pre">benchmark/run.py</span></code></p></td>
+<td><p>Action ADE, per-tensor <code class="docutils literal notranslate"><span class="pre">tensor_parity_metrics</span></code>, optional staged checks.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="environment-and-prerequisites">
+<h2>Environment And Prerequisites<a class="headerlink" href="#environment-and-prerequisites" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><strong>GPU</strong> with CUDA and TensorRT / Torch-TensorRT compatible with your PyTorch
+build.</p></li>
+<li><p><strong>``EDGE_LLM_PLUGIN_SO``</strong> — path to <code class="docutils literal notranslate"><span class="pre">libNvInfer_edgellm_plugin.so</span></code> (built
+from <a class="reference external" href="https://github.com/NVIDIA/TensorRT-Edge-LLM">TensorRT-Edge-LLM</a>).</p></li>
+<li><p><strong>LeRobot dataset</strong> — default compile sample from <code class="docutils literal notranslate"><span class="pre">lerobot/libero</span></code> (override
+with <code class="docutils literal notranslate"><span class="pre">--dataset-id</span></code>, <code class="docutils literal notranslate"><span class="pre">--episode-index</span></code>, <code class="docutils literal notranslate"><span class="pre">--frame-index</span></code>).</p></li>
+<li><p><strong>Policy weights</strong> — <code class="docutils literal notranslate"><span class="pre">--model-id</span></code> or profile default (e.g.
+<code class="docutils literal notranslate"><span class="pre">nvidia/GR00T-N1.5-3B</span></code>).</p></li>
+</ul>
+</section>
+<section id="checklist-before-landing">
+<h2>Checklist Before Landing<a class="headerlink" href="#checklist-before-landing" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p>[ ] <code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> documents all engine bindings used at export and load.</p></li>
+<li><p>[ ] Export and inference graphs share the same <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> / <code class="docutils literal notranslate"><span class="pre">input_sources</span></code>.</p></li>
+<li><p>[ ] <code class="docutils literal notranslate"><span class="pre">register_*_pipeline</span></code> includes CLI alias used by <code class="docutils literal notranslate"><span class="pre">--model</span></code>.</p></li>
+<li><dl class="simple">
+<dt>[ ] <code class="docutils literal notranslate"><span class="pre">prepare_compile_inputs</span></code> produces the same tensor layout export and</dt><dd><p>inference expect.</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>[ ] Vision/language compile paths call <code class="docutils literal notranslate"><span class="pre">patch_*_attention</span></code> + <code class="docutils literal notranslate"><span class="pre">restore_attention</span></code></dt><dd><p>on <strong>cloned</strong> modules only.</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>[ ] <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> writes Edge-LLM sidecars (embeddings, tokenizer, chat</dt><dd><p>template) required by C++ runtime.</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>[ ] <code class="docutils literal notranslate"><span class="pre">--benchmark-only</span></code> loads engines and reports action parity within target</dt><dd><p>ADE for your model.</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>[ ] Staged parity (vision → language → context → action) investigated when</dt><dd><p>end-to-end ADE regresses.</p>
+</dd>
+</dl>
+</li>
+</ul>
+</section>
+<section id="further-reading">
+<h2>Further Reading<a class="headerlink" href="#further-reading" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/customization-guide.html">TensorRT Edge-LLM Customization Guide</a></p></li>
+<li><p><a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/plugins-guide.html">TensorRT Edge-LLM Plugins Guide</a></p></li>
+<li><p><a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/examples/alpamayo.html">Alpamayo-R1-10B (VLA) example</a> —
+upstream reference for vision + language + action engine layout</p></li>
+</ul>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="../architecture/pipeline-runtime.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Pipeline Runtime</p>
+      </div>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+
+
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#architecture-overview">Architecture Overview</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pipeline-customization-points">Pipeline Customization Points</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#profile-customization-points">Profile Customization Points</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stage-hook-customization-points">Stage Hook Customization Points</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#shared-module-customization-points">Shared Module Customization Points</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tensorrt-plugin-customization-points">TensorRT Plugin Customization Points</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#adding-a-new-vla-model">Adding A New VLA Model</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#adding-a-pipeline-stage">Adding A Pipeline Stage</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#component-reference">Component Reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stageconfig-fields">StageConfig Fields</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-customization-points">Benchmark Customization Points</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-and-prerequisites">Environment And Prerequisites</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#checklist-before-landing">Checklist Before Landing</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#further-reading">Further Reading</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5"></script>
+<script defer src="../../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5"></script>
+
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+<a class="footer-brand logo" href="https://www.nvidia.com">
+  <img src="../../_static/nvidia-logo-horiz-rgb-1c-blk-for-screen.svg" class="logo__image only-light" alt="NVIDIA"/>
+  <img src="../../_static/nvidia-logo-horiz-rgb-1c-wht-for-screen.svg" class="logo__image only-dark" alt="NVIDIA"/>
+</a></div>
+      
+        <div class="footer-item">
+
+<div class="footer-links">
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-policy/">Privacy Policy</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-center/">Your Privacy Choices</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/terms-of-service/">Terms of Service</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/accessibility/">Accessibility</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/company-policies/">Corporate Policies</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/product-security/">Product Security</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/contact/">Contact</a>
+  
+  
+  
+</div>
+</div>
+      
+        <div class="footer-item">
+
+
+
+
+  <p class="copyright">
+    
+      Copyright © 2025, Nvidia.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+<div class="extra_footer">
+  
+  <p>Last updated on July 02, 2026.</p>
+  
+</div></div>
+      
+    </div>
+  
+  
+  
+</div>
+
+  </footer>
+  </body>
+</html>

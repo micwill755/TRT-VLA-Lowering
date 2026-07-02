@@ -1,0 +1,96 @@
+// SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+//
+// NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+// property and proprietary rights in and to this material, related
+// documentation and any modifications thereto. Any use, reproduction,
+// disclosure or distribution of this material and related documentation
+// without an express license agreement from NVIDIA CORPORATION or
+// its affiliates is strictly prohibited.
+
+// styling that should be applied to the whole signature
+%api-signature-style {
+  font-weight: normal;
+  color: var(--pst-color-text-muted);
+}
+
+// styling to apply to arguments only
+%api-signature-argument-style {
+  font-weight: bold;
+  color: var(--pst-color-text-base);
+}
+
+// api selector, see: https://github.com/pydata/pydata-sphinx-theme/blob/v0.15.4/src/pydata_sphinx_theme/assets/styles/content/_api.scss#L136
+$api-selector: 'dl[class]:not(.option-list, .field-list, .footnote, .glossary, .simple)';
+
+#{$api-selector} #{$api-selector} {
+  // for nested api objects, set the margin to match paragraph margin (1.15rem) + line height space (0.65rem)
+  margin-bottom: 1.8rem;
+}
+
+.sig {
+  @extend %api-signature-style;
+
+  // match heading line height
+  line-height: 1.25rem;
+
+  // margin required on api signatures now that they match inline code (see below)
+  margin-bottom: 0.5rem;
+
+  // match inline code
+  background-color: var(--pst-color-surface);
+  border: 1px solid var(--pst-color-on-surface);
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.25rem;
+
+  // make keywords in signatures italicized
+  .k {
+    font-style: italic;
+  }
+
+  // override un-muted coloring of some elements by pydata
+  &.c,
+  &.cpp {
+    .k,
+    .kt,
+    .m,
+    .s,
+    .sc {
+      color: var(--pst-color-text-muted);
+    }
+  }
+}
+
+.sig-name {
+  // override basic.css which increases the size of object names
+  font-size: 1rem;
+}
+
+.cpp .sig-name-template {
+  // use default style on template parameters
+  @extend %api-signature-style;
+}
+
+.sig-param {
+  font-style: normal;
+
+  // override basic.css which will make parameter names italicized
+  &.n {
+    font-style: normal;
+  }
+}
+
+// set parameter names bold and unmuted color
+.cpp .sig-param.n {
+  @extend %api-signature-argument-style;
+}
+
+// python signatures do not have a nice structure so we set all names as arguments, and then undo some
+.py .sig-param .n {
+  @extend %api-signature-argument-style;
+
+  // revert styling on sibling names
+  ~ .n {
+    @extend %api-signature-style;
+  }
+}

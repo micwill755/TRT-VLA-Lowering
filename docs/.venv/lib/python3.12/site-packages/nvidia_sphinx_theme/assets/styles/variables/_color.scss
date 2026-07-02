@@ -1,0 +1,95 @@
+@use "sass:map";
+@use "sass:meta";
+// SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+//
+// NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+// property and proprietary rights in and to this material, related
+// documentation and any modifications thereto. Any use, reproduction,
+// disclosure or distribution of this material and related documentation
+// without an express license agreement from NVIDIA CORPORATION or
+// its affiliates is strictly prohibited.
+
+$nv-colors: (
+  "green": #76b900,
+  "green-2": #004831,
+);
+
+$pst-colors: (
+  "background": (
+    "light": #ffffff,
+    "dark": #111111,
+  ),
+  "on-background": (
+    "light": #ffffff,
+    "dark": #000000,
+  ),
+  "shadow": (
+    "light": #cccccc,
+    "dark": #000000,
+  ),
+  "heading": (
+    "light": #000000,
+    "dark": #ffffff,
+  ),
+  "text-base": (
+    "light": #1a1a1a,
+    "dark": #eeeeee,
+  ),
+  "text-muted": (
+    "light": #666666,
+    "dark": #999999,
+  ),
+  "surface": (
+    "light": #f7f7f7,
+    "dark": #1a1a1a,
+  ),
+  "on-surface": (
+    "light": #333333,
+    "dark": #dddddd,
+  ),
+  "primary": (
+    "light": var(--nv-color-green-2),
+    "dark": var(--nv-color-green),
+  ),
+  "table-row-hover-bg": (
+    "light": var(--nv-color-green),
+    "dark": var(--nv-color-green-2),
+  ),
+  "link": var(--pst-color-text-base),
+  "link-hover": var(--pst-color-text-base),
+  "inline-code": var(--pst-color-primary),
+  "inline-code-links": var(--pst-color-primary),
+  "secondary": var(--pst-color-primary),
+  "secondary-bg": (
+    "light": var(--nv-color-green),
+    "dark": var(--nv-color-green-2),
+  ),
+  "accent": var(--nv-color-green),
+);
+
+$prefix-map: (
+  "nv": $nv-colors,
+  "pst": $pst-colors,
+);
+
+@mixin theme-colors($mode) {
+  @each $prefix, $colors in $prefix-map {
+    @each $name, $value in $colors {
+      @if meta.type-of($value) == map {
+        $value: map.get($value, $mode)
+      }
+      --#{$prefix}-color-#{$name}: #{$value};
+    }
+  }
+}
+
+html:not([data-theme]) {
+  @include theme-colors(light);
+}
+
+@each $mode in (light, dark) {
+  html[data-theme='#{$mode}'] {
+    @include theme-colors($mode);
+  }
+}

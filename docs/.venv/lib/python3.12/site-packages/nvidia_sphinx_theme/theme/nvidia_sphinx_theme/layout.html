@@ -1,0 +1,67 @@
+{#
+SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+property and proprietary rights in and to this material, related
+documentation and any modifications thereto. Any use, reproduction,
+disclosure or distribution of this material and related documentation
+without an express license agreement from NVIDIA CORPORATION or
+its affiliates is strictly prohibited.
+#}
+{% extends 'pydata_sphinx_theme/layout.html' %}
+
+{%- block scripts %}
+{% if theme_public_docs_features | tobool %}
+<script src="https://cdn.cookielaw.org/scripttemplates/otSDKStub.js" type="text/javascript"
+  data-document-language="true" charset="UTF-8" data-domain-script="3e2b62ff-7ae7-4ac5-87c8-d5949ecafff5">
+</script>
+<script type="text/javascript">
+  function OptanonWrapper() {
+    var event = new Event('bannerLoaded');
+    window.dispatchEvent(event);
+  }
+</script>
+<script src="https://images.nvidia.com/aem-dam/Solutions/ot-js/ot-custom.js" type="text/javascript">
+</script>
+{% endif %}
+{{ super() }}
+{% if theme_public_docs_features | tobool %}
+<script type="text/javascript" src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js"></script>
+{% endif %}
+{%- endblock %}
+
+{%- block linktags %}
+{{ super() }}
+{% if theme_public_docs_features | tobool %}
+<link rel="preload" as="image" href="https://www.nvidia.com/content/dam/1x1-00000000.png">
+{% endif %}
+{%- endblock %}
+
+{% block extrahead %}
+{{ super() }}
+{% for content in theme_extra_head %}
+{{ content }}
+{% endfor %}
+{% endblock %}
+
+{% block docs_toc %}
+{% if remove_sidebar_secondary %}
+<div class="bd-sidebar-secondary"></div>
+{% endif %}
+{{ super() }}
+{% endblock %}
+
+{%- block body_tag %}
+{{ super() }}
+{% if theme_public_docs_features | tobool %}
+<img src="https://www.nvidia.com/content/dam/1x1-00000000.png" width="1" height="1" style="display:none;" alt="country_code">
+{% endif %}
+{% endblock %}
+
+{%- block scripts_end %}
+{{ super() }}
+{% if theme_public_docs_features | tobool %}
+<script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
+{% endif %}
+{%- endblock scripts_end %}

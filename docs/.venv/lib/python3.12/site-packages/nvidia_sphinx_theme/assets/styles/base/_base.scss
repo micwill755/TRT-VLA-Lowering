@@ -1,0 +1,59 @@
+// SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+//
+// NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+// property and proprietary rights in and to this material, related
+// documentation and any modifications thereto. Any use, reproduction,
+// disclosure or distribution of this material and related documentation
+// without an express license agreement from NVIDIA CORPORATION or
+// its affiliates is strictly prohibited.
+
+html {
+  // prevent shifting the content between pages when one would not normally need a scrollbar
+  overflow-y: scroll;
+}
+
+.bd-article {
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    // patch for variable name in base theme
+    color: var(--pst-color-heading);
+
+    // ensure long headings are visible
+    word-wrap: break-word;
+  }
+
+  // change only links in .bd-article to avoid affecting nav, prev/next page links
+  a {
+    text-decoration-color: var(--nv-color-green);  // same for light/dark mode
+
+    &.headerlink {
+      color: var(--pst-color-primary);
+    }
+  }
+}
+
+pre {
+  color: unset;  // let pygments set the font colors (applies to text not in a span with a class)
+}
+
+// ensure the padding overrides pygments
+html[data-theme] .highlight span.linenos {
+  padding-left: 0;
+  padding-right: 1rem;
+}
+
+// maintain theme color on hover
+#pst-back-to-top:hover {
+  background-color: var(--pst-color-secondary);
+  color: var(--pst-color-secondary-text);
+}
+
+// fix double underlines on abbreviation elements
+abbr[title] {
+  text-decoration: none;
+}

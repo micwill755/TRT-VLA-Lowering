@@ -1,0 +1,45 @@
+// SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+//
+// NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+// property and proprietary rights in and to this material, related
+// documentation and any modifications thereto. Any use, reproduction,
+// disclosure or distribution of this material and related documentation
+// without an express license agreement from NVIDIA CORPORATION or
+// its affiliates is strictly prohibited.
+
+.bd-sidebar-primary {
+  .navbar-brand {
+    // style sidebar branding
+
+    @media (min-width: 960px) {
+      // hide logo in sidebar on wide screens
+      display: none;
+    }
+
+    @media (max-width: 960px) {
+      // display a larger logo and title in the sidebar on mobile
+      flex-direction: column;
+      height: unset;
+      max-height: unset;
+
+      img {
+        // show the logo mobile
+        display: unset;
+
+        // set the height for the logo to ensure safari compatibilty
+        height: auto;
+      }
+    }
+  }
+
+  .sidebar-header-items .sidebar-header-items__end {
+    // center align theme switcher in mobile sidebar
+    margin: auto;
+  }
+
+  &.hide-on-wide {
+    // prevent the sidebar being hidden
+    display: inherit;
+  }
+}
