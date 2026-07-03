@@ -2,28 +2,23 @@ from __future__ import annotations
 
 from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
+from trt.config.pipeline_registry import get_inference_pipeline
+from trt.pipelines.inference import InferencePipeline
 
 SEED = 42
 
 
 def _run_inference(ctx: EdgeContext, mode: ExecutionMode) -> None:
-    from trt.config.pipeline_registry import get_inference_pipeline
-    from trt.pipelines.inference import InferencePipeline
-
     ctx.execution_mode = mode
     ctx.inference.seed = SEED
     ctx.stage_results.clear()
-    model_type = getattr(ctx.profile, "pipeline_model_type", None) or ctx.profile.name
-    InferencePipeline(get_inference_pipeline(model_type)).run(ctx)
-
+    InferencePipeline(get_inference_pipeline(ctx.profile.name)).run(ctx)
 
 def _has_in_memory(ctx: EdgeContext) -> bool:
     return ctx.handles.in_memory.vision is not None
 
-
 def _has_serialized(ctx: EdgeContext) -> bool:
     return ctx.handles.serialized.vision is not None
-
 
 def report_language_logits_parity(ctx: EdgeContext) -> None:
     if ctx.handles.serialized.language is None or ctx.inference.image_embs is None:
@@ -41,11 +36,25 @@ def report_language_logits_parity(ctx: EdgeContext) -> None:
     except Exception as exc:
         print(f"  skipped: {exc}")
 
+def report_vision_parity(ctx: EdgeContext, *, trt_backend: str = "serialized_trt") -> None:
+    result = ctx.benchmark
+    if result is None:
+        return
+
+    eager = result.image_embs.get("pytorch")
+    trt = result.image_embs.get(trt_backend)
+    if eager is None or trt is None:
+        return
+
+    from trt.measure import compare_image_embeddings
+
+    print(f"\nVision parity ({trt_backend} vs pytorch):")
+    compare_image_embeddings(eager, trt)
 
 def report_groot_benchmark(ctx: EdgeContext) -> None:
+    report_vision_parity(ctx)
     report_language_logits_parity(ctx)
     report_action_parity(ctx)
-
 
 def report_action_parity(ctx: EdgeContext) -> None:
     result = ctx.benchmark

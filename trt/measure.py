@@ -17,7 +17,6 @@ def _first_bad_index(mask, shape):
         flat_idx //= dim
     return tuple(reversed(coords))
 
-
 def tensor_health_report(name, tensor):
     finite = torch.isfinite(tensor)
     bad = ~finite
@@ -29,20 +28,11 @@ def tensor_health_report(name, tensor):
     inf_count = int(torch.isinf(tensor).sum().item())
     first_idx = _first_bad_index(bad, tensor.shape)
     first_val = tensor[first_idx].detach().cpu().item()
+    
     print(f"{name} nonfinite count:", bad_count, "of", tensor.numel())
     print(f"{name} nan count:", nan_count)
     print(f"{name} inf count:", inf_count)
     print(f"{name} first nonfinite index:", first_idx, "value:", first_val)
-
-def tensor_error_metrics(name, trt, eager):
-    tensor_health_report(f"{name} TRT", trt)
-    tensor_health_report(f"{name} eager", eager)
-    metrics = tensor_parity_metrics(trt, eager)
-    print(f"{name} mean diff:", metrics["mean_abs"])
-    print(f"{name} max diff:", metrics["max_abs"])
-    print(f"{name} relative L2:", metrics["relative_l2"])
-    print(f"{name} relative mean %:", metrics["relative_mean_pct"])
-
 
 def tensor_parity_metrics(trt: torch.Tensor, eager: torch.Tensor) -> dict[str, float]:
     trt = trt.float()
@@ -56,6 +46,32 @@ def tensor_parity_metrics(trt: torch.Tensor, eager: torch.Tensor) -> dict[str, f
         "relative_l2": float(rel_l2.item()),
         "relative_mean_pct": float(relmean_pct.item()),
     }
+
+
+def tensor_error_metrics(name: str, trt: torch.Tensor, eager: torch.Tensor) -> dict[str, float]:
+    tensor_health_report(f"{name} TRT", trt)
+    tensor_health_report(f"{name} eager", eager)
+    metrics = tensor_parity_metrics(trt, eager)
+    print(f"{name} mean diff:", metrics["mean_abs"])
+    print(f"{name} max diff:", metrics["max_abs"])
+    print(f"{name} relative L2:", metrics["relative_l2"])
+    print(f"{name} relative mean %:", metrics["relative_mean_pct"])
+    return metrics
+
+
+def compare_image_embeddings(
+    eager_embs: torch.Tensor,
+    trt_embs: torch.Tensor,
+    *,
+    name: str = "vision image_embs",
+) -> dict[str, float]:
+    metrics = tensor_parity_metrics(trt_embs, eager_embs)
+    print(
+        f"  {name:<28} mean_abs={metrics['mean_abs']:.6f}  "
+        f"max_abs={metrics['max_abs']:.6f}  rel_l2={metrics['relative_l2']:.6f}"
+    )
+    return metrics
+
 
 def _select_hidden_valid(x, valid):
     valid = valid.to(device=x.device, dtype=torch.bool)
@@ -71,9 +87,6 @@ def compute_action_chunk_ade(pred, target):
     target_xyz = target[..., :3].float()
     step_l2 = torch.linalg.vector_norm(pred_xyz - target_xyz, dim=-1)
     return step_l2.mean().item()
-
-def compute_action_chunk_minade(pred, target):
-    return compute_action_chunk_ade(pred, target)
 
 @torch.no_grad()
 def compare_action_rollout_to_eager(eager_actions, trt_actions, *, action_dim=None, name=None):
@@ -240,13 +253,6 @@ def compare_action_step(core, action_module, action_runner, prefix_pad_masks, pr
     tensor_error_metrics("action step output", trt, eager)
     print("action step xyz ADE:", compute_action_chunk_ade(trt, eager))
     print("action step xyz minADE:", compute_action_chunk_minade(trt, eager))
-
-@torch.no_grad()
-def compare_vision(core, images, visual_runner, eager_runner=None):
-    for i, img in enumerate(images):
-        eager = eager_runner(img) if eager_runner is not None else core.paligemma_with_expert.embed_image(img)
-        trt = visual_runner(img)
-        tensor_error_metrics(f"vision[{i}]", trt, eager)
 
 @torch.no_grad()
 def compare_language(eager_hidden, eager_k, eager_v, trt_hidden, trt_k, trt_v, prefix_pad_masks=None):

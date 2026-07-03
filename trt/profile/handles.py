@@ -20,13 +20,3 @@ class SerializedHandles:
     language: Any = None
     action_context: Any = None
     action: Any = None
-
-
-@dataclass
-class ClonedLanguageSubgraph:
-    """Cloned HF language stack for isolated TRT export."""
-
-    language_model: nn.Module
-    decoder: nn.Module
-    lm_head: nn.Module
-    config: Any

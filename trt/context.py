@@ -18,18 +18,6 @@ from trt.config.execution_mode import ExecutionMode
 from trt.profile import InMemoryHandles, SerializedHandles, VLAProfile
 
 
-@dataclass
-class LanguageOutputs:
-    """Language-stage tensors produced during inference (eager or TRT).
-
-    Filled after the LM runs. ``context_embs`` in :class:`InferenceState` is
-    typically derived from ``lm_hidden_states`` for the action head.
-    """
-
-    lm_hidden_states: torch.Tensor | None = None
-    prefix_k: torch.Tensor | None = None
-    prefix_v: torch.Tensor | None = None
-
 
 @dataclass
 class InferenceState:
@@ -45,7 +33,10 @@ class InferenceState:
     pixel_values: torch.Tensor | None = None
     image_embs: torch.Tensor | None = None
     language_inputs: dict[str, Any] = field(default_factory=dict)
-    lm: LanguageOutputs | None = None
+    lm_hidden_states: torch.Tensor | None = None
+    logits: torch.Tensor | None = None
+    prefix_k: torch.Tensor | None = None
+    prefix_v: torch.Tensor | None = None
     context_embs: torch.Tensor | None = None
     action_side: dict[str, Any] = field(default_factory=dict)
     noise: torch.Tensor | None = None
@@ -90,12 +81,16 @@ class BenchmarkResult:
 
     timings: dict[str, list[float]] = field(default_factory=dict)
     actions: dict[str, torch.Tensor] = field(default_factory=dict)
+    image_embs: dict[str, torch.Tensor] = field(default_factory=dict)
 
     def record(self, backend: str, seconds: float) -> None:
         self.timings.setdefault(backend, []).append(seconds)
 
     def record_actions(self, backend: str, actions: torch.Tensor) -> None:
         self.actions[backend] = actions.detach()
+
+    def record_image_embs(self, backend: str, image_embs: torch.Tensor) -> None:
+        self.image_embs[backend] = image_embs.detach()
 
 
 @dataclass

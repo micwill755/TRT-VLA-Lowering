@@ -6,7 +6,6 @@ from trt.config.benchmark_config import BenchmarkPipelineConfig
 from trt.context import BenchmarkResult, EdgeContext
 from trt.measure import print_timing
 
-
 class BenchmarkPipeline:
     def __init__(self, config: BenchmarkPipelineConfig):
         self.config = config
@@ -23,8 +22,11 @@ class BenchmarkPipeline:
                 t0 = time.perf_counter()
                 stage.run(ctx)
                 result.record(stage.name, time.perf_counter() - t0)
-                if iter_idx == iterations - 1 and ctx.actions is not None:
-                    result.record_actions(stage.name, ctx.actions)
+                if iter_idx == iterations - 1:
+                    if ctx.actions is not None:
+                        result.record_actions(stage.name, ctx.actions)
+                    if ctx.inference.image_embs is not None:
+                        result.record_image_embs(stage.name, ctx.inference.image_embs)
 
         ctx.benchmark = result
         for name, samples in result.timings.items():

@@ -1,0 +1,1524 @@
+
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>GR00T Export Pipeline Example &#8212; Torch-TRT pipelines</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/nvidia-sphinx-theme.css?v=933278ad" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=3ad11fa9" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=a95f357e85573c9b56d5"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5" />
+
+
+
+    <script src="../_static/documentation_options.js?v=c6e86fd7"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=18b33a23"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+    <script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.12.1/dist/mermaid.esm.min.mjs";
+
+
+
+
+
+const initStyles = () => {
+    const defaultStyle = document.createElement('style');
+    defaultStyle.textContent = `pre.mermaid {
+    /* Same as .mermaid-container > pre */
+    display: block;
+    width: 100%;
+}
+
+pre.mermaid > svg {
+    /* Same as .mermaid-container > pre > svg */
+    height: 500px;
+    width: 100%;
+    max-width: 100% !important;
+}`;
+    document.head.appendChild(defaultStyle);
+
+    const fullscreenStyle = document.createElement('style');
+    fullscreenStyle.textContent = `.mermaid-container {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+}
+
+.mermaid-container > pre {
+    display: block;
+    width: 100%;
+}
+
+.mermaid-container > pre > svg {
+    height: 500px;
+    width: 100%;
+    max-width: 100% !important;
+}
+
+.mermaid-fullscreen-btn {
+    width: 28px;
+    height: 28px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    color: #333;
+}
+
+.mermaid-fullscreen-btn:hover {
+    opacity: 100% !important;
+    background: rgba(255, 255, 255, 1);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+    transform: scale(1.1);
+}
+
+.mermaid-fullscreen-btn.dark-theme {
+    background: rgba(50, 50, 50, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #e0e0e0;
+}
+
+.mermaid-fullscreen-btn.dark-theme:hover {
+    background: rgba(60, 60, 60, 1);
+    box-shadow: 0 3px 10px rgba(255, 255, 255, 0.2);
+}
+
+.mermaid-fullscreen-modal {
+    display: none;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 95vw;
+    height: 100vh;
+    background: rgba(255, 255, 255, 0.98);
+    z-index: 9999;
+    padding: 20px;
+    overflow: auto;
+}
+
+.mermaid-fullscreen-modal.dark-theme {
+    background: rgba(0, 0, 0, 0.98);
+}
+
+.mermaid-fullscreen-modal.active {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mermaid-container-fullscreen {
+    position: relative;
+    width: 95vw;
+    height: 90vh;
+    max-width: 95vw;
+    max-height: 90vh;
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    overflow: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mermaid-container-fullscreen.dark-theme {
+    background: #1a1a1a;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8);
+}
+
+.mermaid-container-fullscreen pre.mermaid {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mermaid-container-fullscreen .mermaid svg {
+    height: 100% !important;
+    width: 100% !important;
+    cursor: grab;
+}
+
+.mermaid-fullscreen-close {
+    position: fixed !important;
+    top: 20px !important;
+    right: 20px !important;
+    width: 40px;
+    height: 40px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    border-radius: 50%;
+    cursor: pointer;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transition: all 0.2s;
+    font-size: 24px;
+    line-height: 1;
+    color: #333;
+}
+
+.mermaid-fullscreen-close:hover {
+    background: white;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+    transform: scale(1.1);
+}
+
+.mermaid-fullscreen-close.dark-theme {
+    background: rgba(50, 50, 50, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #e0e0e0;
+}
+
+.mermaid-fullscreen-close.dark-theme:hover {
+    background: rgba(60, 60, 60, 1);
+    box-shadow: 0 6px 16px rgba(255, 255, 255, 0.2);
+}
+
+.mermaid-fullscreen-modal .mermaid-fullscreen-btn {
+    display: none !important;
+}`;
+    document.head.appendChild(fullscreenStyle);
+}
+
+// Detect if page has dark background
+const isDarkTheme = () => {
+    // We use a set of heuristics:
+    // 1. Check for common dark mode classes or attributes
+    // 2. Check computed background color brightness
+    if (document.documentElement.classList.contains('dark') ||
+        document.documentElement.getAttribute('data-theme') === 'dark' ||
+        document.body.classList.contains('dark') ||
+        document.body.getAttribute('data-theme') === 'dark') {
+        // console.log("Dark theme detected via class/attribute");
+        return true;
+    }
+    if (document.documentElement.classList.contains('light') ||
+        document.documentElement.getAttribute('data-theme') === 'light' ||
+        document.body.classList.contains('light') ||
+        document.body.getAttribute('data-theme') === 'light') {
+        // console.log("Light theme detected via class/attribute");
+        return false;
+    }
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        // console.log("Dark theme detected via prefers-color-scheme");
+        return true;
+    }
+    const bgColor = window.getComputedStyle(document.body).backgroundColor;
+    const match = bgColor.match(/rgb\((\d+),\s*(\d+),\s*(\d+)/);
+    if (match) {
+        const r = parseInt(match[1]);
+        const g = parseInt(match[2]);
+        const b = parseInt(match[3]);
+        const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+        // console.log("Background color brightness:", brightness);
+        return brightness < 128;
+    }
+    // console.log("No dark or light theme detected, defaulting to light theme");
+    return false;
+};
+
+let darkTheme = isDarkTheme();
+let modal = null;
+let modalContent = null;
+let previousScrollOffset = [window.scrollX, window.scrollY];
+
+const runMermaid = async (rerun) => {
+    console.log("Running mermaid diagrams, rerun =", rerun);
+    // clear all existing mermaid charts
+    let all_mermaids = document.querySelectorAll(".mermaid");
+
+    if (rerun) {
+        all_mermaids.forEach((el) => {
+            if(!el.hasAttribute("data-original-code")) {
+                // store original code
+                // console.log(`Storing original code for first run: `, el.innerHTML);
+                el.setAttribute('data-original-code', el.innerHTML);
+            }
+            if(el.getAttribute("data-processed") === "true") {
+                // remove and restore original
+                el.removeAttribute("data-processed");
+                // console.log(`Restoring original code for re-run: `, el.getAttribute('data-original-code'));
+                el.innerHTML = el.getAttribute('data-original-code');
+            } else {
+                // store original code
+                // console.log(`Storing original code for re-run: `, el.innerHTML);
+                el.setAttribute('data-original-code', el.innerHTML);
+            }
+        });
+        await mermaid.run();
+    }
+
+    all_mermaids = document.querySelectorAll(".mermaid");
+    const mermaids_processed = document.querySelectorAll(".mermaid[data-processed='true']");
+
+    if ("False" === "True") {
+        const mermaids_to_add_zoom = -1 === -1 ? all_mermaids.length : -1;
+        if(mermaids_to_add_zoom > 0) {
+            var svgs = d3.selectAll("");
+            if(all_mermaids.length !== mermaids_processed.length) {
+                setTimeout(() => runMermaid(false), 200);
+                return;
+            } else if(svgs.size() !== mermaids_to_add_zoom) {
+                setTimeout(() => runMermaid(false), 200);
+                return;
+            } else {
+                svgs.each(function() {
+                    var svg = d3.select(this);
+                    svg.html("<g class='wrapper'>" + svg.html() + "</g>");
+                    var inner = svg.select("g");
+                    var zoom = d3.zoom().on("zoom", function(event) {
+                        inner.attr("transform", event.transform);
+                    });
+                    svg.call(zoom);
+                });
+            }
+        }
+    } else if(all_mermaids.length !== mermaids_processed.length) {
+        // Wait for mermaid to process all diagrams
+        setTimeout(() => runMermaid(false), 200);
+        return;
+    }
+
+    // Stop here if not adding fullscreen capability
+    if ("True" !== "True") return;
+
+    if (modal !== null ) {
+        // Destroy existing modal
+        modal.remove();
+        modal = null;
+        modalContent = null;
+    }
+
+    modal = document.createElement('div');
+    modal.className = 'mermaid-fullscreen-modal' + (darkTheme ? ' dark-theme' : '');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Fullscreen diagram viewer');
+    modal.innerHTML = `
+        <button class="mermaid-fullscreen-close${darkTheme ? ' dark-theme' : ''}" aria-label="Close fullscreen">✕</button>
+        <div class="mermaid-container-fullscreen${darkTheme ? ' dark-theme' : ''}"></div>
+    `;
+    document.body.appendChild(modal);
+
+    modalContent = modal.querySelector('.mermaid-container-fullscreen');
+    const closeBtn = modal.querySelector('.mermaid-fullscreen-close');
+
+    const closeModal = () => {
+        modal.classList.remove('active');
+        modalContent.innerHTML = '';
+        document.body.style.overflow = ''
+        window.scrollTo({left: previousScrollOffset[0], top: previousScrollOffset[1], behavior: 'instant'});
+    };
+
+    closeBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modal.classList.contains('active')) {
+            closeModal();
+        }
+    });
+
+    document.querySelectorAll('.mermaid').forEach((mermaidDiv) => {
+        if (mermaidDiv.parentNode.classList.contains('mermaid-container') ||
+            mermaidDiv.closest('.mermaid-fullscreen-modal')) {
+            // Already processed, adjust button class if needed
+            const existingBtn = mermaidDiv.parentNode.querySelector('.mermaid-fullscreen-btn');
+            if (existingBtn) {
+                existingBtn.className = 'mermaid-fullscreen-btn' + (darkTheme ? ' dark-theme' : '');
+            }
+            return;
+        }
+
+        const container = document.createElement('div');
+        container.className = 'mermaid-container';
+        mermaidDiv.parentNode.insertBefore(container, mermaidDiv);
+        container.appendChild(mermaidDiv);
+
+        const fullscreenBtn = document.createElement('button');
+        fullscreenBtn.className = 'mermaid-fullscreen-btn' + (darkTheme ? ' dark-theme' : '');
+        fullscreenBtn.setAttribute('aria-label', 'View diagram in fullscreen');
+        fullscreenBtn.textContent = '⛶';
+        fullscreenBtn.style.opacity = '50%';
+
+        // Calculate dynamic position based on diagram's margin and padding
+        const diagramStyle = window.getComputedStyle(mermaidDiv);
+        const marginTop = parseFloat(diagramStyle.marginTop) || 0;
+        const marginRight = parseFloat(diagramStyle.marginRight) || 0;
+        const paddingTop = parseFloat(diagramStyle.paddingTop) || 0;
+        const paddingRight = parseFloat(diagramStyle.paddingRight) || 0;
+        fullscreenBtn.style.top = `${marginTop + paddingTop + 4}px`;
+        fullscreenBtn.style.right = `${marginRight + paddingRight + 4}px`;
+
+        fullscreenBtn.addEventListener('click', () => {
+            previousScrollOffset = [window.scroll, window.scrollY];
+            const clone = mermaidDiv.cloneNode(true);
+            modalContent.innerHTML = '';
+            modalContent.appendChild(clone);
+
+            const svg = clone.querySelector('svg');
+            if (svg) {
+                svg.removeAttribute('width');
+                svg.removeAttribute('height');
+                svg.style.width = '100%';
+                svg.style.height = 'auto';
+                svg.style.maxWidth = '100%';
+                svg.style.sdisplay = 'block';
+
+                if ("False" === "True") {
+                    setTimeout(() => {
+                        const g = svg.querySelector('g');
+                        if (g) {
+                            var svgD3 = d3.select(svg);
+                            svgD3.html("<g class='wrapper'>" + svgD3.html() + "</g>");
+                            var inner = svgD3.select("g");
+                            var zoom = d3.zoom().on("zoom", function(event) {
+                                inner.attr("transform", event.transform);
+                            });
+                            svgD3.call(zoom);
+                        }
+                    }, 100);
+                }
+            }
+
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        });
+        container.appendChild(fullscreenBtn);
+    });
+};
+
+const load = async () => {
+    initStyles();
+
+    await runMermaid(true);
+
+    const reRunIfThemeChanges = async () => {
+        const newDarkTheme = isDarkTheme();
+        if (newDarkTheme !== darkTheme) {
+            darkTheme = newDarkTheme;
+            console.log("Theme change detected, re-running mermaid with", darkTheme ? "dark" : "default", "theme");
+            await mermaid.initialize(
+                {...JSON.parse(
+                    `{"startOnLoad": false}`
+                ),
+                ...{ darkMode: darkTheme, theme: darkTheme ? 'dark' : 'default' },
+                }
+            );
+            await runMermaid(true);
+        }
+    };
+
+    // Update theme classes when theme changes
+    const themeObserver = new MutationObserver(reRunIfThemeChanges);
+    themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'data-theme']
+    });
+    themeObserver.observe(document.body, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'data-theme']
+    });
+};
+
+
+
+
+
+console.log("Initializing mermaid with", darkTheme ? "dark" : "default", "theme");
+mermaid.initialize(
+    {...JSON.parse(
+        `{"startOnLoad": false}`
+    ),
+    ...{ darkMode: darkTheme, theme: darkTheme ? 'dark' : 'default' },
+    }
+);
+
+window.addEventListener("load", load);
+window.runMermaid = runMermaid;</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'examples/gr00t';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.19.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = '_static/switcher.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'latest';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            false;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+
+    <link rel="icon" href="../_static/favicon.png"/>
+
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Overview" href="../developer_guide/architecture/overview.html" />
+    <link rel="prev" title="Installation" href="../user_guide/getting_started/installation.html" />
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="latest" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+  
+
+
+  </head>
+
+  <body data-default-mode="">
+
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a>
+
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-3"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-3"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-3"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-3">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+
+
+<nav class="bd-docs-nav bd-links"
+     aria-label="Table of Contents">
+  <p class="bd-links__title" role="heading" aria-level="1">Table of Contents</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/getting_started/overview.html">Overview</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../user_guide/getting_started/supported-models.html">Supported Models</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/gr00t.html">GR00T</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/pi05.html">Pi0.5</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/molmo2.html">Molmo2</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/smolvla.html">SmolVLA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/alpamayo.html">Alpamayo</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/getting_started/installation.html">Installation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">GR00T Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/pipelines-and-stages.html">Pipelines and Stages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/runners.html">Runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/hooks.html">Hooks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/export-pipeline.html">Export Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/customization/customization-guide.html">Customization Guide</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">GR00T Export Pipeline Example</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="gr00t-export-pipeline-example">
+<h1>GR00T Export Pipeline Example<a class="headerlink" href="#gr00t-export-pipeline-example" title="Link to this heading">#</a></h1>
+<p>This example shows how GR00T wraps a vision-language-action model as a set of
+TensorRT engines and how the export, load, and inference pipelines sit above the
+runtime layer. Use it as the template when adding another engine-backed model.</p>
+<p>At a high level, the runtime owns the live model, policy, device, sample inputs,
+and engine directory. The pipeline layer does not replace that runtime. It
+adapts the runtime state into ordered export stages, writes engines, loads those
+engines back, and then drives inference through the same stage graph.</p>
+<pre  class="mermaid">
+        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+graph TB
+    RT[&quot;LLMEngineRuntime / orchestrator&lt;br/&gt;model, policy, inputs, device&quot;]
+    CTX[&quot;EdgeContext&lt;br/&gt;shared run state&quot;]
+    EXP[&quot;ExportPipeline&lt;br/&gt;compile engines&quot;]
+    LOAD[&quot;LoadPipeline&lt;br/&gt;deserialize engines&quot;]
+    INF[&quot;InferencePipeline&lt;br/&gt;run stage graph&quot;]
+    BENCH[&quot;BenchmarkPipeline&lt;br/&gt;compare backends&quot;]
+
+    RT --&gt; CTX
+    CTX --&gt; EXP
+    EXP --&gt; CTX
+    CTX --&gt; LOAD
+    LOAD --&gt; CTX
+    CTX --&gt; BENCH
+    BENCH --&gt; INF
+    INF --&gt; CTX
+
+    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+    classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+    class RT,CTX nvNode
+    class EXP,LOAD,INF,BENCH greyNode
+    </pre><section id="design-pattern">
+<h2>Design pattern<a class="headerlink" href="#design-pattern" title="Link to this heading">#</a></h2>
+<p>GR00T keeps the generic pipeline mechanics separate from model-specific logic:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">PipelineConfig</span></code> describes the ordered graph.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">StageConfig</span></code> describes one engine boundary.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PipelineHooks</span></code> run once before and after the full stage loop.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">StageHooks</span></code> contain model-specific export, glue, inference, metadata, and
+artifact behavior.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ExportRunner</span></code> and <code class="docutils literal notranslate"><span class="pre">InferenceRunner</span></code> are generic. They resolve hook paths
+and call them in a fixed order.</p></li>
+</ul>
+<p>For a new model, first decide where the runtime model should be split into
+engines. Then write one stage per engine and use hook functions to isolate the
+model-specific details.</p>
+</section>
+<section id="gr00t-stages">
+<h2>GR00T stages<a class="headerlink" href="#gr00t-stages" title="Link to this heading">#</a></h2>
+<p>GR00T exports four engines. The export and inference pipelines use matching
+<code class="docutils literal notranslate"><span class="pre">stage_id</span></code> values and matching <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> edges so downstream glue can
+reason about the same graph in both modes.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 12.0%" />
+<col style="width: 20.0%" />
+<col style="width: 24.0%" />
+<col style="width: 44.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Stage</p></th>
+<th class="head"><p>Engine directory</p></th>
+<th class="head"><p>Inputs from</p></th>
+<th class="head"><p>Responsibility</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual</span></code></p></td>
+<td><p>Runtime inputs</p></td>
+<td><p>Convert camera tensors into visual embeddings.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code></p></td>
+<td><p>Stage <code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p>Combine visual embeddings with tokenized language inputs and produce LM
+hidden state plus prefix cache tensors.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">2</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action_context</span></code></p></td>
+<td><p>Stage <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+<td><p>Build the action context embeddings consumed by the action head.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">3</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action</span></code></p></td>
+<td><p>Stage <code class="docutils literal notranslate"><span class="pre">2</span></code></p></td>
+<td><p>Produce robot action tensors. This is the <code class="docutils literal notranslate"><span class="pre">final_output</span></code> stage.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<pre  class="mermaid">
+        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+graph LR
+    IN[&quot;runtime sample&lt;br/&gt;model_inputs&quot;]
+    V[&quot;0 visual&lt;br/&gt;visual/&quot;]
+    L[&quot;1 language&lt;br/&gt;language/&quot;]
+    AC[&quot;2 action_context&lt;br/&gt;action_context/&quot;]
+    A[&quot;3 action&lt;br/&gt;action/&quot;]
+    OUT[&quot;actions&quot;]
+
+    IN --&gt; V --&gt; L --&gt; AC --&gt; A --&gt; OUT
+
+    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+    classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+    class V,L,AC,A nvNode
+    class IN,OUT greyNode
+    </pre></section>
+<section id="export-data-flow">
+<h2>Export data flow<a class="headerlink" href="#export-data-flow" title="Link to this heading">#</a></h2>
+<p>Export starts with a single <code class="docutils literal notranslate"><span class="pre">EdgeContext</span></code> built from the runtime. The context
+carries <code class="docutils literal notranslate"><span class="pre">ctx.model</span></code>, <code class="docutils literal notranslate"><span class="pre">ctx.policy</span></code>, <code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code>, <code class="docutils literal notranslate"><span class="pre">ctx.engine_root</span></code>,
+and mutable export state. Each export stage reads from that context, optionally
+reads upstream <code class="docutils literal notranslate"><span class="pre">StageResult</span></code> objects, and writes one new <code class="docutils literal notranslate"><span class="pre">StageResult</span></code>.</p>
+<pre  class="mermaid">
+        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+graph TB
+    PRE[&quot;pipeline preprocess&lt;br/&gt;normalize runtime inputs&quot;]
+    UP[&quot;upstream StageResult tensors&quot;]
+    GLUE[&quot;process_inputs hook&lt;br/&gt;shape current stage inputs&quot;]
+    PLAN[&quot;plan_export hook&lt;br/&gt;clone subgraph + ExportPlan&quot;]
+    COMP[&quot;compile hook&lt;br/&gt;torch.export + TRT&quot;]
+    SAVE[&quot;save_artifacts / metadata hooks&quot;]
+    RESULT[&quot;StageResult&lt;br/&gt;engine_path, spec, tensors, metadata&quot;]
+    ART[&quot;ctx.artifacts['stage_N']&quot;]
+
+    PRE --&gt; GLUE
+    UP --&gt; GLUE
+    GLUE --&gt; PLAN --&gt; COMP --&gt; SAVE --&gt; RESULT --&gt; ART
+
+    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+    classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+    class PLAN,COMP,RESULT nvNode
+    class PRE,UP,GLUE,SAVE,ART greyNode
+    </pre><p>The fixed runner order is:</p>
+<ol class="arabic simple">
+<li><p>Collect upstream results from <code class="docutils literal notranslate"><span class="pre">ctx.artifacts</span></code> using <code class="docutils literal notranslate"><span class="pre">input_sources</span></code>.</p></li>
+<li><p>Start with <code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code>.</p></li>
+<li><p>Call <code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> when the stage needs glue from an upstream engine.</p></li>
+<li><p>Call <code class="docutils literal notranslate"><span class="pre">plan_export</span></code> to clone the correct submodule and build an
+<code class="docutils literal notranslate"><span class="pre">ExportPlan</span></code>.</p></li>
+<li><p>Call <code class="docutils literal notranslate"><span class="pre">compile</span></code> to trace and compile the subgraph to a TensorRT engine.</p></li>
+<li><p>Call optional <code class="docutils literal notranslate"><span class="pre">metadata</span></code>, <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code>, and <code class="docutils literal notranslate"><span class="pre">after_stage</span></code> hooks.</p></li>
+<li><p>Store <code class="docutils literal notranslate"><span class="pre">StageResult</span></code> at <code class="docutils literal notranslate"><span class="pre">ctx.artifacts[&quot;stage_N&quot;]</span></code>.</p></li>
+</ol>
+<p>The important rule is that each stage should export only the subgraph owned by
+that engine. Cross-stage reshaping, tensor selection, and bookkeeping belong in
+<code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> glue, not inside the generic runner.</p>
+</section>
+<section id="hook-map">
+<h2>Hook map<a class="headerlink" href="#hook-map" title="Link to this heading">#</a></h2>
+<p>GR00T registers dotted hook paths under <code class="docutils literal notranslate"><span class="pre">trt.executor.models.groot</span></code>. The paths
+are resolved at runtime, which keeps the pipeline config declarative.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 20.0%" />
+<col style="width: 32.0%" />
+<col style="width: 48.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Stage</p></th>
+<th class="head"><p>Export hooks</p></th>
+<th class="head"><p>Inference hooks</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">visual</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.vision:plan_export</span></code>, <code class="docutils literal notranslate"><span class="pre">export.vision:compile</span></code>,
+<code class="docutils literal notranslate"><span class="pre">export.vision:metadata</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.vision:run_eager</span></code>, <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code>, <code class="docutils literal notranslate"><span class="pre">run_trt</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">language</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.glue:vision_to_language</span></code>, <code class="docutils literal notranslate"><span class="pre">export.language:plan_export</span></code>,
+<code class="docutils literal notranslate"><span class="pre">export.language:compile</span></code>, <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code>, <code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.glue:vision_to_language</span></code>, <code class="docutils literal notranslate"><span class="pre">inference.language:run_*</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">action_context</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.glue:language_to_action_context</span></code>,
+<code class="docutils literal notranslate"><span class="pre">export.action_context:plan_export</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.glue:language_to_action_context</span></code>,
+<code class="docutils literal notranslate"><span class="pre">inference.action_context:run_*</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">action</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.glue:action_context_to_action</span></code>,
+<code class="docutils literal notranslate"><span class="pre">export.action:plan_export</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.action:run_*</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="inference-and-engine-flow">
+<h2>Inference and engine flow<a class="headerlink" href="#inference-and-engine-flow" title="Link to this heading">#</a></h2>
+<p>After export, <code class="docutils literal notranslate"><span class="pre">LoadPipeline</span></code> maps each engine directory back to a serialized
+handle: <code class="docutils literal notranslate"><span class="pre">visual</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">vision</span></code>, <code class="docutils literal notranslate"><span class="pre">language</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">language</span></code>,
+<code class="docutils literal notranslate"><span class="pre">action_context</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">action_context</span></code>, and <code class="docutils literal notranslate"><span class="pre">action</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">action</span></code>. Those
+handles are stored on <code class="docutils literal notranslate"><span class="pre">ctx.handles.serialized</span></code>.</p>
+<p>The inference pipeline runs the same stage graph and dispatches each stage by
+execution mode:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">EAGER</span></code> calls <code class="docutils literal notranslate"><span class="pre">run_eager</span></code> on the live runtime model or policy.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code> calls <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code> through loaded engine handles.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">IN_MEMORY</span></code> calls <code class="docutils literal notranslate"><span class="pre">run_trt</span></code> through in-process TRT modules.</p></li>
+</ul>
+<p>Inference scratch tensors live in <code class="docutils literal notranslate"><span class="pre">ctx.inference</span></code>. Stage outputs live in
+<code class="docutils literal notranslate"><span class="pre">ctx.stage_results</span></code>. When the final <code class="docutils literal notranslate"><span class="pre">action</span></code> stage completes, the pipeline
+copies <code class="docutils literal notranslate"><span class="pre">ctx.stage_results[3].tensors[&quot;actions&quot;]</span></code> to <code class="docutils literal notranslate"><span class="pre">ctx.actions</span></code>.</p>
+</section>
+<section id="edge-llm-runtime">
+<h2>Edge LLM Runtime<a class="headerlink" href="#edge-llm-runtime" title="Link to this heading">#</a></h2>
+<p>The C++ entry point in TensorRT Edge-LLM is <code class="docutils literal notranslate"><span class="pre">examples/llm/llm_inference.cpp</span></code>.
+For GR00T, the exported <code class="docutils literal notranslate"><span class="pre">language</span></code> stage becomes the main <code class="docutils literal notranslate"><span class="pre">--engineDir</span></code> and
+the other engines are loaded from <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>llm_inference<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--engineDir<span class="o">=</span>/tmp/groot_edge_llm/language<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--multimodalEngineDir<span class="o">=</span>/tmp/groot_edge_llm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--inputFile<span class="o">=</span>requests.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--outputFile<span class="o">=</span>responses.json
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">llm_inference.cpp</span></code> parses <code class="docutils literal notranslate"><span class="pre">--engineDir</span></code> and <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir</span></code>, builds
+<code class="docutils literal notranslate"><span class="pre">rt::LLMInferenceRuntime(args.engineDir,</span> <span class="pre">args.multimodalEngineDir,</span> <span class="pre">...)</span></code>, then
+calls <code class="docutils literal notranslate"><span class="pre">handleRequest(request,</span> <span class="pre">response,</span> <span class="pre">stream)</span></code>. That call is where the Python
+export contract has to line up with Edge-LLM runtime bindings.</p>
+<pre  class="mermaid">
+        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+graph LR
+    CLI[&quot;llm_inference.cpp&lt;br/&gt;--engineDir language&lt;br/&gt;--multimodalEngineDir root&quot;]
+    RT[&quot;LLMInferenceRuntime&quot;]
+    V[&quot;mVisionRunner&lt;br/&gt;visual/visual.engine&quot;]
+    L[&quot;mLLMEngineRunner&lt;br/&gt;language/language.engine&quot;]
+    AC[&quot;mActionContextRunner&lt;br/&gt;action_context/context.engine&quot;]
+    A[&quot;mActionRunner&lt;br/&gt;action/action.engine&quot;]
+    RESP[&quot;LLMGenerationResponse&lt;br/&gt;outputActions&quot;]
+
+    CLI --&gt; RT
+    RT --&gt; V
+    V --&gt; L
+    L --&gt; AC
+    AC --&gt; A
+    A --&gt; RESP
+
+    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+    classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+    class RT,L nvNode
+    class CLI,V,AC,A,RESP greyNode
+    </pre><p>Runtime directory alignment:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 24.0%" />
+<col style="width: 28.0%" />
+<col style="width: 48.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Export output</p></th>
+<th class="head"><p>C++ owner</p></th>
+<th class="head"><p>Runtime use</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">language/language.engine</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">LLMEngineRunner</span></code></p></td>
+<td><p>Main language prefill engine loaded from <code class="docutils literal notranslate"><span class="pre">--engineDir</span></code>. The same
+directory also carries <code class="docutils literal notranslate"><span class="pre">config.json</span></code>, <code class="docutils literal notranslate"><span class="pre">embedding.safetensors</span></code>, and
+tokenizer artifacts.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">visual/visual.engine</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">MultimodalRunner</span></code> / Vit runner</p></td>
+<td><p>Loaded from <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir/visual</span></code> and used to replace image
+placeholders with visual embedding rows.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">action_context/context.engine</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ActionContextRunner</span></code></p></td>
+<td><p>Loaded from <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir/action_context</span></code> and used when the
+language engine exports <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> instead of final
+<code class="docutils literal notranslate"><span class="pre">context_embs</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">action/action.engine</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ActionRunner</span></code></p></td>
+<td><p>Loaded from <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir/action</span></code>. Runs the GR00T denoising
+loop and copies host actions into <code class="docutils literal notranslate"><span class="pre">response.outputActions</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Runtime tensor shape contract:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 26.0%" />
+<col style="width: 24.0%" />
+<col style="width: 28.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Tensor</p></th>
+<th class="head"><p>Export binding / source</p></th>
+<th class="head"><p>Runtime shape</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">pixel_values</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[N_img,</span> <span class="pre">H_img,</span> <span class="pre">W_img,</span> <span class="pre">3]</span></code> fp16/fp32</p></td>
+<td><p>Export converts the model’s NCHW sample to HWC because the Edge-LLM
+Vit runner binds HWC pixels. For GR00T’s default profile, images are
+224 x 224 and <code class="docutils literal notranslate"><span class="pre">N_img</span></code> is the number of camera frames in the request.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">visual_embeds</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual</span></code> output</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[N_img</span> <span class="pre">*</span> <span class="pre">S_img,</span> <span class="pre">H_lm]</span></code> fp16</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">S_img</span></code> is saved as <code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code> <code class="docutils literal notranslate"><span class="pre">seq_len</span></code>. The language
+runtime expands each image placeholder to this many embedding rows.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">T_exp,</span> <span class="pre">H_lm]</span></code> fp16 on GPU</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">LLMInferenceRuntime</span></code> allocates this as
+<code class="docutils literal notranslate"><span class="pre">[maxSupportedBatchSize,</span> <span class="pre">maxSupportedInputLength,</span> <span class="pre">hiddenSize]</span></code> and
+reshapes per request. <code class="docutils literal notranslate"><span class="pre">T_exp</span></code> is text length after image-token
+expansion.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">context_lengths</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B]</span></code> int32 on CPU</p></td>
+<td><p>The C++ runner validates this beside <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code> before prefill.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">kvcache_start_index</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[0]</span></code> or <code class="docutils literal notranslate"><span class="pre">[B]</span></code> int32</p></td>
+<td><p>Empty for fresh prefill; populated when the runtime reuses KV cache.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">last_token_ids</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">1]</span></code> int64</p></td>
+<td><p>Selects the token position used for logits.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">past_key_values_i</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code> input per layer</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">2,</span> <span class="pre">KvH,</span> <span class="pre">T_exp,</span> <span class="pre">D_head]</span></code> fp16</p></td>
+<td><p>One binding per decoder layer. The second axis is key/value.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">logits</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code> output</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">V]</span></code> fp32</p></td>
+<td><p>Used for normal text generation. GR00T action export does not depend on
+logits for the split action-context path.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language</span></code> output</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">T_exp,</span> <span class="pre">H_lm]</span></code> fp16</p></td>
+<td><p>GR00T enables this auxiliary output so <code class="docutils literal notranslate"><span class="pre">ActionContextRunner</span></code> can
+project the LM hidden sequence into action context embeddings.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">vl_embs</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action_context</span></code> output</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">T_ctx,</span> <span class="pre">H_ctx]</span></code> fp16</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">T_ctx</span></code> usually matches <code class="docutils literal notranslate"><span class="pre">T_exp</span></code>. <code class="docutils literal notranslate"><span class="pre">H_ctx</span></code> is the GR00T action
+context hidden size saved in <code class="docutils literal notranslate"><span class="pre">action_context/config.json</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">actions</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B_action,</span> <span class="pre">T_act,</span> <span class="pre">D_act]</span></code> fp16</p></td>
+<td><p>Noisy action trajectory updated by the runtime denoising loop.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">timestep</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B_action]</span></code> int64</p></td>
+<td><p>GR00T uses discrete timestep buckets configured in <code class="docutils literal notranslate"><span class="pre">action/config.json</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">context_embs</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">T_ctx,</span> <span class="pre">H_ctx]</span></code> fp16</p></td>
+<td><p>Copied from <code class="docutils literal notranslate"><span class="pre">ActionContextRunner::getVlEmbs()</span></code> into the action runner.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">state</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B_action,</span> <span class="pre">1,</span> <span class="pre">D_state]</span></code> fp16</p></td>
+<td><p>Packed proprioceptive state. The default GR00T profile pads to
+<code class="docutils literal notranslate"><span class="pre">D_state</span> <span class="pre">=</span> <span class="pre">64</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">embodiment_id</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action</span></code> input</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B_action]</span></code> int64</p></td>
+<td><p>Selects the embodiment-conditioned action decoder branch.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">velocity</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action</span></code> output</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[B_action,</span> <span class="pre">T_act,</span> <span class="pre">D_act]</span></code> fp16</p></td>
+<td><p>One denoising-step velocity. The runtime loops over timesteps and writes
+final actions to <code class="docutils literal notranslate"><span class="pre">response.outputActions</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The main design constraint is that export must produce the exact binding names
+and shape metadata that <code class="docutils literal notranslate"><span class="pre">LLMInferenceRuntime</span></code> expects. The Python side controls
+this through <code class="docutils literal notranslate"><span class="pre">GROOT_EDGE_IO</span></code>, <code class="docutils literal notranslate"><span class="pre">language_edge_llm_config()</span></code>,
+<code class="docutils literal notranslate"><span class="pre">vit_visual_edge_config()</span></code>, and the action <code class="docutils literal notranslate"><span class="pre">extra_config</span></code>. The C++ side then
+uses those configs to allocate tensors, reshape them for each request, and wire
+<code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span> <span class="pre">-&gt;</span> <span class="pre">vl_embs</span> <span class="pre">-&gt;</span> <span class="pre">context_embs</span> <span class="pre">-&gt;</span> <span class="pre">velocity</span></code>.</p>
+</section>
+<section id="tensor-transforms-per-runner">
+<h2>Tensor transforms per runner<a class="headerlink" href="#tensor-transforms-per-runner" title="Link to this heading">#</a></h2>
+<p>Each runner takes one set of input tensors and produces the tensors that feed
+the next runner. The diagram below traces one request through all four engines,
+showing the shape at every input and output boundary.</p>
+<pre  class="mermaid">
+        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+graph LR
+    REQ[&quot;request&lt;br/&gt;images + text + state&quot;]
+
+    subgraph VIT [&quot;VisionRunner (visual.engine)&quot;]
+        direction TB
+        VIN[&quot;in: pixel_values&lt;br/&gt;[N_img, H, W, 3]&quot;]
+        VOUT[&quot;out: visual_embeds&lt;br/&gt;[N_img * S_img, H_lm]&quot;]
+        VIN --&gt; VOUT
+    end
+
+    SPLICE[&quot;embedding lookup + splice&lt;br/&gt;text embeds + visual rows&lt;br/&gt;-&gt; inputs_embeds&lt;br/&gt;[B, T_exp, H_lm]&quot;]
+
+    subgraph LLM [&quot;LLMEngineRunner (language.engine)&quot;]
+        direction TB
+        LIN[&quot;in: inputs_embeds [B, T_exp, H_lm]&lt;br/&gt;context_lengths [B]&lt;br/&gt;rope_rotary_cos_sin&lt;br/&gt;past_key_values_i [B,2,KvH,T_exp,D]&quot;]
+        LOUT[&quot;out: logits [B, V]&lt;br/&gt;lm_hidden_states [B, T_exp, H_lm]&quot;]
+        LIN --&gt; LOUT
+    end
+
+    subgraph ACR [&quot;ActionContextRunner (context.engine)&quot;]
+        direction TB
+        ACIN[&quot;in: lm_hidden_states&lt;br/&gt;[B, T_exp, H_lm]&quot;]
+        ACOUT[&quot;out: vl_embs&lt;br/&gt;[B, T_ctx, H_ctx]&quot;]
+        ACIN --&gt; ACOUT
+    end
+
+    subgraph ACT [&quot;ActionRunner (action.engine)&lt;br/&gt;denoising loop&quot;]
+        direction TB
+        AIN[&quot;in: actions [B_a, T_act, D_act]&lt;br/&gt;timestep [B_a]&lt;br/&gt;context_embs [B, T_ctx, H_ctx]&lt;br/&gt;state [B_a, 1, D_state]&lt;br/&gt;embodiment_id [B_a]&quot;]
+        AOUT[&quot;out: velocity&lt;br/&gt;[B_a, T_act, D_act]&quot;]
+        AIN --&gt; AOUT
+        AOUT --&gt;|update actions,&lt;br/&gt;next timestep| AIN
+    end
+
+    RESP[&quot;response&lt;br/&gt;outputActions&lt;br/&gt;[B_a, T_act, D_act]&quot;]
+
+    REQ --&gt; VIN
+    VOUT --&gt; SPLICE --&gt; LIN
+    LOUT --&gt;|lm_hidden_states| ACIN
+    ACOUT --&gt;|vl_embs -&gt; context_embs| AIN
+    AOUT --&gt;|final step| RESP
+
+    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+    classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+    classDef ioNode fill:#ffffff,stroke:#999,stroke-width:1px,color:#333
+    classDef clusterLabel fill:none,stroke:#aaa,stroke-width:1.5px
+
+    class REQ,RESP greyNode
+    class SPLICE nvNode
+    class VIN,VOUT,LIN,LOUT,ACIN,ACOUT,AIN,AOUT ioNode
+    class VIT,LLM,ACR,ACT clusterLabel
+    </pre><p>Reading the diagram:</p>
+<ul class="simple">
+<li><p><strong>VisionRunner</strong> turns raw camera pixels into a flat block of LM-width
+embedding rows. The row count <code class="docutils literal notranslate"><span class="pre">N_img</span> <span class="pre">*</span> <span class="pre">S_img</span></code> is fixed by
+<code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code> <code class="docutils literal notranslate"><span class="pre">seq_len</span></code>.</p></li>
+<li><p>The runtime does an <strong>embedding lookup</strong> on the text tokens and splices the
+visual rows into the image-placeholder positions, producing
+<code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code> at the expanded prompt length <code class="docutils literal notranslate"><span class="pre">T_exp</span></code>.</p></li>
+<li><p><strong>LLMEngineRunner</strong> prefills the decoder. For GR00T it emits
+<code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> (the auxiliary output) in addition to <code class="docutils literal notranslate"><span class="pre">logits</span></code>.</p></li>
+<li><p><strong>ActionContextRunner</strong> projects <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> into <code class="docutils literal notranslate"><span class="pre">vl_embs</span></code>, the
+action-context embeddings, which the runtime copies into the action engine’s
+<code class="docutils literal notranslate"><span class="pre">context_embs</span></code> binding.</p></li>
+<li><p><strong>ActionRunner</strong> runs the flow-matching loop: each call takes the current
+<code class="docutils literal notranslate"><span class="pre">actions</span></code> and <code class="docutils literal notranslate"><span class="pre">timestep</span></code> and returns a <code class="docutils literal notranslate"><span class="pre">velocity</span></code> step. The runtime
+updates <code class="docutils literal notranslate"><span class="pre">actions</span></code> and advances the timestep until the schedule finishes,
+then copies the result into <code class="docutils literal notranslate"><span class="pre">response.outputActions</span></code>.</p></li>
+</ul>
+</section>
+<section id="adding-another-engine-backed-model">
+<h2>Adding another engine-backed model<a class="headerlink" href="#adding-another-engine-backed-model" title="Link to this heading">#</a></h2>
+<p>Use GR00T as the reference shape:</p>
+<ol class="arabic simple">
+<li><p>Choose stable engine boundaries and assign one <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> per engine.</p></li>
+<li><p>Create export stage configs with <code class="docutils literal notranslate"><span class="pre">runner=&quot;trt.runner.export:ExportRunner&quot;</span></code>.</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">plan_export</span></code> and <code class="docutils literal notranslate"><span class="pre">compile</span></code> for every engine.</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> glue wherever a stage consumes upstream tensors.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> only for sidecars needed by load or inference.</p></li>
+<li><p>Mirror the same stage IDs in an inference pipeline with
+<code class="docutils literal notranslate"><span class="pre">runner=&quot;trt.runner.inference:InferenceRunner&quot;</span></code>.</p></li>
+<li><p>Add a load pipeline that maps engine subdirectories to serialized handle
+classes.</p></li>
+<li><p>Register export, load, and inference configs in the pipeline registry.</p></li>
+</ol>
+<p>The pipeline should remain a thin wrapper around the runtime: the runtime creates
+the model state and sample inputs, while the pipeline declares how that state is
+sliced into engines, compiled, loaded, and replayed.</p>
+<p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/pipeline.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/inference/pipeline.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/load/pipeline.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/runner/export.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/runner/inference.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/context.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">examples/llm/llm_inference.cpp</span></code>, <code class="docutils literal notranslate"><span class="pre">cpp/runtime/llmInferenceRuntime.cpp</span></code></p>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="../user_guide/getting_started/installation.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Installation</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="../developer_guide/architecture/overview.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Overview</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+
+
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-pattern">Design pattern</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#gr00t-stages">GR00T stages</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#export-data-flow">Export data flow</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#hook-map">Hook map</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#inference-and-engine-flow">Inference and engine flow</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#edge-llm-runtime">Edge LLM Runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tensor-transforms-per-runner">Tensor transforms per runner</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#adding-another-engine-backed-model">Adding another engine-backed model</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5"></script>
+
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+<a class="footer-brand logo" href="https://www.nvidia.com">
+  <img src="../_static/nvidia-logo-horiz-rgb-1c-blk-for-screen.svg" class="logo__image only-light" alt="NVIDIA"/>
+  <img src="../_static/nvidia-logo-horiz-rgb-1c-wht-for-screen.svg" class="logo__image only-dark" alt="NVIDIA"/>
+</a></div>
+      
+        <div class="footer-item">
+
+<div class="footer-links">
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-policy/">Privacy Policy</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-center/">Your Privacy Choices</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/terms-of-service/">Terms of Service</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/accessibility/">Accessibility</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/company-policies/">Corporate Policies</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/product-security/">Product Security</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/contact/">Contact</a>
+  
+  
+  
+</div>
+</div>
+      
+        <div class="footer-item">
+
+
+
+
+  <p class="copyright">
+    
+      Copyright © 2025, Nvidia.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+<div class="extra_footer">
+  
+  <p>Last updated on July 02, 2026.</p>
+  
+</div></div>
+      
+    </div>
+  
+  
+  
+</div>
+
+  </footer>
+  </body>
+</html>

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import torch
 
-from trt.context import EdgeContext, LanguageOutputs
-from trt.language import language_head_dim, make_language_edge_flat_tensors
+from trt.config.execution_mode import ExecutionMode
+from trt.context import EdgeContext
+from trt.language import language_head_dim, make_language_edge_flat_tensors, unpack_vla_prefix_language_outputs
 from trt.modules.export.language import gather_last_token_hidden
 from trt.packing import pack_groot_language_inputs
 from trt.rope import make_rope_rotary_cos_sin
@@ -127,7 +128,7 @@ def compare_language_logits(
 
     Requires ``ctx.inference.image_embs`` (run vision first or set manually).
     Uses the same packed ``inputs_embeds`` and Edge-LLM prefill bindings as
-    ``run_serialized``, including ``last_token_ids`` from ``make_language_edge_flat_tensors``.
+    serialized mode, including ``last_token_ids`` from ``make_language_edge_flat_tensors``.
     """
     if ctx.inference.image_embs is None:
         raise RuntimeError("compare_language_logits requires ctx.inference.image_embs")
@@ -155,20 +156,87 @@ def compare_language_logits(
     return tensor_parity_metrics(trt_logits, eager_logits)
 
 
-def _run_trt_language(ctx: EdgeContext, language_module) -> None:
-    language_model, prefill = _language_prefill_bundle(ctx, language_module)
+def _last_token_ids(ctx: EdgeContext) -> torch.Tensor:
+    _, prefill = _language_prefill_bundle(ctx, language_module=None)
+    return prefill[4]
+
+
+def _store_language_tensors(
+    ctx: EdgeContext,
+    *,
+    lm_hidden_states: torch.Tensor,
+    logits: torch.Tensor,
+    prefix_k: torch.Tensor | None = None,
+    prefix_v: torch.Tensor | None = None,
+) -> None:
+    ctx.inference.lm_hidden_states = lm_hidden_states
+    ctx.inference.logits = logits
+    ctx.inference.prefix_k = prefix_k
+    ctx.inference.prefix_v = prefix_v
+
+
+def _language_stage_result(
+    ctx: EdgeContext,
+    *,
+    lm_hidden_states: torch.Tensor,
+    logits: torch.Tensor,
+    prefix_k: torch.Tensor | None = None,
+    prefix_v: torch.Tensor | None = None,
+) -> InferenceStageResult:
+    _store_language_tensors(
+        ctx,
+        lm_hidden_states=lm_hidden_states,
+        logits=logits,
+        prefix_k=prefix_k,
+        prefix_v=prefix_v,
+    )
+    tensors = {
+        "lm_hidden_states": lm_hidden_states,
+        "logits": logits,
+    }
+    if prefix_k is not None:
+        tensors["prefix_k"] = prefix_k
+    if prefix_v is not None:
+        tensors["prefix_v"] = prefix_v
+    return InferenceStageResult(
+        tensors=tensors,
+        metadata={"language_inputs": dict(ctx.inference.language_inputs)},
+    )
+
+
+def _run_trt_language(
+    ctx: EdgeContext,
+    language_module,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    _, prefill = _language_prefill_bundle(ctx, language_module)
     outputs = language_module(*prefill)
-    if isinstance(outputs, LanguageOutputs):
-        ctx.inference.lm = outputs
-    elif isinstance(outputs, tuple):
-        logits, lm_hidden = outputs
-        del logits
-        ctx.inference.lm = LanguageOutputs(lm_hidden_states=lm_hidden)
-    else:
-        ctx.inference.lm = LanguageOutputs(lm_hidden_states=outputs)
+    if isinstance(outputs, tuple):
+        if len(outputs) == 4:
+            logits, lm_hidden, prefix_k, prefix_v = unpack_vla_prefix_language_outputs(outputs)
+            return lm_hidden, logits.float(), prefix_k, prefix_v
+        if len(outputs) == 2:
+            logits, lm_hidden = outputs
+            return lm_hidden, logits.float(), None, None
+        raise RuntimeError(f"unexpected language TRT output tuple length: {len(outputs)}")
+    return (
+        outputs,
+        _trt_last_token_logits(language_module, prefill),
+        None,
+        None,
+    )
 
 
-def run_eager(ctx: EdgeContext) -> InferenceStageResult:
+def run(ctx: EdgeContext) -> InferenceStageResult:
+    match ctx.execution_mode:
+        case ExecutionMode.EAGER:
+            return _run_eager(ctx)
+        case ExecutionMode.SERIALIZED:
+            return _run_serialized(ctx)
+        case ExecutionMode.IN_MEMORY:
+            return _run_trt(ctx)
+
+
+def _run_eager(ctx: EdgeContext) -> InferenceStageResult:
     _prepare_language(ctx)
     eagle = ctx.model.backbone.eagle_model
     language_model = eagle.language_model
@@ -177,6 +245,7 @@ def run_eager(ctx: EdgeContext) -> InferenceStageResult:
     attention_mask = language_inputs.get("attention_mask")
     if attention_mask is None:
         attention_mask = language_inputs["pad_mask"].to(dtype=torch.long)
+    last_token_ids = _last_token_ids(ctx)
 
     outputs = language_model(
         inputs_embeds=inputs_embeds,
@@ -187,43 +256,46 @@ def run_eager(ctx: EdgeContext) -> InferenceStageResult:
     )
     if outputs.hidden_states is None:
         raise RuntimeError("language_model returned no hidden_states")
+    if outputs.logits is None:
+        raise RuntimeError("language_model returned no logits")
 
     decoder = getattr(language_model, "model", language_model)
     hidden = outputs.hidden_states[-1]
     lm_hidden = decoder.norm(hidden) if hasattr(decoder, "norm") else hidden
+    logits = gather_last_token_hidden(outputs.logits, last_token_ids).float()
 
-    ctx.inference.lm = LanguageOutputs(lm_hidden_states=lm_hidden)
-    return InferenceStageResult(
-        tensors={"lm_hidden_states": lm_hidden},
-        metadata={"language_inputs": dict(ctx.inference.language_inputs)},
+    return _language_stage_result(
+        ctx,
+        lm_hidden_states=lm_hidden,
+        logits=logits,
     )
 
 
-def run_serialized(ctx: EdgeContext) -> InferenceStageResult:
+def _run_serialized(ctx: EdgeContext) -> InferenceStageResult:
     _prepare_language(ctx)
     module = ctx.handles.serialized.language
     if module is None:
         raise RuntimeError("serialized TRT backend missing language module")
-    _run_trt_language(ctx, module)
-    lm_hidden = ctx.inference.lm.lm_hidden_states
-    if lm_hidden is None:
-        raise RuntimeError("language stage did not produce lm_hidden_states")
-    return InferenceStageResult(
-        tensors={"lm_hidden_states": lm_hidden},
-        metadata={"language_inputs": dict(ctx.inference.language_inputs)},
+    lm_hidden, logits, prefix_k, prefix_v = _run_trt_language(ctx, module)
+    return _language_stage_result(
+        ctx,
+        lm_hidden_states=lm_hidden,
+        logits=logits,
+        prefix_k=prefix_k,
+        prefix_v=prefix_v,
     )
 
 
-def run_trt(ctx: EdgeContext) -> InferenceStageResult:
+def _run_trt(ctx: EdgeContext) -> InferenceStageResult:
     _prepare_language(ctx)
     module = ctx.handles.in_memory.language
     if module is None:
         raise RuntimeError("in-memory TRT backend missing language module")
-    _run_trt_language(ctx, module)
-    lm_hidden = ctx.inference.lm.lm_hidden_states
-    if lm_hidden is None:
-        raise RuntimeError("language stage did not produce lm_hidden_states")
-    return InferenceStageResult(
-        tensors={"lm_hidden_states": lm_hidden},
-        metadata={"language_inputs": dict(ctx.inference.language_inputs)},
+    lm_hidden, logits, prefix_k, prefix_v = _run_trt_language(ctx, module)
+    return _language_stage_result(
+        ctx,
+        lm_hidden_states=lm_hidden,
+        logits=logits,
+        prefix_k=prefix_k,
+        prefix_v=prefix_v,
     )

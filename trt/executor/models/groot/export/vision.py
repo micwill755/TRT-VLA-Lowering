@@ -51,7 +51,7 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
 
         pixel_values          [B, 3, H, W]   NCHW from Eagle processor (B ≈ num images)
         pixel_values_nchw     [B, 3, H, W]   fp16 on export device
-        siglip_hidden         [B, S_vit, H_vit]  patch embeddings (probe for S_vit)
+        siglip_hidden         [B, S_vit, H_vit]  patch embeddings 
         images_hwc            [B, H, W, 3]   TRT / VitRunner engine input layout
         module forward out    [B * S_out, H_lm]  flattened rows for C++ embedding lookup
 
@@ -84,7 +84,7 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
     # Inner SigLIP module — target for attention patching during TRT compile.
     patch_vision_model = vision_model.vision_model
 
-    # --- 3. Probe static patch grid from a dry-run embedding --------------
+    # --- 3. static patch grid from a dry-run embedding --------------
     # embeddings() is cheaper than a full forward pass but exposes [B, S_vit, H_vit]
     # so we know batch/seq dims for the TRT attention plugin and VitRunner config.
     with torch.no_grad():
@@ -92,7 +92,7 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
     patch_batch_size = int(siglip_hidden.shape[0])   # B
     patch_seq_len = int(siglip_hidden.shape[1])      # S_vit (e.g. 256)
 
-    # --- 4. C++ VitRunner metadata (not part of the TRT graph) ------------
+    # --- 4. C++ VitRunner metadata ------------
     # vocab_size / image_token_id: tell llm_inference where to splice vision rows
     # into the LM embedding table for <|image|> placeholders in the chat template.
     image_token_id = int(getattr(eagle, "image_token_index", eagle.config.image_token_index))
@@ -120,8 +120,6 @@ def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
         select_layer=select_layer,
         pixel_shuffle=pixel_shuffle,
         downsample_ratio=downsample_ratio,
-        force_float32_input=True,       # trace in fp32; cast output back to input dtype
-        cast_output_to_input_dtype=True,
     ).eval().to(ctx.device)
 
     # Tokens per image after projection — consumed by vit_visual_edge_config below.

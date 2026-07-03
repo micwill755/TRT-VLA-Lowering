@@ -10,6 +10,7 @@ from lerobot.policies.groot import GrootPolicy
 from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.groot.groot_n1 import DEFAULT_TOKENIZER_ASSETS_REPO
 from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STATE
+from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
 from trt.data import create_pil_messages, prepare_model_inputs
 from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
@@ -20,7 +21,6 @@ from trt.utils import force_hf_attention
 
 class GrootProfile(VLAProfile):
     name = "gr00t"
-    pipeline_model_type = "Gr00tN1d7"
     model_id = "nvidia/GR00T-N1.5-3B"
     engine_dir_default = "/tmp/groot_edge_llm"
     display_name = "gr00t"
@@ -68,7 +68,6 @@ class GrootProfile(VLAProfile):
         force_hf_attention(self.lm, "eager")
 
     def _init_tokenizers(self) -> None:
-        from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
         eagle_step = next(
             s for s in self.pre_processor.steps
             if isinstance(s, GrootEagleEncodeStep)

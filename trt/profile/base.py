@@ -18,7 +18,6 @@ class VLAProfile(ABC):
     """Owns HF/LeRobot setup for one VLA run: policy, core model, and compile inputs."""
 
     name: ClassVar[str] = "vla"
-    pipeline_model_type: ClassVar[str] = ""
     model_id: ClassVar[str] = ""
     engine_dir_default: ClassVar[str] = "/tmp/vla_edge_llm"
     display_name: ClassVar[str] = "VLA"

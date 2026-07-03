@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from trt.context import EdgeContext, LanguageOutputs
+from trt.context import EdgeContext
 
 
 def vision_to_language(ctx: EdgeContext, upstream, stage_inputs: dict) -> dict:
@@ -17,7 +17,9 @@ def vision_to_language(ctx: EdgeContext, upstream, stage_inputs: dict) -> dict:
 def language_to_action_context(ctx: EdgeContext, upstream, stage_inputs: dict) -> dict:
     language = upstream[0]
     lm_hidden = language.tensors["lm_hidden_states"]
-    ctx.inference.lm = LanguageOutputs(lm_hidden_states=lm_hidden)
+    ctx.inference.lm_hidden_states = lm_hidden
+    if "logits" in language.tensors:
+        ctx.inference.logits = language.tensors["logits"]
     if "language_inputs" in language.metadata:
         ctx.inference.language_inputs = language.metadata["language_inputs"]
     return {

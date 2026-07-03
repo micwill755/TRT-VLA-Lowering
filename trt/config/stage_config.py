@@ -51,9 +51,7 @@ class StageHooks:
 
     plan_export: str | None = None
     compile: str | None = None
-    run_eager: str | None = None
-    run_serialized: str | None = None
-    run_trt: str | None = None
+    run: str | None = None
     process_inputs: str | None = None
     save_artifacts: str | None = None
     metadata: str | None = None

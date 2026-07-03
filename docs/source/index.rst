@@ -15,6 +15,12 @@ load, inference, and benchmark orchestration for VLA models on top of
 
 .. toctree::
    :maxdepth: 2
+   :caption: Examples
+
+   examples/gr00t
+
+.. toctree::
+   :maxdepth: 2
    :caption: Architecture
 
    developer_guide/architecture/overview

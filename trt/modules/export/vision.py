@@ -31,10 +31,6 @@ class ExportModule(nn.Module):
             return features
         raise ValueError(f"Expected 2D or 3D features, got shape {tuple(features.shape)}")
 
-
-class TokenPoolingEncoder(Protocol):
-    def __call__(self, media: torch.Tensor, pooling_indices: torch.Tensor) -> torch.Tensor: ...
-
 # ---------------------------------------------------------------------------
 # Grid vision (PI0.5 / GR00T / SmolVLA VitRunner path)
 # ---------------------------------------------------------------------------

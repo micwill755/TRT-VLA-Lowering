@@ -61,9 +61,8 @@ class EdgeOrchestrator:
             ExportPipeline(export_cfg).run(ctx)
 
         if self._should_benchmark():
-            model_type = getattr(self.profile, "pipeline_model_type", None) or self.profile.name
-            LoadPipeline.for_model_type(model_type).run(ctx)
-            bench_cfg = get_benchmark_pipeline(model_type)
+            LoadPipeline.for_model_type(self.profile.name).run(ctx)
+            bench_cfg = get_benchmark_pipeline(self.profile.name)
             BenchmarkPipeline(bench_cfg).run(ctx)
 
         return 0

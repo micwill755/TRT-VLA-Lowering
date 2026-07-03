@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from trt.action_rollout import ActionRolloutContext, GROOTActionAdapter, sample_actions_raw
+from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
 from trt.modules.export.diffusion import (
     GrootDiTStepEncoderExportModule,
@@ -52,7 +53,17 @@ def _prepare_action(ctx: EdgeContext) -> _ActionRolloutHooks:
     return _ActionRolloutHooks()
 
 
-def run_eager(ctx: EdgeContext) -> InferenceStageResult:
+def run(ctx: EdgeContext) -> InferenceStageResult:
+    match ctx.execution_mode:
+        case ExecutionMode.EAGER:
+            return _run_eager(ctx)
+        case ExecutionMode.SERIALIZED:
+            return _run_serialized(ctx)
+        case ExecutionMode.IN_MEMORY:
+            return _run_trt(ctx)
+
+
+def _run_eager(ctx: EdgeContext) -> InferenceStageResult:
     rollout_hooks = _prepare_action(ctx)
     with torch.autocast("cuda", dtype=torch.float16):
         action_head = ctx.model.action_head
@@ -82,7 +93,7 @@ def run_eager(ctx: EdgeContext) -> InferenceStageResult:
     return InferenceStageResult(tensors={"actions": actions})
 
 
-def run_serialized(ctx: EdgeContext) -> InferenceStageResult:
+def _run_serialized(ctx: EdgeContext) -> InferenceStageResult:
     rollout_hooks = _prepare_action(ctx)
     action_module = ctx.handles.serialized.action
     if action_module is None:
@@ -100,7 +111,7 @@ def run_serialized(ctx: EdgeContext) -> InferenceStageResult:
     return InferenceStageResult(tensors={"actions": actions})
 
 
-def run_trt(ctx: EdgeContext) -> InferenceStageResult:
+def _run_trt(ctx: EdgeContext) -> InferenceStageResult:
     rollout_hooks = _prepare_action(ctx)
     action_module = ctx.handles.in_memory.action
     if action_module is None:

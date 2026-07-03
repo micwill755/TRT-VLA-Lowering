@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from trt.serialize import SerializedPositionalEngine
 
-
 class SerializedGrootVision:
     def __init__(self, engine):
         self.engine = engine
@@ -15,7 +14,6 @@ class SerializedGrootVision:
         if input_name not in self.engine.config_input_names:
             input_name = self.engine.config_input_names[0]
         return self.engine({input_name: images})[0]
-
 
 class SerializedGrootLanguage:
     bundles_kv_caches = True
@@ -65,11 +63,9 @@ class SerializedGrootLanguage:
     def lm_hidden_output_index(self) -> int:
         return self.context_output_index
 
-
 class SerializedGrootActionContext(SerializedPositionalEngine):
     def __call__(self, lm_hidden_states):
         return super().__call__(lm_hidden_states)[0]
-
 
 class SerializedGrootAction(SerializedPositionalEngine):
     def __call__(self, actions, timestep, context_embs, state, embodiment_id):
