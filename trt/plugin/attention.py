@@ -206,3 +206,65 @@ class ViTPluginAttention(nn.Module):
         attn_output = attn_output.to(dtype=self.out_proj.weight.dtype)
         attn_output = self.out_proj(attn_output)
         return attn_output, None
+
+'''
+Below are reference attention implementations to compare math
+with plugin stack and kernel implementations
+'''
+
+class SiglipReferenceAttention(nn.Module):
+    """
+    Hand-written re-implementation of SigLIP multi-head attention.
+
+    Reuses the original module's projection weights and shape params, but computes
+    QK^T -> softmax -> (attn @ V) explicitly instead of dispatching through HF's
+    attention_interface. Used to validate that our understanding of the math
+    matches the stock eager path bit-for-bit (up to fp accumulation).
+
+    Drop-in replacement for SiglipAttention: same forward signature and same
+    (attn_output, attn_weights) return contract that SiglipEncoderLayer expects.
+    """
+
+    def __init__(self, attn: nn.Module):
+        super().__init__()
+        # Reuse the trained projection layers directly (no copy).
+        self.q_proj = attn.q_proj
+        self.k_proj = attn.k_proj
+        self.v_proj = attn.v_proj
+        self.out_proj = attn.out_proj
+
+        self.num_heads = int(attn.num_heads)
+        self.head_dim = int(attn.head_dim)
+        self.embed_dim = self.num_heads * self.head_dim
+        # SiglipAttention.scale == head_dim ** -0.5
+        self.scale = float(getattr(attn, "scale", self.head_dim ** -0.5))
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        # hidden_states: [B, S, embed_dim]
+        input_shape = hidden_states.shape[:-1]          # (B, S)
+        hidden_shape = (*input_shape, self.num_heads, self.head_dim)
+
+        # Project and split heads: [B, S, E] -> [B, num_heads, S, head_dim]
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        # Scores: [B, num_heads, S, S]
+        attn_weights = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
+        # Match HF eager: softmax in fp32 then cast back to input dtype.
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(q.dtype)
+
+        # Weighted sum of values: [B, num_heads, S, head_dim]
+        attn_output = torch.matmul(attn_weights, v)
+
+        # Merge heads back: [B, S, E]
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output, attn_weights

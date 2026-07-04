@@ -364,6 +364,16 @@
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html">Load Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/overview.html">Plugins Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/architecture.html">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/registration.html">Plugin Registration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/custom-ops.html">Custom Ops</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/converters.html">Converters</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/attention-patching.html">Attention Patching</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html">Parity and Debugging</a></li>
+</ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/customization/customization-guide.html">Customization Guide</a></li>
@@ -483,6 +493,74 @@ load, inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#default-backends">Default backends</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#reporting">Reporting</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#cli">CLI</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/overview.html">Plugins Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/overview.html#two-plugin-families">Two plugin families</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/overview.html#when-plugins-load">When plugins load</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/overview.html#export-integration">Export integration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/overview.html#related-pages">Related pages</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/architecture.html">Architecture</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/architecture.html#layer-responsibilities">Layer responsibilities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/architecture.html#compile-shim-pattern">Compile-shim pattern</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/architecture.html#end-to-end-export-sequence">End-to-end export sequence</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/architecture.html#siglip-nesting-gr00t-vision">SigLIP nesting (GR00T vision)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/architecture.html#key-files">Key files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/registration.html">Plugin Registration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/registration.html#entry-point-load-plugins-for-trt">Entry point: <code class="docutils literal notranslate"><span class="pre">load_plugins_for_trt()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/registration.html#when-it-runs">When it runs</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/registration.html#loading-the-shared-library">Loading the shared library</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/registration.html#idempotent-op-registration">Idempotent op registration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/registration.html#plugin-creator-lookup-trt-10-vs-11">Plugin creator lookup (TRT 10 vs 11)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/registration.html#configuration-hook">Configuration hook</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/registration.html#checklist-for-new-environments">Checklist for new environments</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/custom-ops.html">Custom Ops</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/custom-ops.html#registered-ops">Registered ops</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/custom-ops.html#llm-attention-op">LLM attention op</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/custom-ops.html#vit-attention-op">ViT attention op</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/custom-ops.html#why-placeholders-are-correct">Why placeholders are correct</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/custom-ops.html#interaction-with-edge-plugins">Interaction with edge_plugins</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/custom-ops.html#adding-a-new-custom-op">Adding a new custom op</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/converters.html">Converters</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/converters.html#converter-responsibilities">Converter responsibilities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/converters.html#vit-converter">ViT converter</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/converters.html#llm-converter">LLM converter</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/converters.html#priority-and-dynamic-shapes">Priority and dynamic shapes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/converters.html#compile-time-flow">Compile-time flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/converters.html#debugging-converter-issues">Debugging converter issues</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/converters.html#extending-converters">Extending converters</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/attention-patching.html">Attention Patching</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/attention-patching.html#vision-patch-vision-attention">Vision: <code class="docutils literal notranslate"><span class="pre">patch_vision_attention</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/attention-patching.html#language-patch-language-attention">Language: <code class="docutils literal notranslate"><span class="pre">patch_language_attention</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/attention-patching.html#restore-pattern">Restore pattern</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/attention-patching.html#where-patching-happens">Where patching happens</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/attention-patching.html#fixed-shapes-at-export-time">Fixed shapes at export time</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/attention-patching.html#common-mistakes">Common mistakes</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html">Parity and Debugging</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html#three-rungs-vision-example">Three rungs (vision example)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html#typical-metrics">Typical metrics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html#in-memory-vs-serialized-engines">In-memory vs serialized engines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html#dtype-alignment">Dtype alignment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html#diagnostic-checklist">Diagnostic checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html#torch-tensorrt-logging">Torch-TensorRT logging</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html#further-reading">Further reading</a></li>
 </ul>
 </li>
 </ul>
@@ -654,7 +732,7 @@ load, inference, and benchmark orchestration for VLA models on top of
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 02, 2026.</p>
+  <p>Last updated on July 04, 2026.</p>
   
 </div></div>
       

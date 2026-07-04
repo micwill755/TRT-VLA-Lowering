@@ -6,7 +6,7 @@ from typing import Any, Optional, Sequence, Tuple
 import tensorrt as trt
 import torch
 
-from trt.plugin.attention import PluginAttention, ViTPluginAttention
+from trt.plugin.attention import PluginAttention, ViTPluginAttention, SiglipReferenceAttention
 
 _PLUGIN_CONFIG: dict[str, Any] = {}
 
@@ -178,6 +178,20 @@ def patch_vision_attention(
         ).eval()
 
     print(f"patched {name} attention modules: {len(patched)}")
+    return patched
+
+def patch_vision_attention_reference(vision_model):
+    """
+    Swap every SigLIP encoder-layer self_attn for SiglipReferenceAttention.
+    `vision_model` must be the INNER transformer (SiglipVisionTransformer),
+    i.e. eagle_model.vision_model.vision_model, matching patch_vision_attention.
+    Returns a list of (layer, original_attn) so it can be undone.
+    """
+    patched = []
+    for layer in vision_model.encoder.layers:
+        patched.append((layer, layer.self_attn))
+        layer.self_attn = SiglipReferenceAttention(layer.self_attn).eval()
+    print(f"patched SigLIP reference attention modules: {len(patched)}")
     return patched
 
 def patch_language_attention(

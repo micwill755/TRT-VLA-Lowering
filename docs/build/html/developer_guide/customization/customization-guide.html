@@ -63,7 +63,7 @@
 
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="prev" title="Benchmark Pipeline" href="../architecture/benchmark-pipeline.html" />
+    <link rel="prev" title="Parity and Debugging" href="../plugins/parity-and-debugging.html" />
 
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -363,6 +363,16 @@
 <li class="toctree-l1"><a class="reference internal" href="../architecture/inference-pipeline.html">Inference Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Load Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../plugins/overview.html">Plugins Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../plugins/architecture.html">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../plugins/registration.html">Plugin Registration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../plugins/custom-ops.html">Custom Ops</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../plugins/converters.html">Converters</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="current nav bd-sidenav">
@@ -725,8 +735,10 @@ must survive for later stages and eager benchmark.</p></td>
 </section>
 <section id="tensorrt-plugin-customization-points">
 <h2>TensorRT Plugin Customization Points<a class="headerlink" href="#tensorrt-plugin-customization-points" title="Link to this heading">#</a></h2>
-<p>Attention and ViT lowering use Edge-LLM TensorRT plugins. See also the upstream
-<a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/plugins-guide.html">TensorRT Plugins Guide</a>.</p>
+<p>Attention and ViT lowering use Edge-LLM TensorRT plugins. For a full walkthrough of
+this repo’s compile-shim stack (registration, custom ops, converters, patching, and
+parity), see <a class="reference internal" href="../plugins/overview.html"><span class="doc">Plugins overview</span></a>.
+Upstream reference: <a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/plugins-guide.html">TensorRT Plugins Guide</a>.</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 22.0%" />
@@ -1048,12 +1060,12 @@ upstream reference for vision + language + action engine layout</p></li>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="../architecture/benchmark-pipeline.html"
+       href="../plugins/parity-and-debugging.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">Benchmark Pipeline</p>
+        <p class="prev-next-title">Parity and Debugging</p>
       </div>
     </a>
 </div>
@@ -1182,7 +1194,7 @@ upstream reference for vision + language + action engine layout</p></li>
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 02, 2026.</p>
+  <p>Last updated on July 04, 2026.</p>
   
 </div></div>
       

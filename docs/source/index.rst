@@ -34,6 +34,18 @@ load, inference, and benchmark orchestration for VLA models on top of
 
 .. toctree::
    :maxdepth: 2
+   :caption: Plugins
+
+   developer_guide/plugins/overview
+   developer_guide/plugins/architecture
+   developer_guide/plugins/registration
+   developer_guide/plugins/custom-ops
+   developer_guide/plugins/converters
+   developer_guide/plugins/attention-patching
+   developer_guide/plugins/parity-and-debugging
+
+.. toctree::
+   :maxdepth: 2
    :caption: Customization
 
    developer_guide/customization/customization-guide

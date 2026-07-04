@@ -248,8 +248,10 @@ Reusable export wrappers and builders live outside per-model hooks.
 TensorRT Plugin Customization Points
 ------------------------------------
 
-Attention and ViT lowering use Edge-LLM TensorRT plugins. See also the upstream
-`TensorRT Plugins Guide
+Attention and ViT lowering use Edge-LLM TensorRT plugins. For a full walkthrough of
+this repo's compile-shim stack (registration, custom ops, converters, patching, and
+parity), see :doc:`Plugins overview <../plugins/overview>`.
+Upstream reference: `TensorRT Plugins Guide
 <https://nvidia.github.io/TensorRT-Edge-LLM/latest/developer_guide/customization/plugins-guide.html>`_.
 
 .. list-table::
