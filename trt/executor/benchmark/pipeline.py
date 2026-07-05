@@ -1,27 +1,42 @@
 from __future__ import annotations
 
-from trt.config.benchmark_config import BenchmarkPipelineConfig, BenchmarkStageConfig, BenchmarkStageHooks
-from trt.config.execution_mode import ExecutionMode
-from trt.executor.benchmark.run import (
-    _has_in_memory,
-    _has_serialized,
-    _run_inference,
-    report_groot_benchmark,
-)
+from trt.config.benchmark_config import PipelineConfig, StageConfig
 
-DEFAULT_BENCHMARK = BenchmarkPipelineConfig(
-    stages=(
-        BenchmarkStageConfig("pytorch", lambda ctx: True, lambda ctx: _run_inference(ctx, ExecutionMode.EAGER)),
-        BenchmarkStageConfig(
-            "in_memory_trt",
-            _has_in_memory,
-            lambda ctx: _run_inference(ctx, ExecutionMode.IN_MEMORY),
-        ),
-        BenchmarkStageConfig(
-            "serialized_trt",
-            _has_serialized,
-            lambda ctx: _run_inference(ctx, ExecutionMode.SERIALIZED),
-        ),
+DEFAULT_BENCHMARK = PipelineConfig(
+    hooks=PipelineHooks(
+        preprocess=f"{_I}.preprocess:preprocess",
     ),
-    hooks=BenchmarkStageHooks(report=report_groot_benchmark),
+    stages=(
+        StageConfig(
+            stage_id=0,
+            stage_name="eager",
+            input_sources=(),
+            runner="trt.runner.benchmark:BenchmarkRunner",
+            hooks={
+                preprocess=f"{_I}.eager:preprocess",
+                execute=f"{_I}.eager:execute",
+            },
+        ),
+        StageConfig(
+            stage_id=1,
+            stage_name="in_memory",
+            input_sources=(0,),
+            runner="trt.runner.benchmark:BenchmarkRunner",
+            engine_subdir="compiled",
+            hooks={
+                process_inputs=f"{_I}.in_memory:eager_to_in_memory",
+                execute=f"{_I}.in_memory:execute",
+            },
+        ),
+        StageConfig(
+            stage_id=2,
+            stage_name="serialized",
+            input_sources=(1,),
+            runner="trt.runner.benchmark:BenchmarkRunner",
+            hooks={
+                process_inputs=f"{_I}.glue:in_memory_to_serialized",
+                execute=f"{_I}.serialized:execute",
+            },
+        )
+    ),
 )

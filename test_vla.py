@@ -13,18 +13,21 @@ from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
 from trt.modules.export.vision import GridVisionExportModule
+from trt.modules.export.language import CausalLMExportModule
+
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
 from trt.utils import force_hf_attention
 from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.vision import nchw_to_hwc
+from trt.rope import make_rope_rotary_cos_sin
 from trt.data import (
     load_test_data, 
     frame_from_test_data,
     pack_state
 )
 
-from trt.plugin.plugin_utils import patch_vision_attention, patch_vision_attention_reference
+from trt.plugin.plugin_utils import patch_vision_attention, patch_language_attention, patch_vision_attention_reference
 from trt.compile import _make_input_spec
 
 from typing import Any
@@ -32,7 +35,7 @@ from typing import Any
 TRT_SETTINGS = {
     "disable_tf32": True,
     "use_explicit_typing": True,
-    #"use_fp32_acc": True,
+    "use_fp32_acc": True,
     "truncate_double": True,
     #"use_python_runtime": True,
     "immutable_weights": True,
@@ -40,15 +43,17 @@ TRT_SETTINGS = {
     "require_full_compilation": True,
 }
 
+LANGUAGE_TRT_SETTINGS = {
+    **TRT_SETTINGS,
+}
+
 ACTION_TRT_SETTINGS = {
     **TRT_SETTINGS,
     "offload_module_to_cpu": True,
-    "use_fp32_acc": True,
 }
 
 VISION_TRT_SETTINGS = {
     **TRT_SETTINGS,
-    "use_fp32_acc": True,
 }
 
 def load_config(device):
@@ -113,8 +118,6 @@ def build_language_inputs(
     pass
 
 
-# ----- LANGUAGE -------
-
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -123,7 +126,13 @@ def main():
     config, policy = load_config(device)
     model = policy._groot_model
     vision = model.backbone.eagle_model.vision_model
+    language = model.backbone.eagle_model.language_model
+    select_layer = model.backbone.select_layer
+
     force_hf_attention(vision, "eager")
+    force_hf_attention(language, "eager")
+    language.config._attn_implementation = "sdpa"
+    language = language.to(device=device, dtype=torch.float16).eval()
 
     pre_processor, post_processor = make_pre_post_processors(
         config,
@@ -163,10 +172,11 @@ def main():
         device,
     )
     
+    dtype = torch.float16
     tokenized_data = model_inputs["tokenized_data"]
-    input_ids = tokenized_data["input_ids"]
-    attention_mask = tokenized_data["attention_mask"]
-    pixel_values = tokenized_data["pixel_values"]
+    input_ids = tokenized_data["input_ids"].to(device=device, dtype=torch.long)
+    attention_mask = tokenized_data["attention_mask"].to(device=device, dtype=torch.long)
+    pixel_values = tokenized_data["pixel_values"].to(device=device, dtype=dtype)
     state = pack_state(
         model_inputs["state"],  # [7] libero proprio
         max_state_dim=64,  # 64
@@ -177,9 +187,6 @@ def main():
         "state": state,
         "embodiment_id": make_embodiment_id(policy, state, device),
     }
-
-    print(pixel_values.shape)
-    pixel_values = pixel_values.to(device=device, dtype=torch.float16).contiguous()
 
     '''# ------ run eager on vision -----
     images_hwc = nchw_to_hwc(pixel_values)
@@ -239,6 +246,7 @@ def main():
     pixel_values = pixel_values.to(device=device, dtype=torch.float16).contiguous()
 
     eagle = model.backbone.eagle_model
+    # add vision wrapper
     visual = GridVisionExportModule(
         vision_model=vision,
         projector=eagle.mlp1,
@@ -293,16 +301,149 @@ def main():
     # two below are not valid, 
     # b attention outputs will be zeros - it will run empty custom_op operations
     # c is running kernels producing correct attention outputs
-    parity("A vs B (plugin)", embs_eager, embs_eager_plugin)
+    #parity("A vs B (plugin)", embs_eager, embs_eager_plugin)
     #parity("B vs C (trt only)", embs_eager_plugin, embs_trt)
 
     # STEP 2 language
     print('Compiling language')
-    build_language_inputs(
-        eager,
-        
+    image_token_index = getattr(
+        eagle,
+        "image_token_index",
+        eagle.config.image_token_index,
     )
 
+    # ---------------------------------------------------------------------------
+    # Shared: build packed language embeddings (same for both paths)
+    # ---------------------------------------------------------------------------
+    input_embs = language.get_input_embeddings()(input_ids)
+    bsz, seq_len, hidden = input_embs.shape
+
+    flat_embs = input_embs.reshape(bsz * seq_len, hidden)
+    flat_ids = input_ids.reshape(bsz * seq_len)
+    image_token_mask = flat_ids == image_token_index
+
+    flat_image_embs = embs_eager.reshape(-1, hidden).to(
+        device=flat_embs.device,
+        dtype=flat_embs.dtype,   # match embedding dtype (bf16), not hardcoded fp16
+    )
+    flat_embs[image_token_mask] = flat_image_embs[:int(image_token_mask.sum().item())]
+    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
+    inputs_embeds = inputs_embeds.to(device=device, dtype=torch.float16).contiguous()
+    position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
+
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
+
+    # ---------------------------------------------------------------------------
+    # RUNG A: eager language — no wrapper, no patch
+    # HF owns RoPE, KV cache, layer loop, norm
+    # ---------------------------------------------------------------------------
+    with torch.no_grad():
+        eager_out = language(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+    lm_hidden_eager = eager_out.hidden_states[-1]
+
+    # ---------------------------------------------------------------------------
+    # RUNG C: plugin + CausalLMExportModule — patch first, then flat ABI
+    # ---------------------------------------------------------------------------
+    decoder = getattr(language, "model", language)   # Qwen3Model with .layers
+    cfg = language.config
+    hidden_size = int(cfg.hidden_size)
+    num_attention_heads = int(cfg.num_attention_heads)
+    num_key_value_heads = int(cfg.num_key_value_heads)
+    head_dim = int(getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads))
+    num_layers = len(decoder.layers)
+
+    lm = CausalLMExportModule(
+        decoder,
+        language.lm_head,
+        select_layer=-1,
+    ).eval().to(device=device)
+
+    lm_inputs = inputs_embeds.to(device=device, dtype=dtype).contiguous()
+    pad_mask = attention_mask.to(device=inputs_embeds.device, dtype=torch.bool)
+    # build position_ids for the real sequence:
+    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+        cfg,
+        seq_len,
+        device,
+        language_model=language,
+        position_ids=position_ids,
+    )
+
+    ctx_len = torch.full((bsz,), seq_len, device=device, dtype=torch.int32)
+    last_token_ids = torch.full((bsz, 1), seq_len - 1, device=device, dtype=torch.int64)
+
+    kv_caches = [
+        torch.zeros(
+            bsz,
+            2,
+            num_key_value_heads,
+            seq_len,
+            head_dim,
+            device=device,
+            dtype=torch.float16,
+        )
+        for _ in range(num_layers)
+    ]
+    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)   # fresh prefill
+    flat_tensors = (
+        lm_inputs,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        last_token_ids,
+        *kv_caches,
+    )
+
+    patched = patch_language_attention(
+        decoder,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=head_dim,
+        enable_bidirectional_prefill=0,
+    )
+
+    try:
+        with torch.no_grad():
+            logits, lm_hidden_trt_ref, prefix_k, prefix_v = lm(*flat_tensors)
+            # lm_hidden_trt_ref is what CausalLMExportModule calls context_hidden
+            # compare lm_hidden_eager vs lm_hidden_trt_ref (after TRT compile, same flat_tensors in)
+    
+        lm_exported = torch.export.export(lm, args=flat_tensors, strict=False)
+        lm_input_specs = _make_input_spec(flat_tensors)
+        lm_trt_engine = torch_tensorrt.dynamo.compile(
+            lm_exported,
+            inputs=lm_input_specs,
+            **{**LANGUAGE_TRT_SETTINGS, "use_python_runtime": True},
+        )
+
+        with torch.no_grad():
+            trt_out = lm_trt_engine(*flat_tensors)
+            # trt_out is tuple: (logits, context_hidden, prefix_k, prefix_v)
+
+    finally:
+        restore_attention(patched)
+
+    print("ctx_len", ctx_len)
+    print("rope shape", rope_rotary_cos_sin.shape)
+    print("lm_hidden_eager", lm_hidden_eager.shape)
+    print("trt hidden", trt_out[1].shape)
+    print("input_ids", input_ids.shape)
+    print("inputs_embeds", inputs_embeds.shape)
+    print("embs_eager", embs_eager.shape)
+    print("num image slots", int(image_token_mask.sum().item()))
+    print("seq_len variable", seq_len)
+    print("model.backbone.select_layer", model.backbone.select_layer)
+    print("Michael", model.backbone.select_layer)
+    parity("language A vs C", lm_hidden_eager, trt_out[1])
     return 0
 
 def parity(name, a, b):

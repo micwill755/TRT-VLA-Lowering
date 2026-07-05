@@ -120,9 +120,11 @@ class EdgeContext:
     policy: Any
     model: nn.Module
     device: torch.device
+    dtype: Any
     model_inputs: dict[str, Any]
     engine_root: Path
     args: Any
+    seed: int = 42
 
     # Filled as pipelines and stages run.
     artifacts: dict[str, StageResult] = field(default_factory=dict)

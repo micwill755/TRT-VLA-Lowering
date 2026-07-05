@@ -299,3 +299,51 @@ def _run_trt(ctx: EdgeContext) -> InferenceStageResult:
         prefix_k=prefix_k,
         prefix_v=prefix_v,
     )
+
+def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
+    eagle = ctx.profile.model.eagle_model
+    image_token_index = getattr(
+        eagle,
+        "image_token_index",
+        eagle.config.image_token_index,
+    )
+
+    input_ids = inputs["input_ids"]
+    image_embs = inputs["image_embs"]
+    input_embs = eagle.language_model.get_input_embeddings(input_ids)
+    attention_mask = inputs["attention_mask"]
+
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+    attention_mask = attention_mask.to(device=input_embs.device)
+
+    bsz, seq_len, hidden = input_embs.shape
+    flat_embs = input_embs.reshape(bsz * seq_len, hidden)
+    flat_ids = input_ids.reshape(bsz * seq_len)
+
+    image_token_mask = flat_ids == image_token_index
+    flat_image_embs = image_embs.reshape(-1, hidden).to(
+        device=ctx.device,
+        dtype=ctx.dtype,
+    )
+
+    num_slots = int(image_token_mask.sum().item())
+    if flat_image_embs.shape[0] < num_slots:
+        raise ValueError(
+            f"Not enough image embeddings for placeholders: "
+            f"{flat_image_embs.shape[0]} embeddings for {num_slots} slots"
+        )
+
+    flat_embs[image_token_mask] = flat_image_embs[:num_slots]
+
+    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
+    pad_mask = attention_mask.to(device=inputs_embeds.device, dtype=torch.bool)
+    position_ids = torch.cumsum(pad_mask, dim=1) - 1
+
+    return {
+        "inputs_embeds": inputs_embeds,
+        "pad_mask": pad_mask,
+        "attention_mask": attention_mask,
+        "position_ids": position_ids,
+        "image_token_mask": image_token_mask.reshape(bsz, seq_len),
+    }

@@ -12,47 +12,54 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
     model_type="Gr00tN1d7",
     io=GROOT_EDGE_IO,
     hooks=PipelineHooks(
-        preprocess=f"{_I}.preprocess:preprocess",
+        preprocess=f"{_I}.process:preprocess",
+        preprocess=f"{_I}.process:postprocess",
     ),
     stages=(
         StageConfig(
             stage_id=0,
+            stage_name="vision",
             input_sources=(),
             runner="trt.runner.inference:InferenceRunner",
             engine_subdir="visual",
-            hooks=StageHooks(
-                run=f"{_I}.vision:run",
-            ),
+            hooks={
+                preprocess=f"{_I}.vision:preprocess",
+                execute=f"{_I}.vision:execute",
+            },
         ),
         StageConfig(
             stage_id=1,
+            stage_name="language",
             input_sources=(0,),
             runner="trt.runner.inference:InferenceRunner",
             engine_subdir="language",
-            hooks=StageHooks(
-                process_inputs=f"{_I}.glue:vision_to_language",
+            hooks={
+                preprocess=f"{_I}.language:preprocess",
                 run=f"{_I}.language:run",
-            ),
+            },
         ),
         StageConfig(
             stage_id=2,
+            stage_name="action_context",
             input_sources=(1,),
             runner="trt.runner.inference:InferenceRunner",
             engine_subdir="action_context",
-            hooks=StageHooks(
-                process_inputs=f"{_I}.glue:language_to_action_context",
+            hooks={
+                preprocess=f"{_I}.action_context:preprocess",
                 run=f"{_I}.action_context:run",
-            ),
+            },
         ),
         StageConfig(
             stage_id=3,
+            stage_name="action",
             input_sources=(2,),
             runner="trt.runner.inference:InferenceRunner",
             engine_subdir="action",
             final_output=True,
-            hooks=StageHooks(
+            hooks={
+                preprocess=f"{_I}.action:preprocess",
                 run=f"{_I}.action:run",
-            ),
+            },
         ),
     ),
 )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from trt.context import EdgeContext
 
-
+# TODO: REVIEW: glue may not be necessary with every stage having a preprocess function
 def vision_to_language(ctx: EdgeContext, upstream, stage_inputs: dict) -> dict:
     vision = upstream[0]
     ctx.inference.image_embs = vision.tensors["image_embs"]

@@ -11,7 +11,19 @@ class BenchmarkPipeline:
         self.config = config
 
     def run(self, ctx: EdgeContext) -> BenchmarkResult:
-        result = BenchmarkResult()
+        if hooks.preprocess:
+            resolve(hooks.preprocess)(ctx)
+        
+        for stage_cfg in self.config.stages:
+            print("Executing {}".format(stage_cfg.name))
+            stg_input = stg_output
+            runner = resolve(stage_cfg.runner)(stage_cfg)
+            stg_output = runner.run(ctx, stg_input)
+        
+        if hooks.postprocess:
+            resolve(hooks.postprocess)(ctx)
+        
+        '''result = BenchmarkResult()
         warmup = int(getattr(ctx.args, "warmup", 3))
         iterations = int(getattr(ctx.args, "num_iterations", 12))
 
@@ -33,4 +45,6 @@ class BenchmarkPipeline:
             if len(samples) > warmup:
                 print_timing(name, [s * 1000 for s in samples[warmup:]])
         self.config.hooks.report(ctx)
-        return result
+        return result'''
+        pass
+

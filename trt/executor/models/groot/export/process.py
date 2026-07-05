@@ -31,3 +31,6 @@ def preprocess(ctx: StageContext) -> None:
         "embodiment_id": make_embodiment_id(ctx.policy, state, ctx.device),  # [1], e.g. [31]
     }
     ctx.export_state["tokenizer"] = ctx.profile.text_tok
+
+def postprocess(ctx: StageContext) -> None:
+    pass

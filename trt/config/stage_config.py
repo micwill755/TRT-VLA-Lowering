@@ -36,45 +36,20 @@ from dataclasses import dataclass, field
 
 from trt.io_spec import PipelineIOSpec
 
-
-@dataclass(frozen=True)
-class PipelineHooks:
-    """Whole-pipeline hooks for one model (defined in executor/models/<model>/)."""
-
-    preprocess: str | None = None   # normalize ctx.model_inputs before stage 0
-    postprocess: str | None = None  # parity / smoke after all engines are built
-
-
-@dataclass(frozen=True)
-class StageHooks:
-    """Per-stage hooks; export uses compile hooks, inference uses run_* hooks."""
-
-    plan_export: str | None = None
-    compile: str | None = None
-    run: str | None = None
-    process_inputs: str | None = None
-    save_artifacts: str | None = None
-    metadata: str | None = None
-    after_stage: str | None = None
-
-
 @dataclass(frozen=True)
 class StageConfig:
     """One node in the export graph."""
 
     stage_id: int
+    stage_name: str | None = None
     input_sources: tuple[int, ...]  # upstream stage ids; () = entry point
     runner: str                     # e.g. "trt.runner.export:ExportRunner"
-    hooks: StageHooks
-    final_output: bool = False
+    hooks: dict
+    result: bool = False
     engine_subdir: str | None = None
-
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Frozen stage graph for one VLA (export, inference, or both)."""
-
-    model_type: str
+    pipeline_name: str
     stages: tuple[StageConfig, ...]
     hooks: PipelineHooks = field(default_factory=PipelineHooks)
-    io: PipelineIOSpec | None = None

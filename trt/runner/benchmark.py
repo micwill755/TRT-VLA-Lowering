@@ -10,27 +10,25 @@ from trt.config.stage_config import StageConfig
 from trt.context import EdgeContext
 from trt.hooks.resolve import resolve
 
-class InferenceRunner:
+class BenchmarkRunner:
     def __init__(self, stage_cfg: StageConfig):
         self.stage_cfg = stage_cfg
         self.hooks = stage_cfg.hooks
-
+    
     @torch.no_grad()
-    def run(self, ctx: EdgeContext) -> dict:
-        upstream = [ctx.stage_results[i] for i in self.stage_cfg.input_sources]
-
+    def run(self, ctx: EdgeContext, inputs: dict) -> Any:
+        # preprocess any inputs before run
+        if hooks.preprocess:
+            resolve(self.hooks.preprocess)(ctx, inputs)
+        # start timer
         t0 = time.perf_counter()
-
-        if self.hooks.preprocess:
-            resolve(self.hooks.preprocess)(ctx)
-
         result = resolve(self.hooks.run)(ctx)
-
-        if self.hooks.postprocess:
-            result = resolve(self.hooks.postprocess)(ctx, result)
-
+        # record total time of execution
         execution_time = time.perf_counter() - t0
-        print("InferenceRunner: execution complete in {}", execution_time)
 
-        # TODO: what do we need to return after pipeline ? 
-        return result
+        resolve(self.hooks.postprocess)(ctx, result)
+
+        return {
+            "execution_time": execution_time,
+            "result": result
+        }
