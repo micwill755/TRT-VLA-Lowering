@@ -85,27 +85,6 @@ class LanguageEngineSpec:
 # GR00T: causal LM + context projection (dual outputs)
 # ---------------------------------------------------------------------------
 
-class GROOTContextProjectionWrapper(nn.Module):
-    """eagle_linear -> vlln -> vl_self_attention (matches eager context path)."""
-
-    def __init__(self, eagle_linear, vlln, vl_self_attention):
-        super().__init__()
-        self.eagle_linear = eagle_linear
-        self.vlln = vlln
-        self.vl_self_attention = vl_self_attention
-
-    def forward(self, hidden_states: torch.Tensor):
-        context_embs = self.eagle_linear(hidden_states)
-
-        vlln_weight = getattr(self.vlln, "weight", None)
-        if vlln_weight is not None:
-            context_embs = context_embs.to(dtype=vlln_weight.dtype)
-
-        context_embs = self.vlln(context_embs)
-        context_embs = self.vl_self_attention(context_embs)
-        return context_embs
-
-
 class GROOTLanguageContextWrapper(nn.Module):
     """Legacy fused export: causal LM logits + GR00T context_embs."""
 

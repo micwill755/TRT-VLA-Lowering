@@ -1,32 +1,36 @@
-# trt/runner/base.py
-
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import torch
 
-@dataclass
-class StageContext:
-    """Shared state passed between stages."""
-    profile: Any
-    policy: Any
-    model: Any
-    device: torch.device
-    model_inputs: dict[str, torch.Tensor]
-    engine_root: Path
+from trt.config.stage_config import StageConfig
+from trt.context import EdgeContext
+from trt.hooks.resolve import resolve
 
-    # filled by stages
-    artifacts: dict[str, Any] = field(default_factory=dict)
-    export_state: dict[str, Any] = field(default_factory=dict)
-    handles: dict[str, Any] = field(default_factory=dict)
+class BaseRunner:
+    def __init__(self, stage_cfg: StageConfig):
+        self.stage_cfg = stage_cfg
+        self.hooks = stage_cfg.hooks
 
-from trt.context import StageResult
+    @torch.no_grad()
+    def run(self, ctx: EdgeContext, inputs: dict) -> dict:
+        t0 = time.perf_counter()
 
+        # if the stage has a preprocess function, make sure we update inputs
+        prepared = inputs 
+        if self.hooks.preprocess:
+            prepared = resolve(self.hooks.preprocess)(ctx)
 
-class StageRunner(ABC):
-    @abstractmethod
-    def run(self, ctx: StageContext) -> StageResult: ...
+        result = resolve(self.hooks.execute)(ctx, prepared)
+
+        if self.hooks.postprocess:
+            result = resolve(self.hooks.postprocess)(ctx, result)
+
+        execution_time = time.perf_counter() - t0
+        print("Runner: execution complete in {}", execution_time)
+
+        # TODO: what do we need to return after pipeline ? 
+        return result

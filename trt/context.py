@@ -42,7 +42,6 @@ class InferenceState:
     noise: torch.Tensor | None = None
     stage_ms: dict[str, float] = field(default_factory=dict)
 
-
 @dataclass
 class StageResult:
     """Output of one export stage (vision, language, or action).
@@ -134,5 +133,4 @@ class EdgeContext:
     actions: torch.Tensor | None = None
 
     execution_mode: ExecutionMode = ExecutionMode.EAGER
-    inference: InferenceState = field(default_factory=InferenceState)
     stage_results: dict[int, Any] = field(default_factory=dict)

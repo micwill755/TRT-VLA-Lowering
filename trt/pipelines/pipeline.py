@@ -25,12 +25,14 @@ class Pipeline:
             resolve(self.hooks.preprocess)(ctx)
 
         result = {}
-        stg_input, stg_output = inputs, {}
+        stage_outputs = {}
         for stage_cfg in self.config.stages:
             print("Executing {}".format(stage_cfg.name))
-            stg_input = stg_output
+            # using this upstream approachs allows for DAG and streamlined
+            inputs = [stage_outputs[i] for i in stage_cfg.input_sources]
             runner = resolve(stage_cfg.runner)(stage_cfg)
-            stg_output = runner.run(ctx, stg_input)
+            stg_output = runner.run(ctx, inputs)
+            stage_outputs[stage_cfg.stage_id] = stg_output
 
         if self.hooks.postprocess:
             result = resolve(self.hooks.postprocess)(ctx, result)

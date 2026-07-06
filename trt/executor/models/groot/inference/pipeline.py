@@ -1,8 +1,6 @@
 from trt.config.stage_config import (
     PipelineConfig,
-    PipelineHooks,
-    StageConfig,
-    StageHooks,
+    StageConfig
 )
 from trt.io_spec import GROOT_EDGE_IO
 
@@ -11,16 +9,16 @@ _I = "trt.executor.models.groot.inference"
 GROOT_INFERENCE_PIPELINE = PipelineConfig(
     model_type="Gr00tN1d7",
     io=GROOT_EDGE_IO,
-    hooks=PipelineHooks(
+    hooks={
         preprocess=f"{_I}.process:preprocess",
         preprocess=f"{_I}.process:postprocess",
-    ),
+    },
     stages=(
         StageConfig(
             stage_id=0,
             stage_name="vision",
             input_sources=(),
-            runner="trt.runner.inference:InferenceRunner",
+            runner="trt.runner.base:BaseRunner",
             engine_subdir="visual",
             hooks={
                 preprocess=f"{_I}.vision:preprocess",
@@ -31,7 +29,7 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             stage_id=1,
             stage_name="language",
             input_sources=(0,),
-            runner="trt.runner.inference:InferenceRunner",
+            runner="trt.runner.base:BaseRunner",
             engine_subdir="language",
             hooks={
                 preprocess=f"{_I}.language:preprocess",
@@ -42,7 +40,7 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             stage_id=2,
             stage_name="action_context",
             input_sources=(1,),
-            runner="trt.runner.inference:InferenceRunner",
+            runner="trt.runner.base:BaseRunner",
             engine_subdir="action_context",
             hooks={
                 preprocess=f"{_I}.action_context:preprocess",
@@ -53,7 +51,7 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             stage_id=3,
             stage_name="action",
             input_sources=(2,),
-            runner="trt.runner.inference:InferenceRunner",
+            runner="trt.runner.base:BaseRunner",
             engine_subdir="action",
             final_output=True,
             hooks={

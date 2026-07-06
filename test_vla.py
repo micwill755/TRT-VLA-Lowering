@@ -13,7 +13,7 @@ from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
 from trt.modules.export.vision import GridVisionExportModule
-from trt.modules.export.language import CausalLMExportModule
+from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
 
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
@@ -108,23 +108,16 @@ def prepare_compile_inputs(
         self.device,
     )
 
-# ----- LANGUAGE -------
-def build_language_inputs(
-        vision_model,
-        image_embs,
-        input_ids,
-        attention_mask,
-    ):
-    pass
-
-
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     load_plugins_for_trt()
+    
+    dtype = torch.float16
 
     config, policy = load_config(device)
     model = policy._groot_model
+    eagle = model.backbone.eagle_model
     vision = model.backbone.eagle_model.vision_model
     language = model.backbone.eagle_model.language_model
     select_layer = model.backbone.select_layer
@@ -132,7 +125,7 @@ def main():
     force_hf_attention(vision, "eager")
     force_hf_attention(language, "eager")
     language.config._attn_implementation = "sdpa"
-    language = language.to(device=device, dtype=torch.float16).eval()
+    language = language.to(device=device, dtype=dtype).eval()
 
     pre_processor, post_processor = make_pre_post_processors(
         config,
@@ -172,7 +165,6 @@ def main():
         device,
     )
     
-    dtype = torch.float16
     tokenized_data = model_inputs["tokenized_data"]
     input_ids = tokenized_data["input_ids"].to(device=device, dtype=torch.long)
     attention_mask = tokenized_data["attention_mask"].to(device=device, dtype=torch.long)
@@ -182,80 +174,21 @@ def main():
         max_state_dim=64,  # 64
         device=device,
     ) 
-    state = state.to(device=device, dtype=torch.float16)
     action_side = {
         "state": state,
         "embodiment_id": make_embodiment_id(policy, state, device),
     }
-
-    '''# ------ run eager on vision -----
-    images_hwc = nchw_to_hwc(pixel_values)
-    eagle = model.backbone.eagle_model
-    visual = GridVisionExportModule(
-        vision_model=vision,
-        projector=eagle.mlp1,
-        sample_pixel_values=images_hwc,
-        select_layer=eagle.select_layer,
-        pixel_shuffle=eagle.use_pixel_shuffle,
-        downsample_ratio=eagle.downsample_ratio,
-        vision_kwargs={},
-    ).eval().to(device=device, dtype=torch.float16)
-
-    with torch.no_grad():
-        image_embs = visual(pixel_values)
-
-    print(image_embs.shape)
-    # ------ run eager on vision -----
-
-    # ------ run plugin on vision -----
-    pixel_values_nchw = pixel_values.to(device=device, dtype=torch.float16).contiguous()
-    hidden_states = vision.vision_model.embeddings(pixel_values_nchw)
-    batch_size, seq_len = int(hidden_states.shape[0]), int(hidden_states.shape[1])
-    patched = patch_vision_attention(
-        vision.vision_model,
-        batch_size=batch_size,
-        seq_len=seq_len,
-        name="SigLIP",
-    )
-
-    sample_inputs = (pixel_values,)
-
-    exported = torch.export.export(
-        visual,
-        args=sample_inputs,
-        strict=False,
-    )
-
-    input_specs = _make_input_spec(sample_inputs)
-
-    vision_settings = {
-        **VISION_TRT_SETTINGS,
-        "use_python_runtime": True,
-    }
-    trt_engine = torch_tensorrt.dynamo.compile(
-        exported,
-        inputs=input_specs,
-        **vision_settings,
-    )
-    image_embs_trt_engine = trt_engine(pixel_values)
-    #print(image_embs_trt_engine == image_embs)
-    # ------ run plugin on vision -----
-    print(torch.allclose(image_embs_trt_engine.float(), image_embs.float(), rtol=1e-2, atol=1e-2))'''
-
-    # Align everything to one layout + dtype
-    pixel_values = pixel_values.to(device=device, dtype=torch.float16).contiguous()
-
-    eagle = model.backbone.eagle_model
+    
     # add vision wrapper
     visual = GridVisionExportModule(
         vision_model=vision,
         projector=eagle.mlp1,
-        sample_pixel_values=pixel_values,      # NCHW; module handles layout internally
+        sample_pixel_values=pixel_values,
         select_layer=eagle.select_layer,
         pixel_shuffle=eagle.use_pixel_shuffle,
         downsample_ratio=eagle.downsample_ratio,
         vision_kwargs={},
-    ).eval().to(device=device, dtype=torch.float16)
+    ).eval().to(device=device, dtype=dtype)
 
     # --- Rung A: eager SDPA (UNPATCHED) ---
     with torch.no_grad():
@@ -328,7 +261,7 @@ def main():
     )
     flat_embs[image_token_mask] = flat_image_embs[:int(image_token_mask.sum().item())]
     inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
-    inputs_embeds = inputs_embeds.to(device=device, dtype=torch.float16).contiguous()
+    inputs_embeds = inputs_embeds.to(device=device, dtype=dtype).contiguous()
     position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
 
     if attention_mask is None:
@@ -348,6 +281,17 @@ def main():
         )
 
     lm_hidden_eager = eager_out.hidden_states[-1]
+
+    # pre action transformation - action context
+    eager_context_embs = lm_hidden_eager
+    eager_context_embs = model.backbone.eagle_linear(eager_context_embs)
+
+    # Match action_head.process_backbone_output().
+    vlln_weight = getattr(model.action_head.vlln, "weight", None)
+    if vlln_weight is not None:
+        eager_context_embs = eager_context_embs.to(device=vlln_weight.device, dtype=vlln_weight.dtype)
+    eager_context_embs = model.action_head.vlln(eager_context_embs)
+    eager_context_embs = model.action_head.vl_self_attention(eager_context_embs)
 
     # ---------------------------------------------------------------------------
     # RUNG C: plugin + CausalLMExportModule — patch first, then flat ABI
@@ -388,7 +332,7 @@ def main():
             seq_len,
             head_dim,
             device=device,
-            dtype=torch.float16,
+            dtype=dtype,
         )
         for _ in range(num_layers)
     ]
@@ -432,18 +376,35 @@ def main():
     finally:
         restore_attention(patched)
 
-    print("ctx_len", ctx_len)
-    print("rope shape", rope_rotary_cos_sin.shape)
-    print("lm_hidden_eager", lm_hidden_eager.shape)
-    print("trt hidden", trt_out[1].shape)
-    print("input_ids", input_ids.shape)
-    print("inputs_embeds", inputs_embeds.shape)
-    print("embs_eager", embs_eager.shape)
-    print("num image slots", int(image_token_mask.sum().item()))
-    print("seq_len variable", seq_len)
-    print("model.backbone.select_layer", model.backbone.select_layer)
-    print("Michael", model.backbone.select_layer)
     parity("language A vs C", lm_hidden_eager, trt_out[1])
+
+    action_context = ContextProjectionExportModule(
+        model.backbone.eagle_linear,
+        model.action_head.vlln,
+        model.action_head.vl_self_attention,
+    ).eval()
+
+    try:
+        with torch.no_grad():
+            # context hidden as input
+            context = action_context(trt_out[1])
+
+        action_context_exported = torch.export.export(action_context, args=(trt_out[1],), strict=False)
+        action_context_input_specs = _make_input_spec((trt_out[1],))
+        action_context_trt_engine = torch_tensorrt.dynamo.compile(
+            action_context_exported,
+            inputs=action_context_input_specs,
+            **ACTION_TRT_SETTINGS,
+        )
+
+        with torch.no_grad():
+            trt_context_embs = action_context_trt_engine(trt_out[1])
+            # trt_out is tuple: (logits, context_hidden, prefix_k, prefix_v)
+
+    finally:
+        restore_attention(patched)
+
+    parity("action context A vs C", eager_context_embs, trt_context_embs)
     return 0
 
 def parity(name, a, b):

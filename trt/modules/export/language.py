@@ -99,3 +99,24 @@ class CausalLMExportModule(nn.Module):
             dim=0,
         )
         return logits, context_hidden, prefix_k, prefix_v
+
+# specific to gr00t, before action another project is required for context embeddings
+class ContextProjectionExportModule(nn.Module):
+    """eagle_linear -> vlln -> vl_self_attention (matches eager context path)."""
+
+    def __init__(self, eagle_linear, vlln, vl_self_attention):
+        super().__init__()
+        self.eagle_linear = eagle_linear
+        self.vlln = vlln
+        self.vl_self_attention = vl_self_attention
+
+    def forward(self, hidden_states: torch.Tensor):
+        context_embs = self.eagle_linear(hidden_states)
+
+        vlln_weight = getattr(self.vlln, "weight", None)
+        if vlln_weight is not None:
+            context_embs = context_embs.to(dtype=vlln_weight.dtype)
+
+        context_embs = self.vlln(context_embs)
+        context_embs = self.vl_self_attention(context_embs)
+        return context_embs
