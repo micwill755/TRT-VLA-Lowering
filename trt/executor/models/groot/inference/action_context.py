@@ -7,12 +7,16 @@ from trt.context import EdgeContext
 from trt.language import make_action_context_module
 from trt.runner.inference import InferenceStageResult
 
+def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
+    context_module = ContextProjectionExportModule(
+        ctx.model.backbone.eagle_linear,
+        ctx.model.action_head.vlln,
+        ctx.model.action_head.vl_self_attention,
+    ).eval()
 
-def _lm_hidden(ctx: EdgeContext) -> torch.Tensor:
-    if ctx.inference.lm_hidden_states is not None:
-        return ctx.inference.lm_hidden_states
-    raise RuntimeError("action_context stage requires language lm_hidden_states")
-
+    return {
+        "context_module": context_module
+    }
 
 def run(ctx: EdgeContext) -> InferenceStageResult:
     match ctx.execution_mode:
@@ -23,17 +27,17 @@ def run(ctx: EdgeContext) -> InferenceStageResult:
         case ExecutionMode.IN_MEMORY:
             return _run_trt(ctx)
 
-
 def _run_eager(ctx: EdgeContext) -> InferenceStageResult:
-    lm_hidden = _lm_hidden(ctx)
-    context_module = make_action_context_module(
-        ctx.model,
-        device=ctx.device,
-        dtype=torch.float16,
-    )
+    lm_hidden = inputs["lm_hidden"]
+    context_module = inputs["context_module"]
+    # pre action transformation - action context
+    context_embs = ctx.model.backbone.eagle_linear(lm_hidden)
     context_embs = context_module(lm_hidden)
     ctx.inference.context_embs = context_embs.to(device=ctx.device, dtype=torch.float16).contiguous()
-    return InferenceStageResult(tensors={"context_embs": ctx.inference.context_embs})
+    
+    return {
+        "context_embs": context_embs
+    }
 
 
 def _run_serialized(ctx: EdgeContext) -> InferenceStageResult:

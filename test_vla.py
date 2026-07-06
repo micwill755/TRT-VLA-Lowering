@@ -2,6 +2,7 @@ import torch
 import argparse
 import torch_tensorrt
 import logging
+import copy
 
 torch_tensorrt.logging.set_level(logging.ERROR)
 
@@ -282,17 +283,6 @@ def main():
 
     lm_hidden_eager = eager_out.hidden_states[-1]
 
-    # pre action transformation - action context
-    eager_context_embs = lm_hidden_eager
-    eager_context_embs = model.backbone.eagle_linear(eager_context_embs)
-
-    # Match action_head.process_backbone_output().
-    vlln_weight = getattr(model.action_head.vlln, "weight", None)
-    if vlln_weight is not None:
-        eager_context_embs = eager_context_embs.to(device=vlln_weight.device, dtype=vlln_weight.dtype)
-    eager_context_embs = model.action_head.vlln(eager_context_embs)
-    eager_context_embs = model.action_head.vl_self_attention(eager_context_embs)
-
     # ---------------------------------------------------------------------------
     # RUNG C: plugin + CausalLMExportModule — patch first, then flat ABI
     # ---------------------------------------------------------------------------
@@ -378,31 +368,31 @@ def main():
 
     parity("language A vs C", lm_hidden_eager, trt_out[1])
 
+    # pre action transformation - action context
+    eager_context_embs = model.backbone.eagle_linear(lm_hidden_eager).to(dtype=dtype)
+    trt_context_embs = trt_out[1].to(dtype=dtype)
+
+    # input hidden_states  [B, S, 2048]   ← language context_hidden (lm_hidden_eager or trt_out[1])
     action_context = ContextProjectionExportModule(
-        model.backbone.eagle_linear,
-        model.action_head.vlln,
-        model.action_head.vl_self_attention,
-    ).eval()
+        model.backbone.eagle_linear, # [B, S, 1536],
+        model.action_head.vlln, # [B, S, 1536] (LayerNorm),
+        model.action_head.vl_self_attention # [B, S, 1536] (vl_self_attention (SelfAttentionTransformer)) -> [output],
+    ).eval().to(dtype=dtype)
 
-    try:
-        with torch.no_grad():
-            # context hidden as input
-            context = action_context(trt_out[1])
+    with torch.no_grad():
+        # context hidden as input
+        eager_context_embs = action_context(eager_context_embs)
 
-        action_context_exported = torch.export.export(action_context, args=(trt_out[1],), strict=False)
-        action_context_input_specs = _make_input_spec((trt_out[1],))
-        action_context_trt_engine = torch_tensorrt.dynamo.compile(
-            action_context_exported,
-            inputs=action_context_input_specs,
-            **ACTION_TRT_SETTINGS,
-        )
+    action_context_exported = torch.export.export(action_context, args=(trt_context_embs,), strict=False)
+    action_context_input_specs = _make_input_spec((trt_context_embs,))
+    action_context_trt_engine = torch_tensorrt.dynamo.compile(
+        action_context_exported,
+        inputs=action_context_input_specs,
+        **ACTION_TRT_SETTINGS,
+    )
 
-        with torch.no_grad():
-            trt_context_embs = action_context_trt_engine(trt_out[1])
-            # trt_out is tuple: (logits, context_hidden, prefix_k, prefix_v)
-
-    finally:
-        restore_attention(patched)
+    with torch.no_grad():
+        trt_context_embs = action_context_trt_engine(trt_context_embs) # logits, lm_hidden, prefix_k, prefix_v
 
     parity("action context A vs C", eager_context_embs, trt_context_embs)
     return 0
