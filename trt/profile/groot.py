@@ -13,8 +13,6 @@ from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STATE
 from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
 from trt.data import create_pil_messages, prepare_model_inputs
-from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
-from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
 from trt.io_spec import GROOT_EDGE_IO
 from trt.profile import VLAProfile
 from trt.utils import force_hf_attention
@@ -24,12 +22,6 @@ class GrootProfile(VLAProfile):
     model_id = "nvidia/GR00T-N1.5-3B"
     engine_dir_default = "/tmp/groot_edge_llm"
     display_name = "gr00t"
-
-    policy_cls = GrootPolicy
-    io = GROOT_EDGE_IO
-
-    vision_trt_settings = dict(VISION_TRT_SETTINGS)
-    action_trt_settings = dict(ACTION_TRT_SETTINGS)
 
     def _init_policy(self) -> None:
         self.config = GrootConfig(

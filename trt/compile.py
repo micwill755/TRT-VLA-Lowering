@@ -269,12 +269,10 @@ def save_trt_engine_module(
     component,
     input_names,
     output_names=None,
-    example_output=None,
     extra_config=None,
     trt_settings=None,
     input_specs=None,
     flat_tensors=None,
-    settings=None,
 ):
     module = module.eval()
     sample_inputs = tuple(sample_inputs)
@@ -286,9 +284,8 @@ def save_trt_engine_module(
     engine_path = engine_dir / engine_file
     config_path = engine_dir / "config.json"
 
-    if example_output is None:
-        with torch.no_grad():
-            example_output = module(*sample_inputs)
+    with torch.no_grad():
+        example_output = module(*sample_inputs)
 
     if input_specs is not None:
         exported = trace_language_for_edge_llm(
@@ -314,7 +311,7 @@ def save_trt_engine_module(
         engine_bytes = torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(
             exported,
             inputs=input_specs,
-            **settings,
+            **trt_settings,
         )
 
     engine_path.write_bytes(engine_bytes)

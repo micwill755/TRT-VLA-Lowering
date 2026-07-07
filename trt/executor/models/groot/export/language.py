@@ -1,36 +1,22 @@
 """GR00T language export hooks: Eagle LM prefill → TRT LLMEngineRunner engine.
 
-Stage 1 in the GROOT export pipeline (after vision). ``glue.vision_to_language`` wires
-stage-0 metadata into ``stage_inputs``; ``plan_export`` builds an ``ExportPlan``;
-``compile`` traces ``CausalLMExportModule`` and writes ``language/language.engine``;
-``save_artifacts`` writes embedding table + tokenizer JSON for C++ runtime.
+Stage 1 in the GROOT export pipeline (after vision). ``preprocess`` splices vision
+rows into ``inputs_embeds`` and builds the flat Edge-LLM bindings; ``export`` traces
+``CausalLMExportModule`` and writes ``language/language.engine``; ``save_artifacts``
+writes the embedding table + tokenizer JSON for the C++ runtime.
 """
 
 from __future__ import annotations
 
-import copy
-from pathlib import Path
-from typing import Any
-
 import torch
-import torch.nn as nn
 
 from trt.compile import save_trt_engine_module
-from trt.hooks.export.plan import ExportPlan
-from trt.language import (
-    compute_vit_expanded_seq_len,
-    language_edge_output_names,
-    language_edge_trt_settings,
-    language_head_dim,
-    make_language_edge_flat_tensors,
-    make_language_edge_input_specs,
-)
+from trt.language import language_edge_trt_settings
 from trt.modules.export.language import CausalLMExportModule
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.rope import make_rope_rotary_cos_sin
 from trt.context import EdgeContext
 from trt.tokenizer import save_embedding_table, save_tokenizer_for_edge_llm
-from trt.utils import clone_hf_module_for_export
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     eagle = ctx.model.backbone.eagle_model
@@ -64,21 +50,13 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     flat_embs[image_token_mask] = flat_image_embs[:num_slots]
 
     inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden).to(device=device).contiguous()
-    lm_dtype = next(language.parameters()).dtype
 
     position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
 
     if attention_mask is None:
         attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
 
-    # --- EAGER: stock HF path (match model weight dtype, test_vla rung A) ---
-    eager_inputs = {
-        "inputs_embeds": inputs_embeds.to(dtype=lm_dtype).contiguous(),
-        "attention_mask": attention_mask.to(device=device),
-        "position_ids": position_ids,
-    }
-
-    # --- TRT/SERIALIZED: flat Edge-LLM bindings (ctx.dtype for engine ABI) ---
+    # --- flat Edge-LLM bindings (ctx.dtype for engine ABI) ---
     trt_inputs_embeds = inputs_embeds.to(dtype=dtype).contiguous()
     # --- config dims ---
     cfg = language.config
@@ -132,16 +110,33 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         *kv_caches,
     )
 
+    # Dummy context hidden for downstream action_context trace — export only needs
+    # the [B, S, H_lm] shape/dtype, not real values (no forward pass here).
+    lm_hidden = torch.zeros(bsz, seq_len, hidden_size, device=device, dtype=dtype)
+
+    # vision expands one image placeholder into S_out slots (from vision metadata)
+    seq_len_per_image = int(inputs.get("metadata", {}).get("seq_len", num_slots))
+
     return {
         "language_model": language,
-        "eager_inputs": eager_inputs,
         "lm_inputs": lm_inputs,
         "lm_module": lm_module,
         "decoder": decoder,
+        "lm_hidden": lm_hidden,
+        "batch_size": bsz,
+        "seq_len": seq_len,
         "hidden_size": hidden_size,
+        "num_hidden_layers": num_layers,
         "num_attention_heads": num_attention_heads,
         "num_key_value_heads": num_key_value_heads,
         "head_dim": head_dim,
+        "image_token_id": int(image_token_index),
+        "seq_len_per_image": seq_len_per_image,
+        "language_inputs": {
+            "inputs_embeds": trt_inputs_embeds,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        },
     }
 
 def export(ctx: EdgeContext, inputs: dict) -> dict:
@@ -186,7 +181,6 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
             component="language",
             input_names=input_names,
             output_names=output_names,
-            example_output=None,
             extra_config={
                 "vocab_size": int(language.config.vocab_size),
                 "max_position_embeddings": int(

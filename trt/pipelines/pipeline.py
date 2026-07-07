@@ -14,7 +14,7 @@ class Pipeline:
         self.hooks = config.hooks
 
     @torch.no_grad()
-    def run(self, ctx: EdgeContext, inputs: dict) -> EdgeContext:
+    def run(self, ctx: EdgeContext, inputs: dict | None = None) -> EdgeContext:
         torch.manual_seed(ctx.seed)
         if ctx.device == "cuda":
             torch.cuda.manual_seed_all(ctx.seed)
@@ -38,7 +38,7 @@ class Pipeline:
             result = resolve(self.hooks["postprocess"])(ctx, result)
 
         execution_time = time.perf_counter() - t0
-        print("Pipeline complete in {}", execution_time)
+        print(f"Pipeline complete in {execution_time:.2f}s")
 
         # TODO: what do we need to return after pipeline ? 
         return result

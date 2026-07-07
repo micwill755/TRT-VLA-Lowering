@@ -51,7 +51,7 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
     batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
     image_token_id = int(getattr(eagle, "image_token_index", eagle.config.image_token_index))
     vocab_size = int(eagle.language_model.config.vocab_size)
-    images_hwc = nchw_to_hwc(pixel_values_nchw)  # [B, H, W, 3]
+    images_hwc = nchw_to_hwc(pixel_values)  # [B, H, W, 3] — VitRunner engine binding
 
     patched = patch_vision_attention(
         vision.vision_model,
@@ -59,7 +59,7 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         seq_len=seq_len,
         name="SigLIP",
     )
-    
+
     try:
         engine_path = save_trt_engine_module(
             visual_module,
@@ -70,21 +70,31 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
             component="vision",
             input_names=["pixel_values"],
             output_names=["visual_embeds"],
-            example_output=None,
             extra_config={
-                vocab_size=vocab_size,
-                image_token_id=image_token_id,
-                seq_len=seq_len,
+                "vocab_size": vocab_size,
+                "image_token_id": image_token_id,
+                "seq_len": seq_len,
             },
             trt_settings=ctx.trt_settings,
         )
     finally:
         restore_attention(patched)
 
+    # downstream language stage splices these vision rows into inputs_embeds
+    with torch.no_grad():
+        image_embs = visual_module(pixel_values)
+
     return {
-        "engine_path": engine_path
+        "engine_path": engine_path,
+        "tensors": {
+            "image_embs": image_embs,
+        },
+        "metadata": {
+            "image_token_id": image_token_id,
+            "seq_len": seq_len,
+            "vocab_size": vocab_size,
+        },
     }
 
 def postprocess(ctx: EdgeContext, result: dict) -> dict:
-    # TODO:
     return result

@@ -1,35 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import torch
 
 from trt.compile import save_trt_engine_module
-from trt.hooks.export.plan import ExportPlan
-from trt.io_spec import GROOT_EDGE_IO
-from trt.language import make_action_context_module
 from trt.context import EdgeContext
+from trt.modules.export.language import ContextProjectionExportModule
 
-DEFAULT_ACTION_CONTEXT_TRT_SETTINGS: dict[str, Any] = {
-    "disable_tf32": True,
-    "use_explicit_typing": True,
-    "truncate_double": True,
-    "immutable_weights": True,
-    "require_full_compilation": True,
-    "offload_module_to_cpu": True,
-    "use_fp32_acc": True,
-}
 
-def preprocess(ctx: EdgeContext, stage_inputs: dict) -> ExportPlan:
-    dtype = torch.float16
-    lm_hidden_states = stage_inputs["lm_hidden_states"].to(
-        device=ctx.device,
-        dtype=dtype,
-    ).contiguous()
-    batch_size = int(lm_hidden_states.shape[0])
-    max_seq_len = int(lm_hidden_states.shape[1])
-    hidden_size = int(lm_hidden_states.shape[2])
+def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
+    device, dtype = ctx.device, ctx.dtype
+
+    # upstream language output: [B, S, H_lm]
+    lm_hidden = inputs["tensors"]["lm_hidden"]
+    lm_hidden = lm_hidden.to(device=device, dtype=dtype).contiguous()
+
+    batch_size = int(lm_hidden.shape[0])
+    max_seq_len = int(lm_hidden.shape[1])
+    hidden_size = int(lm_hidden.shape[2])
 
     vlln = ctx.model.action_head.vlln
     if getattr(vlln, "weight", None) is not None:
@@ -39,56 +26,73 @@ def preprocess(ctx: EdgeContext, stage_inputs: dict) -> ExportPlan:
             ctx.model.backbone.eagle_model.language_model.config.hidden_size
         )
 
-    module = make_action_context_module(ctx.model, device=ctx.device, dtype=dtype)
-    io = GROOT_EDGE_IO.action_context
+    # same module as inference/action_context.py
+    context_module = ContextProjectionExportModule(
+        ctx.model.backbone.eagle_linear,
+        ctx.model.action_head.vlln,
+        ctx.model.action_head.vl_self_attention,
+    ).eval().to(device=device, dtype=dtype)
 
-    return ExportPlan(
-        module=module,
-        sample_inputs=(lm_hidden_states,),
-        input_names=tuple(io.input_names),
-        output_names=tuple(io.output_names),
-        engine_dir=ctx.engine_root / "action_context",
+    return {
+        "lm_hidden": lm_hidden,
+        "context_module": context_module,
+        "batch_size": batch_size,
+        "max_seq_len": max_seq_len,
+        "hidden_size": hidden_size,
+        "context_hidden_size": context_hidden_size,
+        "language_inputs": inputs.get("metadata", {}).get("language_inputs"),
+    }
+
+
+def export(ctx: EdgeContext, inputs: dict) -> dict:
+    context_module = inputs["context_module"]
+    lm_hidden = inputs["lm_hidden"]
+
+    engine_path = save_trt_engine_module(
+        context_module,
+        (lm_hidden,),
+        ctx.engine_root / "action_context",
         engine_file="context.engine",
         model_type="action_context",
         component="context",
-        trt_settings=DEFAULT_ACTION_CONTEXT_TRT_SETTINGS,
-        cleanup_modules=(module,),
-        args={
-            "batch_size": batch_size,
-            "extra_config": {
-                "engine_role": "action_context",
-                "max_seq_len": max_seq_len,
-                "hidden_size": hidden_size,
-                "context_hidden_size": context_hidden_size,
-            },
-            "language_inputs": stage_inputs.get("language_inputs"),
-            "tensor_aliases": {"context_embs": "vl_embs"},
+        input_names=["lm_hidden_states"],
+        output_names=["vl_embs"],
+        extra_config={
+            "engine_role": "action_context",
+            "batch_size": int(inputs["batch_size"]),
+            "max_seq_len": int(inputs["max_seq_len"]),
+            "hidden_size": int(inputs["hidden_size"]),
+            "context_hidden_size": int(inputs["context_hidden_size"]),
+        },
+        trt_settings={
+            **ctx.trt_settings,
+            "offload_module_to_cpu": True,
         },
     )
 
-
-def compile(plan: ExportPlan) -> Path:
-    return save_trt_engine_module(
-        plan.module,
-        plan.sample_inputs,
-        plan.engine_dir,
-        engine_file=plan.engine_file,
-        model_type=plan.model_type or "action_context",
-        component=plan.component or "context",
-        input_names=list(plan.input_names),
-        output_names=list(plan.output_names),
-        example_output=None,
-        extra_config=plan.args["extra_config"],
-        trt_settings=plan.trt_settings,
+    # Dummy context embeddings for the downstream diffusion trace — export only
+    # needs the [B, S, H_ctx] shape/dtype, not real values (no forward pass here).
+    context_embs = torch.zeros(
+        inputs["batch_size"],
+        inputs["max_seq_len"],
+        inputs["context_hidden_size"],
+        device=ctx.device,
+        dtype=ctx.dtype,
     )
 
-
-def postprocess(ctx: EdgeContext, plan: ExportPlan) -> dict:
-    del ctx
-    extra = plan.args["extra_config"]
     return {
-        "batch_size": plan.args["batch_size"],
-        "language_inputs": plan.args.get("language_inputs"),
-        "context_seq_len": int(extra["max_seq_len"]),
-        "context_hidden_size": int(extra["context_hidden_size"]),
+        "engine_path": engine_path,
+        "tensors": {
+            "context_embs": context_embs,
+        },
+        "metadata": {
+            "batch_size": inputs["batch_size"],
+            "language_inputs": inputs.get("language_inputs"),
+            "context_seq_len": inputs["max_seq_len"],
+            "context_hidden_size": inputs["context_hidden_size"],
+        },
     }
+
+
+def postprocess(ctx: EdgeContext, result: dict) -> dict:
+    return result

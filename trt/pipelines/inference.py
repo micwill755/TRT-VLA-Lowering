@@ -44,6 +44,6 @@ class InferencePipeline:
 
         ctx.stage_results = stage_outputs
         execution_time = time.perf_counter() - t0
-        print(f"Pipeline complete in {execution_time}")
+        print(f"Pipeline complete in {execution_time:.2f}s")
 
         return stage_outputs

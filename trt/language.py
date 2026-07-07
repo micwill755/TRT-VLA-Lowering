@@ -653,9 +653,6 @@ def save_language_engine_for_edge_llm(
     )
 
     try:
-        with torch.no_grad():
-            example_output = lm_wrapper(*sample_inputs)
-
         engine_path = save_trt_engine_module(
             lm_wrapper,
             sample_inputs,
@@ -665,7 +662,6 @@ def save_language_engine_for_edge_llm(
             component="language",
             input_names=input_names,
             output_names=output_names,
-            example_output=example_output,
             extra_config=language_edge_llm_config(
                 spec.language_model.config,
                 max_seq_len=spec.max_seq_len,

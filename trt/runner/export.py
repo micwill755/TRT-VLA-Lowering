@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
+import torch
 
-from trt.context import StageResult
-from trt.hooks.export.plan import ExportPlan
+from trt.context import EdgeContext
 from trt.hooks.resolve import resolve
-from trt.utils import free_cuda_memory
 
 
 class ExportRunner:
@@ -22,7 +20,10 @@ class ExportRunner:
             prepared = resolve(hooks["preprocess"])(ctx, inputs)
 
         exported = resolve(hooks["export"])(ctx, prepared)
-        prepared.update(exported)
+        result = {**prepared, **exported}
+
+        if hooks.get("save_artifacts"):
+            resolve(hooks["save_artifacts"])(ctx, prepared, result)
 
         if hooks.get("postprocess"):
             result = resolve(hooks["postprocess"])(ctx, result)

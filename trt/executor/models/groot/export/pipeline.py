@@ -28,7 +28,6 @@ GROOT_PIPELINE = PipelineConfig(
             runner="trt.runner.export:ExportRunner",
             engine_subdir="language",
             hooks={
-                "process_inputs": f"{_E}.glue:vision_to_language",
                 "preprocess":     f"{_E}.language:preprocess",
                 "export":        f"{_E}.language:export",
                 "save_artifacts": f"{_E}.language:save_artifacts",
@@ -42,7 +41,6 @@ GROOT_PIPELINE = PipelineConfig(
             runner="trt.runner.export:ExportRunner",
             engine_subdir="action_context",
             hooks={
-                "process_inputs": f"{_E}.glue:language_to_action_context",
                 "preprocess":    f"{_E}.action_context:preprocess",
                 "export":        f"{_E}.action_context:export",
                 "postprocess":       f"{_E}.action_context:postprocess",
@@ -56,7 +54,6 @@ GROOT_PIPELINE = PipelineConfig(
             engine_subdir="action",
             final_output=True,
             hooks={
-                "process_inputs": f"{_E}.glue:action_context_to_action",
                 "preprocess":    f"{_E}.diffusion:preprocess",
                 "export":        f"{_E}.diffusion:export",
                 "postprocess":       f"{_E}.diffusion:postprocess",
