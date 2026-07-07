@@ -13,7 +13,6 @@ from lerobot.policies.smolvla import SmolVLAPolicy
 
 from trt.data import prepare_policy_batch
 from trt.export.smolvla import SmolVLAExportHooks
-from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
 from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
 from trt.inference.smolvla import (
     run_inference_pytorch_smolvla,
@@ -36,7 +35,16 @@ class SmolVLAProfile(VLAProfile):
     fill_missing_cameras = True
 
     vision_trt_settings = dict(VISION_TRT_SETTINGS)
-    action_trt_settings = dict(ACTION_TRT_SETTINGS)
+    action_trt_settings = {
+        "disable_tf32": True,
+        "use_explicit_typing": True,
+        "truncate_double": True,
+        "immutable_weights": True,
+        "decompose_attention": True,
+        "require_full_compilation": True,
+        "offload_module_to_cpu": True,
+        "use_fp32_acc": True,
+    }
 
     def _init_policy(self) -> None:
         self.policy = self.policy_cls.from_pretrained(self.model_id).to(self.device).eval()

@@ -25,7 +25,11 @@ from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
 from trt.modules.export.vision import GridVisionExportModule
 from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
-from trt.modules.export.diffusion import TRTDynamicCategorySpecificMLP, StaticActionVelocityStep, GrootDiTStepEncoder
+from trt.modules.export.diffusion import (
+    GrootDiTStepEncoderExportModule,
+    StaticActionVelocityStepExportModule,
+    TRTDynamicCategorySpecificMLPExportModule,
+)
 from trt.plugin.plugin_utils import restore_attention
 from trt.measure import parity
 from trt.executor.models.groot.helpers import make_embodiment_id
@@ -449,10 +453,10 @@ def main():
         ▼ process_velocity (identity for GR00T)             → velocity
     '''
     
-    diffusion_model = StaticActionVelocityStep(
-        step_encoder=GrootDiTStepEncoder(model.action_head, embodiment_id),
+    diffusion_model = StaticActionVelocityStepExportModule(
+        step_encoder=GrootDiTStepEncoderExportModule(model.action_head, embodiment_id),
         action_expert=model.action_head.model,
-        velocity_decoder=TRTDynamicCategorySpecificMLP(
+        velocity_decoder=TRTDynamicCategorySpecificMLPExportModule(
             model.action_head.action_decoder
         ),
         output_tokens=model.action_head.config.action_horizon,

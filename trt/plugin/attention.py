@@ -141,6 +141,7 @@ class PluginAttention(nn.Module):
             self.head_dim,
             False,
             -1,
+            bool(self.enable_bidirectional_prefill),
         )
 
         # Use attn_hidden_size for reshape (may differ from hidden_size in Qwen3)

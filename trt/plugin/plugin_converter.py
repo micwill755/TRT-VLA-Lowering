@@ -12,7 +12,7 @@ from torch_tensorrt.dynamo.conversion import ConversionContext, dynamo_tensorrt_
 from torch_tensorrt.dynamo.conversion._ConverterRegistry import ConverterPriority
 from torch_tensorrt.dynamo.conversion.converter_utils import get_trt_tensor
 
-from trt.plugin.plugin_utils import get_plugin_config, get_trt_plugin_creator
+from trt.plugin.plugin_utils import get_trt_plugin_creator
 
 
 @dynamo_tensorrt_converter(
@@ -30,14 +30,10 @@ def convert_llm_attention_plugin(ctx: ConversionContext, target, args, kwargs, n
     head_size = args[10]
     enable_fp8_kv_cache = args[11]
     sliding_window_size = args[12] if len(args) > 12 else -1
-    attention_mask = args[13] if len(args) > 13 else None
-    position_ids = args[14] if len(args) > 14 else None
-    qkv_scales = args[15] if len(args) > 15 else None
-
-    config = get_plugin_config() or {}
-    enable_bidirectional_prefill = int(
-        config.get("enable_bidirectional_prefill", 0)
-    )
+    enable_bidirectional_prefill = int(args[13]) if len(args) > 13 else 0
+    attention_mask = args[14] if len(args) > 14 else None
+    position_ids = args[15] if len(args) > 15 else None
+    qkv_scales = args[16] if len(args) > 16 else None
 
     creator = get_trt_plugin_creator("AttentionPlugin", "1", "")
     if creator is None:

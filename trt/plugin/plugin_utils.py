@@ -36,13 +36,14 @@ def _register_attention_plugin_op() -> None:
         head_size: int,
         enable_fp8_kv_cache: bool,
         sliding_window_size: int = -1,
+        enable_bidirectional_prefill: bool = False,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         qkv_scales: Optional[Sequence[float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         del k, v, context_lengths, rope_rotary_cos_sin, kvcache_start_index
         del num_kv_heads, enable_tree_attention, enable_fp8_kv_cache
-        del sliding_window_size, attention_mask, position_ids, qkv_scales
+        del sliding_window_size, enable_bidirectional_prefill, attention_mask, position_ids, qkv_scales
         batch_size, seq_len, _ = q.shape
         attn_output = torch.zeros(
             batch_size,
@@ -69,13 +70,14 @@ def _register_attention_plugin_op() -> None:
         head_size: int,
         enable_fp8_kv_cache: bool,
         sliding_window_size: int = -1,
+        enable_bidirectional_prefill: bool = False,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         qkv_scales: Optional[Sequence[float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         del k, v, context_lengths, rope_rotary_cos_sin, kvcache_start_index
         del num_kv_heads, enable_tree_attention, enable_fp8_kv_cache
-        del sliding_window_size, attention_mask, position_ids, qkv_scales
+        del sliding_window_size, enable_bidirectional_prefill, attention_mask, position_ids, qkv_scales
         batch_size, seq_len, _ = q.shape
         attn_output = torch.empty(
             batch_size,

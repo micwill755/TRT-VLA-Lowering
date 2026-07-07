@@ -5,7 +5,6 @@ import torch
 from trt.compile import save_trt_engine_module
 from trt.context import EdgeContext
 from trt.modules.export.diffusion import (
-    DEFAULT_DIFFUSION_TRT_SETTINGS,
     GrootDiTStepEncoderExportModule,
     StaticActionVelocityStepExportModule,
     TRTDynamicCategorySpecificMLPExportModule,
@@ -124,10 +123,7 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
             "state_horizon": int(inputs["state_horizon"]),
             "state_dim": int(inputs["state_dim"]),
         },
-        trt_settings={
-            **ctx.trt_settings,
-            **DEFAULT_DIFFUSION_TRT_SETTINGS,
-        },
+        trt_settings=ctx.trt_settings,
     )
 
     # Dummy final actions for export metadata/stage output. Export writes a

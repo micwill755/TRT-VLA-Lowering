@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from lerobot.policies.pi05.modeling_pi05 import create_sinusoidal_pos_embedding
+from trt.prefix_cache import PrefixKVCache
+
 
 class TRTFixedCategorySpecificLinearExportModule(nn.Module):
     """Freeze one GR00T embodiment-specific Linear into a normal Linear.
@@ -285,22 +288,47 @@ class GrootDiTStepEncoderExportModule(ActionStepEncoderExportModule):
         return expert_args, expert_kwargs, decoder_args, decoder_kwargs
 
 
-# ---------------------------------------------------------------------------
-# Edge-LLM diffusion engine export
-# ---------------------------------------------------------------------------
+class PI05PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
+    """PI05 suffix embed + AdaRMS cond, consumed by Gemma action expert."""
 
-DEFAULT_DIFFUSION_TRT_SETTINGS: dict[str, Any] = {
-    "disable_tf32": True,
-    "use_explicit_typing": True,
-    "truncate_double": True,
-    "immutable_weights": True,
-    "decompose_attention": True,
-    "require_full_compilation": True,
-    "offload_module_to_cpu": True,
-    "use_fp32_acc": True,
-}
+    def __init__(self, core):
+        super().__init__()
+        self.action_in_proj = core.action_in_proj
+        self.time_mlp_in = core.time_mlp_in
+        self.time_mlp_out = core.time_mlp_out
+        self.config = core.config
+        self.hidden_size = core.action_in_proj.out_features
 
-# Shorter aliases for parity harnesses and docs.
-StaticActionVelocityStep = StaticActionVelocityStepExportModule
-GrootDiTStepEncoder = GrootDiTStepEncoderExportModule
-TRTDynamicCategorySpecificMLP = TRTDynamicCategorySpecificMLPExportModule
+    def forward(
+        self,
+        x_t,
+        timestep,
+        prefix_k,
+        prefix_v,
+        position_ids,
+        attention_mask,
+    ):
+        suffix_embs = self.action_in_proj(x_t)
+
+        time_emb = create_sinusoidal_pos_embedding(
+            timestep,
+            self.hidden_size,
+            min_period=self.config.min_period,
+            max_period=self.config.max_period,
+            device=timestep.device,
+        ).to(dtype=suffix_embs.dtype)
+
+        adarms_cond = self.time_mlp_in(time_emb)
+        adarms_cond = F.silu(adarms_cond)
+        adarms_cond = self.time_mlp_out(adarms_cond)
+        adarms_cond = F.silu(adarms_cond)
+
+        expert_kwargs = {
+            "inputs_embeds": suffix_embs,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "past_key_values": PrefixKVCache(prefix_k, prefix_v),
+            "use_cache": False,
+            "adarms_cond": adarms_cond,
+        }
+        return (), expert_kwargs, (), {}

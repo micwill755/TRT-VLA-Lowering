@@ -17,7 +17,6 @@ from trt.export.pi05 import (
     Pi05ExportHooks,
     action_output_dim,
 )
-from trt.modules.export.diffusion import DEFAULT_DIFFUSION_TRT_SETTINGS as ACTION_TRT_SETTINGS
 from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
 from trt.inference.pi05 import (
     run_inference_pi05_engines,
@@ -40,7 +39,16 @@ class Pi05Profile(VLAProfile):
     fill_missing_cameras = True
 
     vision_trt_settings = dict(VISION_TRT_SETTINGS)
-    action_trt_settings = dict(ACTION_TRT_SETTINGS)
+    action_trt_settings = {
+        "disable_tf32": True,
+        "use_explicit_typing": True,
+        "truncate_double": True,
+        "immutable_weights": True,
+        "decompose_attention": True,
+        "require_full_compilation": True,
+        "offload_module_to_cpu": True,
+        "use_fp32_acc": True,
+    }
 
     def _init_policy(self) -> None:
         self.policy = self.policy_cls.from_pretrained(self.model_id).to(self.device).eval()

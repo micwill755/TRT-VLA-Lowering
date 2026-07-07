@@ -23,6 +23,7 @@ from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STATE
 from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.pi05 import PI05Config, PI05Policy
+from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.utils.constants import OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK
@@ -30,13 +31,16 @@ from trt.plugin.plugin_utils import restore_attention
 from trt.data import load_test_data, frame_from_test_data
 from trt.modules.export.vision import GridVisionExportModule
 from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
-from trt.modules.export.diffusion import TRTDynamicCategorySpecificMLP, StaticActionVelocityStep, GrootDiTStepEncoder
+from trt.modules.export.diffusion import (
+    PI05PrefixKVStepEncoderExportModule,
+    StaticActionVelocityStepExportModule,
+)
 
 from trt.measure import parity
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
 from trt.utils import force_hf_attention
-from trt.plugin.plugin_utils import load_plugins_for_trt, get_plugin_config
+from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.vision import nchw_to_hwc
 from trt.rope import make_rope_rotary_cos_sin
 from trt.data import (
@@ -127,6 +131,27 @@ def build_pi05_prefix_embs(
         dtype=torch.float32,
     )
     return compact_embs, compact_pad_mask, compact_attention_mask, compact_position_ids
+
+def make_pi05_suffix_position_and_mask(core, prefix_pad_masks, x_t, device):
+    batch_size, suffix_len = x_t.shape[:2]
+    prefix_pad_masks = prefix_pad_masks.to(device=device)
+    prefix_len = prefix_pad_masks.shape[1]
+
+    suffix_pad_masks = torch.ones(batch_size, suffix_len, dtype=torch.bool, device=device)
+    suffix_att_masks = torch.tensor(
+        [1] + [0] * (suffix_len - 1),
+        dtype=torch.int64,
+        device=device,
+    )[None, :].expand(batch_size, -1)
+
+    prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
+    suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+    full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+
+    attention_mask = core._prepare_attention_masks_4d(full_att_2d_masks)
+    prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+    position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+    return position_ids, attention_mask
 
 def load_config(device):
     config = PI05Config(
@@ -256,7 +281,7 @@ def main():
     trt_image_embs = list(
         embs_trt.reshape(len(images), per_camera_batch, -1, embs_trt.shape[-1])
     )
-    inputs_embeds, _, prefix_attention_mask, prefix_position_ids = build_pi05_prefix_embs(
+    inputs_embeds, prefix_pad_mask, prefix_attention_mask, prefix_position_ids = build_pi05_prefix_embs(
         model,
         img_masks,
         tokens,
@@ -322,6 +347,8 @@ def main():
         *kv_caches,
     )
 
+    # PI05 prefix attends bidirectionally; patch_language_attention wires this
+    # flag into the plugin config that the TRT converter reads at compile time.
     patched = patch_language_attention(
         decoder,
         hidden_size=hidden_size,
@@ -330,10 +357,6 @@ def main():
         head_dim=head_dim,
         enable_bidirectional_prefill=1,
     )
-    # PI05 prefix attends bidirectionally; the plugin converter reads this flag
-    # from the global plugin config, so set it before compiling the engine.
-    prev_bidirectional = get_plugin_config().get("enable_bidirectional_prefill")
-    get_plugin_config()["enable_bidirectional_prefill"] = 1
     try:
         with torch.no_grad():
             _, lm_hidden_trt_ref, _, _ = lm(*flat_tensors)
@@ -349,12 +372,66 @@ def main():
             trt_out = lm_trt_engine(*flat_tensors)
     finally:
         restore_attention(patched)
-        if prev_bidirectional is None:
-            get_plugin_config().pop("enable_bidirectional_prefill", None)
-        else:
-            get_plugin_config()["enable_bidirectional_prefill"] = prev_bidirectional
 
     parity("PI05 language A vs C (TRT)", lm_hidden_eager, trt_out[1])
+
+    # step 4 diffusion (no action-context stage for PI05)
+    print("Compiling diffusion")
+    force_hf_attention(model.paligemma_with_expert.gemma_expert.model, "eager")
+
+    prefix_k = trt_out[2].to(device=device, dtype=dtype).contiguous()
+    prefix_v = trt_out[3].to(device=device, dtype=dtype).contiguous()
+
+    diffusion_model = StaticActionVelocityStepExportModule(
+        step_encoder=PI05PrefixKVStepEncoderExportModule(model),
+        action_expert=model.paligemma_with_expert.gemma_expert.model,
+        velocity_decoder=model.action_out_proj,
+        output_tokens=model.config.chunk_size,
+        cast_hidden_fp32=False,
+    ).eval().to(device=device)
+
+    step_actions = torch.randn(
+        bsz,
+        model.config.chunk_size,
+        model.config.max_action_dim,
+        device=device,
+        dtype=dtype,
+    )
+    step_timestep = torch.full(
+        (bsz,),
+        1.0,
+        device=device,
+        dtype=torch.float32,
+    )
+    suffix_position_ids, suffix_attention_mask = make_pi05_suffix_position_and_mask(
+        model,
+        prefix_pad_mask,
+        step_actions,
+        device,
+    )
+    diffusion_input = (
+        step_actions,
+        step_timestep,
+        prefix_k,
+        prefix_v,
+        suffix_position_ids,
+        suffix_attention_mask,
+    )
+
+    with torch.no_grad():
+        eager_velocity = diffusion_model(*diffusion_input)
+
+    diffusion_exported = torch.export.export(diffusion_model, args=diffusion_input, strict=False)
+    diffusion_input_specs = make_input_spec(diffusion_input)
+    diffusion_trt_engine = torch_tensorrt.dynamo.compile(
+        diffusion_exported,
+        inputs=diffusion_input_specs,
+        **{**ACTION_TRT_SETTINGS, "use_python_runtime": True},
+    )
+    with torch.no_grad():
+        trt_velocity = diffusion_trt_engine(*diffusion_input)
+
+    parity("PI05 diffusion A vs C (TRT)", eager_velocity, trt_velocity)
 
     return 0
 
