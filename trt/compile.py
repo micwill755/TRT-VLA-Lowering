@@ -274,6 +274,7 @@ def save_trt_engine_module(
     trt_settings=None,
     input_specs=None,
     flat_tensors=None,
+    settings=None,
 ):
     module = module.eval()
     sample_inputs = tuple(sample_inputs)
@@ -308,19 +309,6 @@ def save_trt_engine_module(
             )
             for name, t in zip(input_names, flat_tensors)
         )
-
-    settings = {
-        "disable_tf32": True,
-        "use_explicit_typing": True,
-        "use_fp32_acc": True,
-        "truncate_double": True,
-        "immutable_weights": True,
-        "require_full_compilation": True,
-        "min_block_size": 1,
-        "workspace_size": 1 << 34,
-    }
-    if trt_settings:
-        settings.update(trt_settings)
 
     with patch_trt_interpreter_output_names(output_names):
         engine_bytes = torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(

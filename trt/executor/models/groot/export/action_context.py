@@ -9,7 +9,7 @@ from trt.compile import save_trt_engine_module
 from trt.hooks.export.plan import ExportPlan
 from trt.io_spec import GROOT_EDGE_IO
 from trt.language import make_action_context_module
-from trt.runner.base import StageContext
+from trt.context import EdgeContext
 
 DEFAULT_ACTION_CONTEXT_TRT_SETTINGS: dict[str, Any] = {
     "disable_tf32": True,
@@ -21,8 +21,7 @@ DEFAULT_ACTION_CONTEXT_TRT_SETTINGS: dict[str, Any] = {
     "use_fp32_acc": True,
 }
 
-
-def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
+def preprocess(ctx: EdgeContext, stage_inputs: dict) -> ExportPlan:
     dtype = torch.float16
     lm_hidden_states = stage_inputs["lm_hidden_states"].to(
         device=ctx.device,
@@ -84,7 +83,7 @@ def compile(plan: ExportPlan) -> Path:
     )
 
 
-def metadata(ctx: StageContext, plan: ExportPlan) -> dict:
+def postprocess(ctx: EdgeContext, plan: ExportPlan) -> dict:
     del ctx
     extra = plan.args["extra_config"]
     return {

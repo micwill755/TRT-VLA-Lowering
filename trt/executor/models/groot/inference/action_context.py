@@ -9,7 +9,6 @@ from trt.executor.models.groot.load.serialize import SerializedGrootActionContex
 from trt.modules.export.language import ContextProjectionExportModule
 from trt.serialize import SerializedTRTEngine
 
-
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     device, dtype = ctx.device, ctx.dtype
 

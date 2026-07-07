@@ -16,9 +16,9 @@ GROOT_PIPELINE = PipelineConfig(
             runner="trt.runner.export:ExportRunner",
             engine_subdir="visual",
             hooks={
-                "plan_export": f"{_E}.vision:plan_export",
-                "compile":     f"{_E}.vision:compile",
-                "metadata":    f"{_E}.vision:metadata",
+                "preprocess": f"{_E}.vision:preprocess",
+                "export":     f"{_E}.vision:export",
+                "postprocess":    f"{_E}.vision:postprocess",
             },
         ),
         StageConfig(
@@ -29,10 +29,10 @@ GROOT_PIPELINE = PipelineConfig(
             engine_subdir="language",
             hooks={
                 "process_inputs": f"{_E}.glue:vision_to_language",
-                "plan_export":    f"{_E}.language:plan_export",
-                "compile":        f"{_E}.language:compile",
+                "preprocess":     f"{_E}.language:preprocess",
+                "export":        f"{_E}.language:export",
                 "save_artifacts": f"{_E}.language:save_artifacts",
-                "metadata":       f"{_E}.language:metadata",
+                "postprocess":       f"{_E}.language:postprocess",
             },
         ),
         StageConfig(
@@ -43,9 +43,9 @@ GROOT_PIPELINE = PipelineConfig(
             engine_subdir="action_context",
             hooks={
                 "process_inputs": f"{_E}.glue:language_to_action_context",
-                "plan_export":    f"{_E}.action_context:plan_export",
-                "compile":        f"{_E}.action_context:compile",
-                "metadata":       f"{_E}.action_context:metadata",
+                "preprocess":    f"{_E}.action_context:preprocess",
+                "export":        f"{_E}.action_context:export",
+                "postprocess":       f"{_E}.action_context:postprocess",
             },
         ),
         StageConfig(
@@ -57,9 +57,9 @@ GROOT_PIPELINE = PipelineConfig(
             final_output=True,
             hooks={
                 "process_inputs": f"{_E}.glue:action_context_to_action",
-                "plan_export":    f"{_E}.action:plan_export",
-                "compile":        f"{_E}.action:compile",
-                "metadata":       f"{_E}.action:metadata",
+                "preprocess":    f"{_E}.diffusion:preprocess",
+                "export":        f"{_E}.diffusion:export",
+                "postprocess":       f"{_E}.diffusion:postprocess",
             },
         ),
     ),

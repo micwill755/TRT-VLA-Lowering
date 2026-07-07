@@ -21,10 +21,10 @@ from trt.modules.export.diffusion import (
     StaticActionVelocityStepExportModule,
     TRTDynamicCategorySpecificMLPExportModule,
 )
-from trt.runner.base import StageContext
+from trt.context import EdgeContext
 
 
-def plan_export(ctx: StageContext, stage_inputs: dict) -> ExportPlan:
+def preprocess(ctx: EdgeContext, stage_inputs: dict) -> ExportPlan:
     """Build the GR00T action TRT export plan (single flow-matching denoising step).
 
     ``stage_inputs`` come from ``glue.action_context_to_action`` (upstream stage 2).
@@ -157,8 +157,7 @@ def compile(plan: ExportPlan) -> Path:
         trt_settings=plan.trt_settings,
     )
 
-
-def metadata(ctx: StageContext, plan: ExportPlan) -> dict:
+def postprocess(ctx: EdgeContext, plan: ExportPlan) -> dict:
     """Return stage-3 artifacts on ``StageResult.metadata`` (final pipeline stage)."""
     del ctx
     args = plan.args

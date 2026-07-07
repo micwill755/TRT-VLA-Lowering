@@ -4,9 +4,9 @@ import torch
 
 from trt.data import pack_state
 from trt.executor.models.groot.helpers import make_embodiment_id
-from trt.runner.base import StageContext
+from trt.context import EdgeContext
 
-def preprocess(ctx: StageContext) -> None:
+def preprocess(ctx: EdgeContext) -> None:
     """Normalize model inputs before the stage loop (GR00T)."""
     # [1, T] int64 chat tokens (T ≈ prompt len)
     tokenized_data = ctx.model_inputs["tokenized_data"]
@@ -28,9 +28,9 @@ def preprocess(ctx: StageContext) -> None:
     ) 
     ctx.export_state["action_side"] = {
         "state": state,
-        "embodiment_id": make_embodiment_id(ctx.policy, state, ctx.device),  # [1], e.g. [31]
+        "embodiment_id": make_embodiment_id(ctx.policy, state, ctx.device, ctx.dtype),  # [1], e.g. [31]
     }
     ctx.export_state["tokenizer"] = ctx.profile.text_tok
 
-def postprocess(ctx: StageContext) -> None:
+def postprocess(ctx: EdgeContext) -> None:
     pass

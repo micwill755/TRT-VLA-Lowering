@@ -20,22 +20,6 @@ from trt.io_spec import VLA_VISION_IO
 
 logger = logging.getLogger(__name__)
 
-# Canonical VitRunner engine binding names (shared by PI0.5 and GR00T).
-VIT_ENGINE_INPUT_NAME = VLA_VISION_IO.input_names[0]
-VIT_ENGINE_OUTPUT_NAME = VLA_VISION_IO.output_names[0]
-
-
-DEFAULT_VISION_TRT_SETTINGS: dict[str, Any] = {
-    "disable_tf32": True,
-    "use_explicit_typing": True,
-    "use_fp32_acc": True,
-    "truncate_double": True,
-    "immutable_weights": True,
-    "decompose_attention": True,
-    "require_full_compilation": True,
-    "offload_module_to_cpu": True,
-}
-
 def nchw_to_hwc(pixel_values: torch.Tensor) -> torch.Tensor:
     """Convert LeRobot/HF NCHW pixels to VitRunner HWC layout.
 
@@ -73,47 +57,3 @@ def is_nchw_pixel_values(pixel_values: torch.Tensor) -> bool:
         and pixel_values.shape[1] in (1, 3, 4)
         and pixel_values.shape[-1] not in (1, 3, 4)
     )
-
-def run_trt_vision_nchw(trt_vision: nn.Module, pixel_values_nchw: torch.Tensor) -> torch.Tensor:
-    """Run an in-memory TRT vision module from policy-style NCHW input.
-
-    The compiled module expects HWC ``pixel_values``; this helper performs the
-    layout conversion and returns VitRunner-style flattened embeds
-    ``[batch * num_tokens, hidden]``.
-    """
-    return trt_vision(nchw_to_hwc(pixel_values_nchw.contiguous()))
-
-def vit_visual_edge_config(
-    *,
-    vocab_size: int,
-    image_token_id: int,
-    seq_len: int,
-    image_mean: list[float] | None = None,
-    image_std: list[float] | None = None,
-) -> dict[str, Any]:
-    """Build VitRunner metadata merged into ``visual/config.json`` on export.
-
-    These fields are read by C++ ``VitRunner`` at runtime (not part of the TRT
-    graph). They tell ``llm_inference`` how to expand ``<image>`` placeholders in
-    the prompt and wire ``visual_embeds`` rows into the LM embedding table.
-
-    Args:
-        vocab_size: LM vocab size; synthetic image slot IDs start here.
-        image_token_id: Token ID in the chat template replaced by ``seq_len`` vision rows.
-        seq_len: Number of vision tokens produced per image (e.g. 256 for SigLIP PI0.5).
-        image_mean: Optional per-channel mean for C++ ``normalizeImage`` (RGB order).
-        image_std: Optional per-channel std for C++ ``normalizeImage`` (RGB order).
-
-    Returns:
-        Dict passed as ``extra_config`` to ``save_trt_engine_module``.
-    """
-    builder_config: dict[str, Any] = {"seq_len": int(seq_len)}
-    if image_mean is not None:
-        builder_config["image_mean"] = list(image_mean)
-    if image_std is not None:
-        builder_config["image_std"] = list(image_std)
-    return {
-        "vocab_size": int(vocab_size),
-        "image_token_id": int(image_token_id),
-        "builder_config": builder_config,
-    }

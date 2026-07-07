@@ -26,6 +26,7 @@ from trt.modules.export.language import (
     CausalLMExportModule,
     _as_tensor,
     gather_last_token_hidden,
+    ContextProjectionExportModule
 )
 from trt.rope import (
     config_to_dict,
@@ -80,43 +81,6 @@ class LanguageEngineSpec:
     select_layer: int = -1
     context_hidden_size: int | None = None
     log_prefix: str = ""
-
-# ---------------------------------------------------------------------------
-# GR00T: causal LM + context projection (dual outputs)
-# ---------------------------------------------------------------------------
-
-class GROOTLanguageContextWrapper(nn.Module):
-    """Legacy fused export: causal LM logits + GR00T context_embs."""
-
-    def __init__(
-        self,
-        lm_wrapper: CausalLMExportModule,
-        context_projection: GROOTContextProjectionWrapper,
-    ):
-        super().__init__()
-        self.lm_wrapper = lm_wrapper
-        self.context_projection = context_projection
-
-    def forward(
-        self,
-        inputs_embeds,
-        rope_rotary_cos_sin,
-        context_lengths,
-        kvcache_start_index,
-        last_token_ids,
-        *past_key_values,
-    ):
-        logits, context_hidden = self.lm_wrapper(
-            inputs_embeds,
-            rope_rotary_cos_sin,
-            context_lengths,
-            kvcache_start_index,
-            last_token_ids,
-            *past_key_values,
-        )[:2]
-        context_embs = self.context_projection(context_hidden)
-        return logits, context_embs
-
 
 # ---------------------------------------------------------------------------
 # Compile helper (in-memory TRT module)
@@ -379,48 +343,6 @@ def unpack_vla_prefix_language_outputs(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Split VLA language outputs: logits, lm_hidden_states, prefix_k, prefix_v."""
     return outputs[0], outputs[1], outputs[2], outputs[3]
-
-def make_action_context_module(
-    core,
-    *,
-    device: torch.device,
-    dtype: torch.dtype = torch.float16,
-) -> GROOTContextProjectionWrapper:
-    """Build GR00T action_context engine (eagle_linear -> vlln -> vl_self_attention)."""
-    return GROOTContextProjectionWrapper(
-        copy.deepcopy(core.backbone.eagle_linear).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vlln).to(device=device, dtype=dtype).eval(),
-        copy.deepcopy(core.action_head.vl_self_attention).to(device=device, dtype=dtype).eval(),
-    ).eval()
-
-
-def make_language_context_wrapper(
-    core,
-    decoder: nn.Module,
-    spec,
-    *,
-    device: torch.device,
-    dtype: torch.dtype = torch.float16,
-    enable_bidirectional_prefill: int = 0,
-    select_layer: int | None = None,
-) -> GROOTLanguageContextWrapper:
-    """Build legacy fused GR00T language engine (logits + context_embs)."""
-    if select_layer is None:
-        # Eager GR00T reads hidden_states[backbone.select_layer] (pre-norm), but the
-        # plugin-attention manual decoder only matches that pipeline after final RMSNorm.
-        select_layer = -1
-
-    language_model = core.backbone.eagle_model.language_model
-    lm_head = copy.deepcopy(language_model.lm_head).to(device=device, dtype=dtype).eval()
-    causal_lm = CausalLMExportModule(
-        spec.decoder,
-        spec.lm_head,
-        select_layer=spec.select_layer,
-    ).eval()
-    
-    context = make_action_context_module(core, device=device, dtype=dtype)
-    return GROOTLanguageContextWrapper(causal_lm, context).eval()
-
 
 # ---------------------------------------------------------------------------
 # VitRunner-compatible token expansion / embedding export

@@ -31,7 +31,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     # Contiguous layout keeps both HF eager and TRT runtime input ABI stable.
     pixel_values = pixel_values.to(
         device=ctx.device,
-        dtype=torch.float16,
+        dtype=ctx.dtype,
     ).contiguous()
 
     # The eager backend needs a Python wrapper around:
