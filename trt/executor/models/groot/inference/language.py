@@ -101,7 +101,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     kvcache_start_index = torch.empty(0, device=ctx.device, dtype=torch.int32)  # fresh prefill
 
     lm_inputs = (
-        input_embs,
+        inputs_embeds,
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
