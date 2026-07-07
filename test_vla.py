@@ -15,6 +15,7 @@ from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
 from trt.modules.export.vision import GridVisionExportModule
 from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
+from trt.modules.export.diffusion import TRTDynamicCategorySpecificMLP, StaticActionVelocityStep, GrootDiTStepEncoder
 
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
@@ -50,7 +51,7 @@ LANGUAGE_TRT_SETTINGS = {
 
 ACTION_TRT_SETTINGS = {
     **TRT_SETTINGS,
-    "offload_module_to_cpu": True,
+    #"offload_module_to_cpu": True,
 }
 
 VISION_TRT_SETTINGS = {
@@ -175,10 +176,8 @@ def main():
         max_state_dim=64,  # 64
         device=device,
     ) 
-    action_side = {
-        "state": state,
-        "embodiment_id": make_embodiment_id(policy, state, device),
-    }
+    state = state.to(device=device, dtype=dtype).contiguous()
+    embodiment_id = make_embodiment_id(policy, state, device, torch.long)
     
     # add vision wrapper
     visual = GridVisionExportModule(
@@ -368,6 +367,9 @@ def main():
 
     parity("language A vs C", lm_hidden_eager, trt_out[1])
 
+    # step 3 action context
+    print("compiling action context")
+
     # pre action transformation - action context
     eager_context_embs = model.backbone.eagle_linear(lm_hidden_eager).to(dtype=dtype)
     trt_context_embs = trt_out[1].to(dtype=dtype)
@@ -395,6 +397,218 @@ def main():
         trt_context_embs = action_context_trt_engine(trt_context_embs) # logits, lm_hidden, prefix_k, prefix_v
 
     parity("action context A vs C", eager_context_embs, trt_context_embs)
+
+    # step 4 action 
+    print("compiling diffusion")
+    
+    '''
+    Flow-matching denoising is the same loop for every VLA.
+    the StaticActionVelocityStep wrapper is one generic orchestrator:
+
+    for each denoise step:
+        build inputs from (noisy actions, timestep, context)   ← MODEL-SPECIFIC
+        run the action expert (DiT / Gemma / …)                 ← MODEL-SPECIFIC module, GENERIC call
+        pick action-token hidden states                         ← mostly generic
+        decode hidden → velocity                                ← MODEL-SPECIFIC module, GENERIC call
+        x = x + dt * velocity                                    ← generic (Euler), lives outside
+
+    gr00t one step:
+    inputs: x_t[B,50,32], timestep[B], vl_embs[B,S,1536], state[B,1,64], embodiment_id[B]
+        │
+        ▼ GrootDiTStepEncoder.forward
+            state_encoder(state, emb)        → state_features
+            action_encoder(x_t, t, emb)      → action_features
+            cat(state, future_tokens, action)→ sa_embs
+            returns expert_kwargs{hidden_states=sa_embs, encoder_hidden_states=vl_embs, timestep}
+                    + decoder_args=(embodiment_id,)
+        │
+        ▼ action_expert = DiT(sa_embs, vl_embs, timestep)   → model_output [B, T, inner_dim]
+        │
+        ▼ get_action_hidden → keep last output_tokens (=50) → action_hidden [B, 50, inner_dim]
+        │
+        ▼ velocity_decoder(action_hidden, embodiment_id)    → velocity [B, 50, 32]
+        │
+        ▼ process_velocity (identity for GR00T)             → velocity
+    '''
+    
+    diffusion_model = StaticActionVelocityStep(
+        step_encoder=GrootDiTStepEncoder(model.action_head, embodiment_id),
+        action_expert=model.action_head.model,
+        velocity_decoder=TRTDynamicCategorySpecificMLP(
+            model.action_head.action_decoder
+        ),
+        output_tokens=model.action_head.config.action_horizon,
+        cast_hidden_fp32=False,
+    ).eval().to(device=device, dtype=dtype)
+
+    '''# make action inputs 
+    action_horizon = model.action_head.config.action_horizon
+    action_dim = model.action_head.config.action_dim
+    action_batch = trt_context_embs.shape[0]   # 1
+
+    actions = torch.randn(
+        action_batch,
+        action_horizon,
+        action_dim,
+        device=device,
+        dtype=dtype,
+    )
+
+    timestep = torch.zeros(
+        action_batch,
+        device=device,
+        dtype=dtype,
+    )
+
+    eager_diffusion_input = (
+        actions,
+        timestep,
+        eager_context_embs,
+        state,
+        embodiment_id,
+    )
+
+    trt_diffusion_input = (
+        actions,
+        timestep,
+        trt_context_embs,
+        state,
+        embodiment_id,
+    )
+
+    diffusion_exported = torch.export.export(diffusion_model, args=trt_diffusion_input, strict=False)
+    diffusion_input_specs = _make_input_spec(trt_diffusion_input)
+    diffusion_trt_engine = torch_tensorrt.dynamo.compile(
+        diffusion_exported,
+        inputs=diffusion_input_specs,
+        **ACTION_TRT_SETTINGS,
+    )
+
+    seed = 42
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+
+    eager_actions = torch.randn(
+        action_batch,
+        model.action_head.config.action_horizon,
+        model.action_head.config.action_dim,
+        device=device,
+        dtype=dtype,
+        generator=generator
+    )
+    trt_actions = torch.randn(
+        action_batch,
+        model.action_head.config.action_horizon,
+        model.action_head.config.action_dim,
+        device=device,
+        dtype=dtype,
+        generator=generator
+    )
+
+    num_steps = model.action_head.num_inference_timesteps
+
+    for step in range(num_steps):
+        t_cont = step / float(num_steps)
+        timestep_bucket = int(t_cont * model.action_head.num_timestep_buckets)
+
+        timestep = torch.full(
+            (actions.shape[0],),
+            timestep_bucket,
+            device=device,
+            dtype=dtype,
+        )
+
+        eager_runner_inputs = (
+            eager_actions,
+            timestep,
+            eager_context_embs,
+            state,
+            embodiment_id,
+        )
+
+        eager_out = diffusion_model(
+            eager_actions,
+            timestep,
+            eager_context_embs,
+            state,
+            embodiment_id,
+        )[0].to(dtype=dtype)
+        dt = 1.0 / num_steps
+        eager_actions = eager_actions + dt * eager_out
+
+        trt_out = diffusion_trt_engine(
+            trt_actions,
+            timestep,
+            trt_context_embs,
+            state,
+            embodiment_id,
+        )[0].to(dtype=dtype)
+        dt = 1.0 / num_steps
+        trt_actions = trt_actions + dt * trt_out
+
+    parity("action A vs C", eager_actions, trt_actions)
+    '''
+
+    # ---------------------------------------------------------------------------
+    # Isolate diffusion engine parity: same inputs, one denoising step only.
+    # This checks StaticActionVelocityStep eager vs TRT without rollout accumulation
+    # or eager_context vs trt_context differences.
+    # ---------------------------------------------------------------------------
+    action_horizon = model.action_head.config.action_horizon
+    action_dim = model.action_head.config.action_dim
+    action_batch = trt_context_embs.shape[0]   # 1
+
+    actions = torch.randn(
+        action_batch,
+        action_horizon,
+        action_dim,
+        device=device,
+        dtype=dtype,
+    )
+
+    step_actions = actions.clone().to(device=device, dtype=dtype).contiguous()
+    step_timestep = torch.zeros(
+        step_actions.shape[0],
+        device=device,
+        dtype=torch.long,
+    )
+    # we must use same context embds input to isolate diffusion
+    step_context = trt_context_embs.to(device=device, dtype=dtype).contiguous()
+    
+    diffusion_input = (
+        step_actions,
+        step_timestep,
+        step_context,
+        state,
+        embodiment_id,
+    )
+
+    diffusion_exported = torch.export.export(diffusion_model, args=diffusion_input, strict=False)
+    diffusion_input_specs = _make_input_spec(diffusion_input)
+    diffusion_trt_engine = torch_tensorrt.dynamo.compile(
+        diffusion_exported,
+        inputs=diffusion_input_specs,
+        **ACTION_TRT_SETTINGS,
+    )
+
+    with torch.no_grad():
+        eager_velocity = diffusion_model(
+            step_actions,
+            step_timestep,
+            step_context,
+            state,
+            embodiment_id,
+        )[0]
+
+        trt_velocity = diffusion_trt_engine(
+            step_actions,
+            step_timestep,
+            step_context,
+            state,
+            embodiment_id,
+        )[0]
+
+    parity("diffusion step A vs C", eager_velocity, trt_velocity)
     return 0
 
 def parity(name, a, b):

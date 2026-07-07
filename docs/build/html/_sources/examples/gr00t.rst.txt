@@ -274,7 +274,9 @@ Runtime directory alignment:
    * - ``action/action.engine``
      - ``ActionRunner``
      - Loaded from ``--multimodalEngineDir/action``. Runs the GR00T denoising
-       loop and copies host actions into ``response.outputActions``.
+       loop and copies host actions into ``response.outputActions``. See
+       :doc:`../developer_guide/diffusion/groot-example` for how one denoising step
+       is exported as :class:`StaticActionVelocityStepExportModule`.
 
 Runtime tensor shape contract:
 

@@ -374,6 +374,12 @@
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/overview.html">Diffusion Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/components.html">Diffusion Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+</ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/customization/customization-guide.html">Customization Guide</a></li>
@@ -566,6 +572,35 @@ load, inference, and benchmark orchestration for VLA models on top of
 </ul>
 </div>
 <div class="toctree-wrapper compound">
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/overview.html">Diffusion Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/overview.html#the-design-problem">The design problem</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/overview.html#three-pluggable-roles">Three pluggable roles</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/overview.html#what-stays-outside-the-compiled-step">What stays outside the compiled step</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/overview.html#high-level-export-flow">High-level export flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/overview.html#related-pages">Related pages</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/components.html">Diffusion Components</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/components.html#staticactionvelocitystepexportmodule">StaticActionVelocityStepExportModule</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/components.html#actionstepencoderexportmodule">ActionStepEncoderExportModule</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/components.html#model-specific-step-encoders">Model-specific step encoders</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/components.html#velocity-decoders-and-category-specific-wrappers">Velocity decoders and category-specific wrappers</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/components.html#relationship-to-eager-flowmatchingactionhead">Relationship to eager FlowmatchingActionHead</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/groot-example.html">GR00T Diffusion Step Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#typical-tensor-shapes-gr00t-n1-5-libero-sample">Typical tensor shapes (GR00T N1.5, Libero sample)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#export-module-wiring">Export module wiring</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#putting-it-together-one-gr00t-step">Putting it together — one GR00T step</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#stage-boundaries-in-the-full-gr00t-pipeline">Stage boundaries in the full GR00T pipeline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#parity-tips">Parity tips</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/customization/customization-guide.html">Customization Guide</a><ul>
@@ -732,7 +767,7 @@ load, inference, and benchmark orchestration for VLA models on top of
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 04, 2026.</p>
+  <p>Last updated on July 07, 2026.</p>
   
 </div></div>
       

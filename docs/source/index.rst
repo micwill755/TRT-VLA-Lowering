@@ -46,6 +46,15 @@ load, inference, and benchmark orchestration for VLA models on top of
 
 .. toctree::
    :maxdepth: 2
+   :caption: Diffusion
+
+   developer_guide/diffusion/overview
+   developer_guide/diffusion/components
+   developer_guide/diffusion/groot-example
+   developer_guide/diffusion/action-rollout
+
+.. toctree::
+   :maxdepth: 2
    :caption: Customization
 
    developer_guide/customization/customization-guide

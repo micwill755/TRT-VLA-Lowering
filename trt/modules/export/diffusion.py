@@ -478,3 +478,8 @@ DEFAULT_DIFFUSION_TRT_SETTINGS: dict[str, Any] = {
     "offload_module_to_cpu": True,
     "use_fp32_acc": True,
 }
+
+# Shorter aliases for parity harnesses and docs.
+StaticActionVelocityStep = StaticActionVelocityStepExportModule
+GrootDiTStepEncoder = GrootDiTStepEncoderExportModule
+TRTDynamicCategorySpecificMLP = TRTDynamicCategorySpecificMLPExportModule

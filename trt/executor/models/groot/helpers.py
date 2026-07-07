@@ -15,11 +15,12 @@ def make_embodiment_id(
     policy: Any,
     state: torch.Tensor,
     device: torch.device,
+    dtype: torch.dtype,
 ) -> torch.Tensor:
     embodiment_tag = getattr(policy.config, "embodiment_tag", "new_embodiment")
     return torch.full(
         (state.shape[0],),
         GROOT_EMBODIMENT_MAPPING.get(embodiment_tag, 0),
-        dtype=torch.long,
+        dtype=dtype,
         device=device,
     )
