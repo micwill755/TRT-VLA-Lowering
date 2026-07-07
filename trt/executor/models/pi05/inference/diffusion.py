@@ -5,47 +5,45 @@ import torch
 from trt.compile import compile_trt_module
 from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
-from trt.executor.models.groot.load.serialize import SerializedGrootAction
+from trt.executor.models.pi05.load.serialize import SerializedPi05Action
+from trt.executor.models.pi05.helpers import make_pi05_suffix_position_and_mask
+from trt.io_spec import PI05_ACTION_ROLLOUT, action_rollout_extra_config
 from trt.modules.export.diffusion import (
-    GrootDiTStepEncoderExportModule,
+    PI05PrefixKVStepEncoderExportModule,
     StaticActionVelocityStepExportModule,
-    TRTDynamicCategorySpecificMLPExportModule,
 )
-from trt.pipelines.parity import maybe_override_action_side, maybe_override_upstream, parity_initial_actions
+from trt.pipelines.parity import maybe_override_language_kv, parity_initial_actions
 from trt.serialize import SerializedTRTEngine
 
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
-    inputs = maybe_override_upstream(ctx, "action", inputs)
-    inputs = maybe_override_action_side(ctx, inputs)
+    inputs = maybe_override_language_kv(ctx, inputs)
 
     device, dtype = ctx.device, ctx.dtype
-    action_head = ctx.model.action_head
-    cfg = action_head.config
+    cfg = ctx.model.config
 
-    # upstream action_context post: [B, S, 1536]
-    context_embs = inputs["tensors"]["context_embs"]
-    context_embs = context_embs.to(device=device, dtype=dtype).contiguous()
+    prefix_k = inputs["tensors"]["prefix_k"].to(device=device, dtype=dtype).contiguous()
+    prefix_v = inputs["tensors"]["prefix_v"].to(device=device, dtype=dtype).contiguous()
 
-    state = inputs["state"].to(device=device, dtype=dtype).contiguous()
-    embodiment_id = inputs["embodiment_id"].to(device=device, dtype=torch.long)
+    prefix_pad_mask = inputs.get("metadata", {}).get("prefix_pad_mask")
+    if prefix_pad_mask is None:
+        prefix_pad_mask = ctx.inference.action_side.get("prefix_pad_mask")
+    if prefix_pad_mask is None:
+        raise RuntimeError("PI05 diffusion requires prefix_pad_mask from the language stage")
+    prefix_pad_mask = prefix_pad_mask.to(device=device)
 
-    # test_vla.py:432-440
     diffusion_module = StaticActionVelocityStepExportModule(
-        step_encoder=GrootDiTStepEncoderExportModule(action_head, embodiment_id),
-        action_expert=action_head.model,
-        velocity_decoder=TRTDynamicCategorySpecificMLPExportModule(
-            action_head.action_decoder
-        ),
-        output_tokens=cfg.action_horizon,
+        step_encoder=PI05PrefixKVStepEncoderExportModule(ctx.model),
+        action_expert=ctx.model.paligemma_with_expert.gemma_expert.model,
+        velocity_decoder=ctx.model.action_out_proj,
+        output_tokens=cfg.chunk_size,
         cast_hidden_fp32=False,
     ).eval().to(device=device, dtype=dtype)
 
-    action_horizon = cfg.action_horizon
-    action_dim = cfg.action_dim
-    batch_size = context_embs.shape[0]  # 1, not vision batch
+    batch_size = int(prefix_k.shape[1])
+    action_horizon = int(cfg.chunk_size)
+    action_dim = int(cfg.max_action_dim)
 
-    # trace sample — test_vla.py:559-582
     step_actions = torch.randn(
         batch_size,
         action_horizon,
@@ -53,17 +51,29 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         device=device,
         dtype=dtype,
     ).contiguous()
-    step_timestep = torch.zeros(batch_size, device=device, dtype=torch.long)
+    step_timestep = torch.full(
+        (batch_size,),
+        1.0,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    suffix_position_ids, suffix_attention_mask = make_pi05_suffix_position_and_mask(
+        ctx.model,
+        prefix_pad_mask,
+        step_actions,
+        device,
+    )
 
     diffusion_input = (
         step_actions,
         step_timestep,
-        context_embs,
-        state,
-        embodiment_id,
+        prefix_k,
+        prefix_v,
+        suffix_position_ids,
+        suffix_attention_mask,
     )
 
-    # seeded initial noise for rollout — test_vla.py:485-504
     ref_initial_actions = parity_initial_actions(ctx)
     if ref_initial_actions is not None:
         initial_actions = ref_initial_actions.to(device=device, dtype=dtype).contiguous()
@@ -85,12 +95,11 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     return {
         "diffusion_module": diffusion_module,
         "diffusion_input": diffusion_input,
-        "context_embs": context_embs,
-        "state": state,
-        "embodiment_id": embodiment_id,
+        "prefix_k": prefix_k,
+        "prefix_v": prefix_v,
+        "prefix_pad_mask": prefix_pad_mask,
         "initial_actions": initial_actions,
-        "num_steps": int(action_head.num_inference_timesteps),
-        "num_timestep_buckets": int(action_head.num_timestep_buckets),
+        "num_steps": int(cfg.num_inference_steps),
     }
 
 
@@ -107,7 +116,7 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
 
 
 def load(ctx: EdgeContext, inputs: dict) -> dict:
-    serialized_action = SerializedGrootAction(
+    serialized_action = SerializedPi05Action(
         SerializedTRTEngine(ctx.engine_root / "action")
     )
     return {
@@ -119,36 +128,41 @@ def _rollout_actions(
     step_runner,
     *,
     actions: torch.Tensor,
-    context_embs: torch.Tensor,
-    state: torch.Tensor,
-    embodiment_id: torch.Tensor,
+    prefix_k: torch.Tensor,
+    prefix_v: torch.Tensor,
+    prefix_pad_mask: torch.Tensor,
+    core,
     num_steps: int,
-    num_timestep_buckets: int,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Manual Euler loop from test_vla.py:506-545."""
+    """PI05 flow-matching Euler loop (dt < 0, continuous float timesteps)."""
     actions = actions.clone().to(dtype=dtype)
-    dt = 1.0 / num_steps
+    dt = -1.0 / float(num_steps)
+    device = actions.device
+    batch_size = actions.shape[0]
 
     for step in range(num_steps):
-        t_cont = step / float(num_steps)
-        timestep_bucket = int(t_cont * num_timestep_buckets)
-
+        time = 1.0 + step * dt
         timestep = torch.full(
-            (actions.shape[0],),
-            timestep_bucket,
-            device=actions.device,
-            dtype=torch.long,
+            (batch_size,),
+            time,
+            device=device,
+            dtype=torch.float32,
         )
-
+        suffix_position_ids, suffix_attention_mask = make_pi05_suffix_position_and_mask(
+            core,
+            prefix_pad_mask,
+            actions,
+            device,
+        )
         velocity = step_runner(
             actions,
             timestep,
-            context_embs,
-            state,
-            embodiment_id,
+            prefix_k,
+            prefix_v,
+            suffix_position_ids,
+            suffix_attention_mask,
         )[0].to(dtype=dtype)
-
         actions = actions + dt * velocity
 
     return actions
@@ -171,11 +185,11 @@ def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
         actions = _rollout_actions(
             inputs["diffusion_module"],
             actions=inputs["initial_actions"],
-            context_embs=inputs["context_embs"],
-            state=inputs["state"],
-            embodiment_id=inputs["embodiment_id"],
+            prefix_k=inputs["prefix_k"],
+            prefix_v=inputs["prefix_v"],
+            prefix_pad_mask=inputs["prefix_pad_mask"],
+            core=ctx.model,
             num_steps=inputs["num_steps"],
-            num_timestep_buckets=inputs["num_timestep_buckets"],
             dtype=ctx.dtype,
         )
 
@@ -190,11 +204,11 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
         actions = _rollout_actions(
             inputs["trt_engine"],
             actions=inputs["initial_actions"],
-            context_embs=inputs["context_embs"],
-            state=inputs["state"],
-            embodiment_id=inputs["embodiment_id"],
+            prefix_k=inputs["prefix_k"],
+            prefix_v=inputs["prefix_v"],
+            prefix_pad_mask=inputs["prefix_pad_mask"],
+            core=ctx.model,
             num_steps=inputs["num_steps"],
-            num_timestep_buckets=inputs["num_timestep_buckets"],
             dtype=ctx.dtype,
         )
 
@@ -211,11 +225,11 @@ def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
         actions = _rollout_actions(
             module,
             actions=inputs["initial_actions"],
-            context_embs=inputs["context_embs"],
-            state=inputs["state"],
-            embodiment_id=inputs["embodiment_id"],
+            prefix_k=inputs["prefix_k"],
+            prefix_v=inputs["prefix_v"],
+            prefix_pad_mask=inputs["prefix_pad_mask"],
+            core=ctx.model,
             num_steps=inputs["num_steps"],
-            num_timestep_buckets=inputs["num_timestep_buckets"],
             dtype=ctx.dtype,
         )
 

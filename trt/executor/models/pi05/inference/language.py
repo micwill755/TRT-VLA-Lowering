@@ -6,82 +6,66 @@ from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
 from trt.rope import make_rope_rotary_cos_sin
 from trt.compile import compile_trt_module
-from trt.executor.models.groot.load.serialize import SerializedGrootLanguage
+from trt.executor.models.pi05.load.serialize import SerializedPi05Language
+from trt.executor.models.pi05.helpers import build_pi05_prefix_embs
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.serialize import SerializedTRTEngine
+from trt.language import run_prefix_language_eager
+
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     inputs = maybe_override_upstream(ctx, "language", inputs)
 
-    eagle = ctx.model.backbone.eagle_model
-    language = eagle.language_model
+    paligemma = ctx.model.paligemma_with_expert.paligemma.model
+    language = paligemma.language_model
     language = language.to(device=ctx.device, dtype=ctx.dtype).eval()
+    lm_head = ctx.model.paligemma_with_expert.paligemma.lm_head
 
-    # --- upstream vision output: [B * S_visual, H_lm] ---
     image_embs = inputs["tensors"]["image_embs"]
 
-    # --- tokenized prompt (pipeline-level preprocess) ---
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
-
-    image_token_index = getattr(
-        eagle, "image_token_index", eagle.config.image_token_index
+    inputs_embeds, prefix_pad_mask, prefix_attention_mask, prefix_position_ids = (
+        build_pi05_prefix_embs(
+            ctx.model,
+            inputs["img_masks"],
+            inputs["tokens"],
+            inputs["masks"],
+            image_embs,
+            inputs["images"],
+        )
     )
 
-    # --- build packed language embeddings (splice vision rows into token embeds) ---
-    input_embs = language.get_input_embeddings()(input_ids)
-    bsz, seq_len, hidden = input_embs.shape
-
-    flat_embs = input_embs.reshape(bsz * seq_len, hidden)
-    flat_ids = input_ids.reshape(bsz * seq_len)
-    image_token_mask = flat_ids == image_token_index
-
-    flat_image_embs = image_embs.reshape(-1, hidden).to(
-        device=flat_embs.device,
-        dtype=flat_embs.dtype,   # match embedding dtype, not hardcoded fp16
-    )
-    num_slots = int(image_token_mask.sum().item())
-    flat_embs[image_token_mask] = flat_image_embs[:num_slots]
-    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
+    bsz, seq_len, hidden = inputs_embeds.shape
     inputs_embeds = inputs_embeds.to(device=ctx.device, dtype=ctx.dtype).contiguous()
-    position_ids = torch.arange(seq_len, device=ctx.device, dtype=torch.long).unsqueeze(0)
 
-    if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=ctx.device)
-
-    # --- EAGER: stock HF path (match model weight dtype, test_vla rung A) ---
     eager_inputs = {
         "inputs_embeds": inputs_embeds,
-        "attention_mask": attention_mask,
-        "position_ids": position_ids,
+        "attention_mask": prefix_attention_mask,
+        "position_ids": prefix_position_ids,
     }
 
-    # --- config dims ---
     cfg = language.config
     hidden_size = int(cfg.hidden_size)
     num_attention_heads = int(cfg.num_attention_heads)
     num_key_value_heads = int(cfg.num_key_value_heads)
     head_dim = int(getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads))
 
-    decoder = getattr(language, "model", language)   # Qwen3Model with .layers
+    decoder = getattr(language, "model", language)
     num_layers = len(decoder.layers)
 
-    # --- trace target: manual decoder loop + lm_head (PluginAttention inside) ---
     lm_module = CausalLMExportModule(
         decoder,
-        language.lm_head,
+        lm_head,
         select_layer=-1,
     ).eval().to(device=ctx.device)
 
-    # --- flat Edge-LLM bindings ---
     rope_rotary_cos_sin = make_rope_rotary_cos_sin(
         cfg,
         seq_len,
         ctx.device,
         language_model=language,
-        position_ids=position_ids,
+        position_ids=prefix_position_ids,
     )
 
     ctx_len = torch.full((bsz,), seq_len, device=ctx.device, dtype=torch.int32)
@@ -99,7 +83,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         )
         for _ in range(num_layers)
     ]
-    kvcache_start_index = torch.empty(0, device=ctx.device, dtype=torch.int32)  # fresh prefill
+    kvcache_start_index = torch.empty(0, device=ctx.device, dtype=torch.int32)
 
     lm_inputs = (
         inputs_embeds,
@@ -109,6 +93,8 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         last_token_ids,
         *kv_caches,
     )
+
+    ctx.inference.action_side["prefix_pad_mask"] = prefix_pad_mask.detach()
 
     return {
         "language_model": language,
@@ -120,24 +106,22 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         "num_attention_heads": num_attention_heads,
         "num_key_value_heads": num_key_value_heads,
         "head_dim": head_dim,
+        "prefix_pad_mask": prefix_pad_mask,
     }
+
 
 def compile(ctx: EdgeContext, inputs: dict) -> dict:
     lm_module = inputs["lm_module"]
     lm_inputs = inputs["lm_inputs"]
     decoder = inputs["decoder"]
-    hidden_size = inputs["hidden_size"]
-    num_attention_heads = inputs["num_attention_heads"]
-    num_key_value_heads = inputs["num_key_value_heads"]
-    head_dim = inputs["head_dim"]
 
     patched = patch_language_attention(
         decoder,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-        num_key_value_heads=num_key_value_heads,
-        head_dim=head_dim,
-        enable_bidirectional_prefill=0,
+        hidden_size=inputs["hidden_size"],
+        num_attention_heads=inputs["num_attention_heads"],
+        num_key_value_heads=inputs["num_key_value_heads"],
+        head_dim=inputs["head_dim"],
+        enable_bidirectional_prefill=1,
     )
     try:
         lm_engine = compile_trt_module(
@@ -152,13 +136,15 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
         "lm_engine": lm_engine,
     }
 
+
 def load(ctx: EdgeContext, inputs: dict) -> dict:
-    serialized_language = SerializedGrootLanguage(
+    serialized_language = SerializedPi05Language(
         SerializedTRTEngine(ctx.engine_root / "language")
     )
     return {
         "serialized_engine": serialized_language,
     }
+
 
 def execute(ctx: EdgeContext, inputs: dict) -> dict:
     match ctx.execution_mode:
@@ -171,32 +157,32 @@ def execute(ctx: EdgeContext, inputs: dict) -> dict:
 
     raise ValueError(f"unsupported execution mode: {ctx.execution_mode}")
 
+
 def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
     language = inputs["language_model"]
     eager = inputs["eager_inputs"]
-    lm_dtype = next(language.parameters()).dtype
-    inputs_embeds = eager["inputs_embeds"].to(device=ctx.device, dtype=lm_dtype)
 
     with torch.no_grad():
-        out = language(
-            inputs_embeds=inputs_embeds,
+        lm_hidden, prefix_k, prefix_v = run_prefix_language_eager(
+            language,
+            eager["inputs_embeds"],
             attention_mask=eager["attention_mask"],
             position_ids=eager["position_ids"],
-            output_hidden_states=True,
-            return_dict=True,
         )
 
     return {
         "tensors": {
-            "logits": out.logits,
-            "lm_hidden": out.hidden_states[-1],
-            "prefix_k": None,
-            "prefix_v": None,
+            "logits": None,
+            "lm_hidden": lm_hidden,
+            "prefix_k": prefix_k,
+            "prefix_v": prefix_v,
         },
         "metadata": {
             "backend": "eager",
+            "prefix_pad_mask": inputs["prefix_pad_mask"],
         },
     }
+
 
 def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
     lm_engine = inputs["lm_engine"]
@@ -214,36 +200,31 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
         },
         "metadata": {
             "backend": "in_memory_trt",
+            "prefix_pad_mask": inputs["prefix_pad_mask"],
         },
     }
 
+
 def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
     module = inputs["serialized_engine"]
-
-    # SerializedGrootLanguage takes the same positional lm_inputs tuple built in
-    # preprocess and returns either logits or (logits, lm_hidden).
     lm_inputs = inputs["lm_inputs"]
 
     with torch.no_grad():
-        out = module(*lm_inputs)
-
-    if isinstance(out, (tuple, list)):
-        logits = out[0]
-        lm_hidden = out[1] if len(out) > 1 else out[0]
-    else:
-        logits, lm_hidden = None, out
+        logits, lm_hidden, prefix_k, prefix_v = module(*lm_inputs)
 
     return {
         "tensors": {
             "logits": logits,
             "lm_hidden": lm_hidden,
-            "prefix_k": None,
-            "prefix_v": None,
+            "prefix_k": prefix_k,
+            "prefix_v": prefix_v,
         },
         "metadata": {
             "backend": "serialized_trt",
+            "prefix_pad_mask": inputs["prefix_pad_mask"],
         },
     }
+
 
 def postprocess(ctx: EdgeContext, result: dict) -> dict:
     tensors = result["tensors"]
@@ -251,4 +232,7 @@ def postprocess(ctx: EdgeContext, result: dict) -> dict:
     ctx.inference.lm_hidden_states = tensors["lm_hidden"]
     ctx.inference.prefix_k = tensors.get("prefix_k")
     ctx.inference.prefix_v = tensors.get("prefix_v")
+    prefix_pad_mask = result.get("metadata", {}).get("prefix_pad_mask")
+    if prefix_pad_mask is not None:
+        ctx.inference.action_side["prefix_pad_mask"] = prefix_pad_mask
     return result

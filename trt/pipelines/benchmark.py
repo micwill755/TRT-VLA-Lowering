@@ -4,13 +4,29 @@ from trt.context import BenchmarkResult, EdgeContext
 from trt.config.execution_mode import ExecutionMode
 from trt.config.parity_mode import ParityMode
 from trt.config.pipeline_registry import get_inference_pipeline
-from trt.executor.models.groot.inference.pipeline import STAGE_PARITY_TENSORS
 from trt.measure import parity_metrics
 from trt.pipelines.inference import InferencePipeline
 
 SEED = 42
 
-_SERIALIZED_ENGINE_DIRS = ("visual", "language", "action_context", "action")
+
+def _stage_parity_tensors(profile_name: str) -> dict[str, str]:
+    if profile_name == "pi05":
+        from trt.executor.models.pi05.inference.pipeline import STAGE_PARITY_TENSORS
+
+        return STAGE_PARITY_TENSORS
+    from trt.executor.models.groot.inference.pipeline import STAGE_PARITY_TENSORS
+
+    return STAGE_PARITY_TENSORS
+
+
+def _serialized_engine_dirs(profile_name: str) -> tuple[str, ...]:
+    pipeline_cfg = get_inference_pipeline(profile_name)
+    return tuple(
+        stage.engine_subdir
+        for stage in pipeline_cfg.stages
+        if stage.engine_subdir
+    )
 
 
 def _print_parity_table(reference: str, backend: str, rows: list[tuple[str, str, dict[str, float]]]) -> None:
@@ -38,7 +54,8 @@ def _print_parity_table(reference: str, backend: str, rows: list[tuple[str, str,
 
 def _has_serialized(ctx: EdgeContext) -> bool:
     """True when all serialized engine directories exist under ``engine_root``."""
-    return all((ctx.engine_root / name).exists() for name in _SERIALIZED_ENGINE_DIRS)
+    engine_dirs = _serialized_engine_dirs(ctx.profile.name)
+    return all((ctx.engine_root / name).exists() for name in engine_dirs)
 
 
 def _parity_modes(ctx: EdgeContext) -> set[str]:
@@ -90,6 +107,11 @@ def _snapshot_reference(ctx: EdgeContext) -> None:
     lm_hidden = eager.get("language", {}).get("lm_hidden")
     if lm_hidden is not None:
         reference["language"] = {"lm_hidden": lm_hidden}
+    prefix_k = eager.get("language", {}).get("prefix_k")
+    prefix_v = eager.get("language", {}).get("prefix_v")
+    if prefix_k is not None and prefix_v is not None:
+        reference.setdefault("language", {})["prefix_k"] = prefix_k
+        reference["language"]["prefix_v"] = prefix_v
     context_embs = eager.get("action_context", {}).get("context_embs")
     if context_embs is not None:
         reference["action_context"] = {"context_embs": context_embs}
@@ -132,7 +154,8 @@ def report_stage_parity(ctx: EdgeContext, reference: str = ExecutionMode.EAGER.v
                 continue
 
             rows: list[tuple[str, str, dict[str, float]]] = []
-            for stage_name, tensor_name in STAGE_PARITY_TENSORS.items():
+            stage_parity_tensors = _stage_parity_tensors(ctx.profile.name)
+            for stage_name, tensor_name in stage_parity_tensors.items():
                 a = ref_e2e.get(stage_name, {}).get(tensor_name)
                 b = stage_map.get(stage_name, {}).get(tensor_name)
                 if a is None or b is None:

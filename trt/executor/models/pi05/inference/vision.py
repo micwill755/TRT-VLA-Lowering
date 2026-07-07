@@ -7,62 +7,42 @@ from trt.config.execution_mode import ExecutionMode
 from trt.modules.export.vision import GridVisionExportModule
 from trt.compile import compile_trt_module
 from trt.plugin.plugin_utils import patch_vision_attention, restore_attention
-from trt.executor.models.groot.load.serialize import SerializedGrootVision
+from trt.executor.models.pi05.load.serialize import SerializedPi05Vision
 from trt.serialize import SerializedTRTEngine
 
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
-    """Prepare the pixel tensor and eager vision wrapper for the vision stage.
-
-    ``GridVisionExportModule`` accepts either NCHW or HWC pixels and normalizes
-    internally before calling the HF vision tower. Keeping NCHW here matches the
-    TRT engine input contract and the shape used in ``test_vla.py``.
-    """
-
-    # Eagle model owns the SigLIP vision tower and projector used by GR00T.
-    eagle = ctx.model.backbone.eagle_model
-    vision = eagle.vision_model
-
-    # Prefer the explicit stage input, but fall back to ctx.inference scratch state.
-    # Shape: [B, C, H, W], e.g. [1, 3, 224, 224].
+    """Prepare PaliGemma SigLIP vision + projector for the PI05 vision stage."""
+    paligemma = ctx.model.paligemma_with_expert.paligemma.model
+    vision = paligemma.vision_tower
+    projector = paligemma.multi_modal_projector
     pixel_values = inputs["pixel_values"]
 
-    # The eager backend needs a Python wrapper around:
-    #   vision_model -> selected hidden state -> optional pixel shuffle -> projector.
-    #
-    # Input shape to wrapper forward:
-    #   [B, C, H, W] NCHW pixels
-    #
-    # Output shape from wrapper:
-    #   [B * S_visual, H_lm]
-    # Example from your run:
-    #   [512, 2048]
     visual_module = GridVisionExportModule(
-        vision_model=eagle.vision_model,
-        projector=eagle.mlp1,
+        vision_model=vision,
+        projector=projector,
         sample_pixel_values=pixel_values,
-        select_layer=eagle.select_layer,
-        pixel_shuffle=eagle.use_pixel_shuffle,
-        downsample_ratio=eagle.downsample_ratio,
+        select_layer=-1,
+        pixel_shuffle=False,
+        downsample_ratio=0.5,
+        force_float32_input=True,
         vision_kwargs={},
     ).eval().to(device=ctx.device, dtype=ctx.dtype)
-    
+
     return {
         "pixel_values": pixel_values,
-        "visual_module": visual_module
+        "visual_module": visual_module,
     }
+
 
 def compile(ctx: EdgeContext, inputs: dict) -> dict:
     pixel_values = inputs["pixel_values"]
     visual_module = inputs["visual_module"]
 
-    eagle = ctx.model.backbone.eagle_model
-    vision = eagle.vision_model
-
-    # patch vision attention
-    hidden_states = vision.vision_model.embeddings(pixel_values)
+    vision = ctx.model.paligemma_with_expert.paligemma.model.vision_tower
+    hidden_states = vision.vision_model.embeddings(pixel_values.float())
     batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
-    
+
     patched = patch_vision_attention(
         vision.vision_model,
         batch_size=batch_size,
@@ -77,21 +57,22 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
         )
     finally:
         restore_attention(patched)
-    
+
     return {
         "trt_engine": trt_engine,
     }
 
+
 def load(ctx: EdgeContext, inputs: dict) -> dict:
-    serialized_vision = SerializedGrootVision(
+    serialized_vision = SerializedPi05Vision(
         SerializedTRTEngine(ctx.engine_root / "visual")
     )
     return {
         "serialized_engine": serialized_vision,
     }
 
+
 def execute(ctx: EdgeContext, inputs: dict) -> dict:
-    # TODO: do we need sperate functions for each execution mode 
     match ctx.execution_mode:
         case ExecutionMode.EAGER:
             return _run_eager(ctx, inputs)
@@ -102,10 +83,13 @@ def execute(ctx: EdgeContext, inputs: dict) -> dict:
 
     raise ValueError(f"unsupported execution mode: {ctx.execution_mode}")
 
+
 def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
     visual = inputs["visual_module"]
     pixel_values = inputs["pixel_values"]
-    image_embs = visual(pixel_values)
+
+    with torch.no_grad():
+        image_embs = visual(pixel_values)
 
     return {
         "tensors": {
@@ -115,6 +99,7 @@ def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
             "backend": "eager",
         },
     }
+
 
 def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
     trt_engine = inputs["trt_engine"]
@@ -132,6 +117,7 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
         },
     }
 
+
 def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
     module = inputs["serialized_engine"]
     pixel_values = inputs["pixel_values"].contiguous()
@@ -147,6 +133,7 @@ def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
             "backend": "serialized_trt",
         },
     }
+
 
 def postprocess(ctx: EdgeContext, result: dict) -> dict:
     ctx.inference.image_embs = result["tensors"]["image_embs"]

@@ -80,6 +80,23 @@ def load_test_data(
         "task": frame.get("task", "") or "Perform the task.",
     }
 
+
+def prepare_policy_batch(
+    policy,
+    pre_processor,
+    data: dict[str, Any],
+    device: str | torch.device,
+    model_id: str,
+    *,
+    fill_missing: bool = False,
+) -> dict[str, Any]:
+    """Run the LeRobot preprocessor and return a PI0.5 / SmolVLA model batch."""
+    del model_id
+    frame = frame_from_test_data(data, policy, fill_missing=fill_missing)
+    model_inputs = pre_processor(frame)
+    return helper.to_device(model_inputs, device)
+
+
 # ------------------ GROOT SPECIFIC ------------------ 
 
 def create_pil_messages(data: dict[str, Any]) -> list[dict[str, Any]]:

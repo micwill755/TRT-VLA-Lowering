@@ -1,11 +1,11 @@
 from trt.config.stage_config import PipelineConfig, StageConfig
 
-_E = "trt.executor.models.groot.export"
+_E = "trt.executor.models.pi05.export"
 
-GROOT_PIPELINE = PipelineConfig(
-    pipeline_name="Gr00tN1d7",
+PI05_PIPELINE = PipelineConfig(
+    pipeline_name="PI05",
     hooks={
-        "preprocess":  f"{_E}.process:preprocess",
+        "preprocess": f"{_E}.process:preprocess",
         "postprocess": f"{_E}.process:postprocess",
     },
     stages=(
@@ -17,8 +17,8 @@ GROOT_PIPELINE = PipelineConfig(
             engine_subdir="visual",
             hooks={
                 "preprocess": f"{_E}.vision:preprocess",
-                "export":     f"{_E}.vision:export",
-                "postprocess":    f"{_E}.vision:postprocess",
+                "export": f"{_E}.vision:export",
+                "postprocess": f"{_E}.vision:postprocess",
             },
         ),
         StageConfig(
@@ -28,35 +28,23 @@ GROOT_PIPELINE = PipelineConfig(
             runner="trt.runner.export:ExportRunner",
             engine_subdir="language",
             hooks={
-                "preprocess":     f"{_E}.language:preprocess",
-                "export":        f"{_E}.language:export",
+                "preprocess": f"{_E}.language:preprocess",
+                "export": f"{_E}.language:export",
                 "save_artifacts": f"{_E}.language:save_artifacts",
-                "postprocess":       f"{_E}.language:postprocess",
+                "postprocess": f"{_E}.language:postprocess",
             },
         ),
         StageConfig(
             stage_id=2,
-            stage_name="action_context",
-            input_sources=(1,),
-            runner="trt.runner.export:ExportRunner",
-            engine_subdir="action_context",
-            hooks={
-                "preprocess":    f"{_E}.action_context:preprocess",
-                "export":        f"{_E}.action_context:export",
-                "postprocess":       f"{_E}.action_context:postprocess",
-            },
-        ),
-        StageConfig(
-            stage_id=3,
             stage_name="action",
-            input_sources=(2,),
+            input_sources=(1,),
             runner="trt.runner.export:ExportRunner",
             engine_subdir="action",
             final_output=True,
             hooks={
-                "preprocess":    f"{_E}.diffusion:preprocess",
-                "export":        f"{_E}.diffusion:export",
-                "postprocess":       f"{_E}.diffusion:postprocess",
+                "preprocess": f"{_E}.diffusion:preprocess",
+                "export": f"{_E}.diffusion:export",
+                "postprocess": f"{_E}.diffusion:postprocess",
             },
         ),
     ),

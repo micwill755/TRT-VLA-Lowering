@@ -14,6 +14,8 @@ from typing import TypeAlias
 from trt.config.stage_config import PipelineConfig
 from trt.executor.models.groot.export.pipeline import GROOT_PIPELINE
 from trt.executor.models.groot.inference.pipeline import GROOT_INFERENCE_PIPELINE
+from trt.executor.models.pi05.export.pipeline import PI05_PIPELINE
+from trt.executor.models.pi05.inference.pipeline import PI05_INFERENCE_PIPELINE
 
 PipelineEntry: TypeAlias = PipelineConfig | Callable[[], PipelineConfig]
 
@@ -71,6 +73,8 @@ def _register_builtin() -> None:
     """Register built-in model pipelines at module import time."""
     register_export_pipeline("gr00t", GROOT_PIPELINE)
     register_inference_pipeline("gr00t", GROOT_INFERENCE_PIPELINE)
+    register_export_pipeline("pi05", PI05_PIPELINE)
+    register_inference_pipeline("pi05", PI05_INFERENCE_PIPELINE)
 
 
 _register_builtin()

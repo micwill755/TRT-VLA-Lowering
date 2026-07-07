@@ -4,37 +4,37 @@ import torch
 
 from trt.compile import save_trt_engine_module
 from trt.context import EdgeContext
+from trt.executor.models.pi05.helpers import make_pi05_suffix_position_and_mask
+from trt.io_spec import PI05_ACTION_ROLLOUT, PI05_EDGE_IO, action_rollout_extra_config
 from trt.modules.export.diffusion import (
-    GrootDiTStepEncoderExportModule,
+    PI05PrefixKVStepEncoderExportModule,
     StaticActionVelocityStepExportModule,
-    TRTDynamicCategorySpecificMLPExportModule,
 )
+
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     device, dtype = ctx.device, ctx.dtype
-    action_head = ctx.model.action_head
-    cfg = action_head.config
+    cfg = ctx.model.config
 
-    # upstream action_context output: [B, S_ctx, H_ctx]
-    context_embs = inputs["tensors"]["context_embs"]
-    context_embs = context_embs.to(device=device, dtype=dtype).contiguous()
+    prefix_k = inputs["tensors"]["prefix_k"].to(device=device, dtype=dtype).contiguous()
+    prefix_v = inputs["tensors"]["prefix_v"].to(device=device, dtype=dtype).contiguous()
 
-    state = inputs["state"].to(device=device, dtype=dtype).contiguous()
-    embodiment_id = inputs["embodiment_id"].to(device=device, dtype=torch.long)
+    prefix_pad_mask = inputs.get("metadata", {}).get("prefix_pad_mask")
+    if prefix_pad_mask is None:
+        raise RuntimeError("PI05 diffusion export requires prefix_pad_mask from language stage")
+    prefix_pad_mask = prefix_pad_mask.to(device=device)
 
     diffusion_module = StaticActionVelocityStepExportModule(
-        step_encoder=GrootDiTStepEncoderExportModule(action_head, embodiment_id),
-        action_expert=action_head.model,
-        velocity_decoder=TRTDynamicCategorySpecificMLPExportModule(
-            action_head.action_decoder
-        ),
-        output_tokens=cfg.action_horizon,
+        step_encoder=PI05PrefixKVStepEncoderExportModule(ctx.model),
+        action_expert=ctx.model.paligemma_with_expert.gemma_expert.model,
+        velocity_decoder=ctx.model.action_out_proj,
+        output_tokens=cfg.chunk_size,
         cast_hidden_fp32=False,
     ).eval().to(device=device, dtype=dtype)
 
-    batch_size = int(context_embs.shape[0])
-    action_horizon = int(cfg.action_horizon)
-    action_dim = int(cfg.action_dim)
+    batch_size = int(prefix_k.shape[1])
+    action_horizon = int(cfg.chunk_size)
+    action_dim = int(cfg.max_action_dim)
 
     step_actions = torch.randn(
         batch_size,
@@ -43,25 +43,32 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         device=device,
         dtype=dtype,
     ).contiguous()
-
-    step_timestep = torch.zeros(
-        batch_size,
+    step_timestep = torch.full(
+        (batch_size,),
+        1.0,
         device=device,
-        dtype=torch.long,
+        dtype=torch.float32,
+    )
+
+    suffix_position_ids, suffix_attention_mask = make_pi05_suffix_position_and_mask(
+        ctx.model,
+        prefix_pad_mask,
+        step_actions,
+        device,
     )
 
     diffusion_input = (
         step_actions,
         step_timestep,
-        context_embs,
-        state,
-        embodiment_id,
+        prefix_k,
+        prefix_v,
+        suffix_position_ids,
+        suffix_attention_mask,
     )
 
     seed = getattr(ctx.inference, "seed", 42)
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
-
     initial_actions = torch.randn(
         batch_size,
         action_horizon,
@@ -74,21 +81,18 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     return {
         "diffusion_module": diffusion_module,
         "diffusion_input": diffusion_input,
-        "context_embs": context_embs,
-        "state": state,
-        "embodiment_id": embodiment_id,
+        "prefix_k": prefix_k,
+        "prefix_v": prefix_v,
+        "prefix_pad_mask": prefix_pad_mask,
         "initial_actions": initial_actions,
         "batch_size": batch_size,
         "action_horizon": action_horizon,
         "action_dim": action_dim,
-        "context_seq_len": int(context_embs.shape[1]),
-        "context_hidden_size": int(context_embs.shape[2]),
-        "state_horizon": int(state.shape[1]),
-        "state_dim": int(state.shape[2]),
-        "num_steps": int(action_head.num_inference_timesteps),
-        "num_timestep_buckets": int(action_head.num_timestep_buckets),
+        "prefix_seq_len": int(prefix_pad_mask.shape[1]),
+        "num_steps": int(cfg.num_inference_steps),
         "language_inputs": inputs.get("metadata", {}).get("language_inputs"),
     }
+
 
 def export(ctx: EdgeContext, inputs: dict) -> dict:
     diffusion_module = inputs["diffusion_module"]
@@ -101,33 +105,19 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         engine_file="action.engine",
         model_type="action",
         component="diffusion",
-        input_names=[
-            "actions",
-            "timestep",
-            "context_embs",
-            "state",
-            "embodiment_id",
-        ],
-        output_names=["velocity"],
-        extra_config={
-            "engine_role": "single_action_denoising_step",
-            "noise_input_name": "actions",
-            "timestep_schedule": "discrete_buckets",
-            "rollout_dt_sign": 1,
-            "num_inference_timesteps": int(inputs["num_steps"]),
-            "num_timestep_buckets": int(inputs["num_timestep_buckets"]),
-            "action_horizon": int(inputs["action_horizon"]),
-            "action_dim": int(inputs["action_dim"]),
-            "context_seq_len": int(inputs["context_seq_len"]),
-            "context_hidden_size": int(inputs["context_hidden_size"]),
-            "state_horizon": int(inputs["state_horizon"]),
-            "state_dim": int(inputs["state_dim"]),
-        },
+        input_names=list(PI05_EDGE_IO.action.input_names),
+        output_names=list(PI05_EDGE_IO.action.output_names),
+        extra_config=action_rollout_extra_config(
+            PI05_EDGE_IO,
+            PI05_ACTION_ROLLOUT,
+            num_steps=int(inputs["num_steps"]),
+            action_horizon=int(inputs["action_horizon"]),
+            action_dim=int(inputs["action_dim"]),
+            prefix_seq_len=int(inputs["prefix_seq_len"]),
+        ),
         trt_settings=ctx.trt_settings,
     )
 
-    # Dummy final actions for export metadata/stage output. Export writes a
-    # single-step velocity engine; runtime performs the denoising rollout.
     actions = torch.zeros(
         inputs["batch_size"],
         inputs["action_horizon"],
@@ -143,14 +133,13 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         },
         "metadata": {
             "language_inputs": inputs.get("language_inputs"),
-            "context_seq_len": inputs["context_seq_len"],
-            "context_hidden_size": inputs["context_hidden_size"],
             "action_horizon": inputs["action_horizon"],
             "action_dim": inputs["action_dim"],
             "num_steps": inputs["num_steps"],
-            "num_timestep_buckets": inputs["num_timestep_buckets"],
+            "prefix_seq_len": inputs["prefix_seq_len"],
         },
     }
+
 
 def postprocess(ctx: EdgeContext, result: dict) -> dict:
     return result

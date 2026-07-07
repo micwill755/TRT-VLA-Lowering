@@ -68,6 +68,7 @@ class SmolVLAProfile(VLAProfile):
     ) -> dict[str, Any]:
         return prepare_policy_batch(
             self.policy,
+            self.pre_processor,
             data,
             self.device,
             args.model_id,

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from trt.serialize import SerializedPositionalEngine
 
-class SerializedGrootVision:
+
+class SerializedPi05Vision:
     def __init__(self, engine):
         self.engine = engine
 
@@ -15,7 +16,8 @@ class SerializedGrootVision:
             input_name = self.engine.config_input_names[0]
         return self.engine({input_name: images})[0]
 
-class SerializedGrootLanguage:
+
+class SerializedPi05Language:
     bundles_kv_caches = True
 
     def __init__(self, engine):
@@ -25,7 +27,7 @@ class SerializedGrootLanguage:
     def __call__(self, *args):
         if len(args) < 6:
             raise ValueError(
-                f"SerializedGrootLanguage expected at least 6 inputs, got {len(args)}"
+                f"SerializedPi05Language expected at least 6 inputs, got {len(args)}"
             )
         (
             input_embs,
@@ -47,32 +49,28 @@ class SerializedGrootLanguage:
             inputs[f"past_key_values_{i}"] = kv_cache
 
         outputs = self.engine(inputs)
-        if len(outputs) == 1:
-            return outputs[0]
-        return outputs[0], outputs[1]
+        if len(outputs) < 4:
+            raise ValueError(
+                f"SerializedPi05Language expected 4 outputs, got {len(outputs)}"
+            )
+        return outputs[0], outputs[1], outputs[2], outputs[3]
 
-    @property
-    def context_output_index(self) -> int:
-        output_names = self.engine.config.get("output_names", [])
-        for name in ("context_embs", "lm_hidden_states", "vl_embs"):
-            if name in output_names:
-                return output_names.index(name)
-        return 1
 
-    @property
-    def lm_hidden_output_index(self) -> int:
-        return self.context_output_index
-
-class SerializedGrootActionContext(SerializedPositionalEngine):
-    def __call__(self, lm_hidden_states):
-        return super().__call__(lm_hidden_states)[0]
-
-class SerializedGrootAction(SerializedPositionalEngine):
-    def __call__(self, actions, timestep, context_embs, state, embodiment_id):
+class SerializedPi05Action(SerializedPositionalEngine):
+    def __call__(
+        self,
+        x_t,
+        timestep,
+        prefix_k,
+        prefix_v,
+        position_ids,
+        attention_mask,
+    ):
         return super().__call__(
-            actions,
+            x_t,
             timestep,
-            context_embs,
-            state,
-            embodiment_id,
+            prefix_k,
+            prefix_v,
+            position_ids,
+            attention_mask,
         )[0]

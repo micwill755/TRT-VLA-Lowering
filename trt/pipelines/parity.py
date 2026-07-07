@@ -10,6 +10,12 @@ UPSTREAM_TENSOR_OVERRIDES: dict[str, tuple[str, str, str]] = {
     "action": ("action_context", "context_embs", "context_embs"),
 }
 
+# PI05 action stage reads prefix KV directly from the language stage.
+PI05_ACTION_KV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
+    ("language", "prefix_k", "prefix_k"),
+    ("language", "prefix_v", "prefix_v"),
+)
+
 # Top-level pipeline keys pinned from parity_reference["action"] in isolated mode.
 ACTION_SIDE_KEYS = ("state", "embodiment_id")
 
@@ -36,6 +42,24 @@ def maybe_override_upstream(ctx: EdgeContext, stage_name: str, inputs: dict) -> 
     tensors = dict(out.get("tensors", {}))
     tensors[input_key] = ref
     out["tensors"] = tensors
+    return out
+
+
+def maybe_override_language_kv(ctx: EdgeContext, inputs: dict) -> dict:
+    """Replace language prefix KV tensors for isolated PI05 action parity."""
+    if not _is_isolated(ctx):
+        return inputs
+
+    out = dict(inputs)
+    tensors = dict(out.get("tensors", {}))
+    changed = False
+    for ref_stage, ref_key, input_key in PI05_ACTION_KV_OVERRIDES:
+        ref = ctx.parity_reference.get(ref_stage, {}).get(ref_key)
+        if ref is not None:
+            tensors[input_key] = ref
+            changed = True
+    if changed:
+        out["tensors"] = tensors
     return out
 
 

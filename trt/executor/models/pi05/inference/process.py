@@ -2,33 +2,34 @@ from __future__ import annotations
 
 import torch
 
+from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
+
 from trt.context import EdgeContext
-from trt.data import pack_state
-from trt.executor.models.groot.helpers import make_embodiment_id
+
 
 def preprocess(ctx: EdgeContext) -> dict:
-    tokenized_data = ctx.model_inputs["tokenized_data"]
-    input_ids = tokenized_data["input_ids"].to(device=ctx.device, dtype=torch.long)
-    attention_mask = tokenized_data["attention_mask"].to(device=ctx.device, dtype=torch.long)
-    pixel_values = tokenized_data["pixel_values"].to(device=ctx.device, dtype=ctx.dtype)
-    state = pack_state(
-        ctx.model_inputs["state"],  # [7] libero proprio
-        max_state_dim=64,  # 64
-        device=ctx.device,
-    ) 
-    state = state.to(device=ctx.device, dtype=ctx.dtype).contiguous()
-    embodiment_id = make_embodiment_id(ctx.policy, state, ctx.device, torch.long)
+    """PI05 batch prep: multi-camera images, language tokens, and stacked pixels."""
+    model_inputs = ctx.model_inputs
+    images, img_masks = ctx.policy._preprocess_images(model_inputs)
 
-    ctx.inference.action_side["state"] = state.detach()
-    ctx.inference.action_side["embodiment_id"] = embodiment_id.detach()
+    tokens = model_inputs[OBS_LANGUAGE_TOKENS].to(device=ctx.device, dtype=torch.long)
+    masks = model_inputs[OBS_LANGUAGE_ATTENTION_MASK].to(device=ctx.device, dtype=torch.bool)
+
+    pixel_values = torch.cat(
+        [img.to(device=ctx.device, dtype=ctx.dtype) for img in images],
+        dim=0,
+    ).contiguous()
+
+    ctx.inference.action_side["prefix_pad_mask"] = None
 
     return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
+        "images": images,
+        "img_masks": img_masks,
+        "tokens": tokens,
+        "masks": masks,
         "pixel_values": pixel_values,
-        "state": state,
-        "embodiment_id": embodiment_id,
     }
+
 
 def postprocess(ctx: EdgeContext, stage_outputs: dict) -> None:
     pass
