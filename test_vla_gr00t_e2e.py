@@ -26,7 +26,7 @@ from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 from trt.modules.export.vision import GridVisionExportModule
 from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
 from trt.modules.export.diffusion import TRTDynamicCategorySpecificMLP, StaticActionVelocityStep, GrootDiTStepEncoder
-
+from trt.plugin.plugin_utils import restore_attention
 from trt.measure import parity
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
@@ -97,29 +97,6 @@ def load_config(device):
     policy = GrootPolicy(config).to(device).eval()
     return config, policy
 
-def prepare_compile_inputs(
-    self,
-    *,
-    data: dict[str, Any],
-    args: argparse.Namespace,
-) -> dict[str, Any]:
-    pil_messages = create_pil_messages(data)
-    return prepare_model_inputs(
-        self.eagle_processor,
-        self.eagle_processor.process_vision_info,
-        {"add_generation_prompt": True},
-        {
-            "images_kwargs": {
-                "min_dynamic_tiles": 1,
-                "max_dynamic_tiles": 1,
-                "use_thumbnail": False,
-            }
-        },
-        data,
-        pil_messages,
-        self.device,
-    )
-
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -161,22 +138,35 @@ def main():
         frame_index=0,
     )
 
-    pil_messages = create_pil_messages(data)
-    model_inputs = prepare_model_inputs(
-        eagle_processor,
-        eagle_processor.process_vision_info,
-        {"add_generation_prompt": True},
-        {
+    messages = create_pil_messages(data)
+    text = eagle_processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        **{"add_generation_prompt": True},
+    )
+
+    image_inputs, video_inputs = eagle_processor.process_vision_info(messages)
+
+    tokenized_data = eagle_processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        return_tensors="pt",
+        padding=True,
+        **{
             "images_kwargs": {
                 "min_dynamic_tiles": 1,
                 "max_dynamic_tiles": 1,
                 "use_thumbnail": False,
             }
         },
-        data,
-        pil_messages,
-        device,
     )
+
+    model_inputs = {
+        "tokenized_data": tokenized_data,
+        "state": data["state"],
+        "task": data["task"],
+    }
     
     tokenized_data = model_inputs["tokenized_data"]
     input_ids = tokenized_data["input_ids"].to(device=device, dtype=torch.long)
@@ -190,6 +180,8 @@ def main():
     state = state.to(device=device, dtype=dtype).contiguous()
     embodiment_id = make_embodiment_id(policy, state, device, torch.long)
     
+    print('Compiling vision')
+
     # add vision wrapper
     visual = GridVisionExportModule(
         vision_model=vision,
@@ -237,7 +229,6 @@ def main():
             embs_trt = trt_engine(pixel_values)
     finally:
         # always undo the patch so later eager runs aren't affected
-        from trt.plugin.plugin_utils import restore_attention
         restore_attention(patched)
 
     # --- Localize the error ---
