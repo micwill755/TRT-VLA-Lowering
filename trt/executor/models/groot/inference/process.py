@@ -56,20 +56,21 @@ def preprocess(ctx: EdgeContext) -> None:
 
     input_ids = tokenized_data["input_ids"]
     attention_mask = tokenized_data["attention_mask"]
-    pixel_values = tokenized_data["pixel_values"].to(device=device, dtype=torch.float16).contiguous()
-    state = pack_state(
-        data["state"],  # [7] libero proprio
-        max_state_dim=64,  # 64
+    pixel_values = tokenized_data["pixel_values"].to(device=device, dtype=ctx.dtype).contiguous()
+        state = pack_state(
+        data["state"],
+        max_state_dim=64,
         device=device,
-    ).to(device=device, dtype=torch.float16)
-    embodiment_id = make_embodiment_id(policy, state, device)
+    ).to(device=device, dtype=ctx.dtype).contiguous()
+
+    embodiment_id = make_embodiment_id(ctx.policy, state, device, torch.long)
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "pixel_values": pixel_values,
         "state": state,
-        "embodiment_id" embodiment_id
+        "embodiment_id": embodiment_id,
     }
 
 def postprocess(ctx: EdgeContext) -> None:

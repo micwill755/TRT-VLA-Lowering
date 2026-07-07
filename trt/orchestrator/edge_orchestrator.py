@@ -17,6 +17,16 @@ from trt.plugin.plugin_utils import load_plugins_for_trt
 
 DATASET_ID = "lerobot/libero"
 
+TRT_SETTINGS = {
+    "disable_tf32": True,
+    "use_explicit_typing": True,
+    "use_fp32_acc": True,
+    "truncate_double": True,
+    "immutable_weights": True,
+    "decompose_attention": True,
+    "require_full_compilation": True,
+}
+
 class EdgeOrchestrator:
     def __init__(self, profile: Type[VLAProfile], args: argparse.Namespace):
         self.args = args
@@ -91,4 +101,5 @@ class EdgeOrchestrator:
             model_inputs=model_inputs,
             engine_root=Path(self.args.engine_dir),
             args=self.args,
+            trt_settings=TRT_SETTINGS
         )

@@ -30,7 +30,7 @@ from trt.data import (
 )
 
 from trt.plugin.plugin_utils import patch_vision_attention, patch_language_attention, patch_vision_attention_reference
-from trt.compile import _make_input_spec
+from trt.compile import make_input_spec
 
 from typing import Any
 
@@ -39,7 +39,6 @@ TRT_SETTINGS = {
     "use_explicit_typing": True,
     "use_fp32_acc": True,
     "truncate_double": True,
-    #"use_python_runtime": True,
     "immutable_weights": True,
     "decompose_attention": True,
     "require_full_compilation": True,
@@ -216,7 +215,7 @@ def main():
 
         # --- Rung C: TRT compiled from the patched module ---
         exported = torch.export.export(visual, args=(pixel_values,), strict=False)
-        input_specs = _make_input_spec((pixel_values,))
+        input_specs = make_input_spec((pixel_values,))
         trt_engine = torch_tensorrt.dynamo.compile(
             exported,
             inputs=input_specs,
@@ -299,7 +298,6 @@ def main():
         select_layer=-1,
     ).eval().to(device=device)
 
-    lm_inputs = inputs_embeds.to(device=device, dtype=dtype).contiguous()
     pad_mask = attention_mask.to(device=inputs_embeds.device, dtype=torch.bool)
     # build position_ids for the real sequence:
     rope_rotary_cos_sin = make_rope_rotary_cos_sin(
@@ -327,7 +325,7 @@ def main():
     ]
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)   # fresh prefill
     flat_tensors = (
-        lm_inputs,
+        input_embs,
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
@@ -351,7 +349,7 @@ def main():
             # compare lm_hidden_eager vs lm_hidden_trt_ref (after TRT compile, same flat_tensors in)
     
         lm_exported = torch.export.export(lm, args=flat_tensors, strict=False)
-        lm_input_specs = _make_input_spec(flat_tensors)
+        lm_input_specs = make_input_spec(flat_tensors)
         lm_trt_engine = torch_tensorrt.dynamo.compile(
             lm_exported,
             inputs=lm_input_specs,
@@ -386,7 +384,7 @@ def main():
         eager_context_embs = action_context(eager_context_embs)
 
     action_context_exported = torch.export.export(action_context, args=(trt_context_embs,), strict=False)
-    action_context_input_specs = _make_input_spec((trt_context_embs,))
+    action_context_input_specs = make_input_spec((trt_context_embs,))
     action_context_trt_engine = torch_tensorrt.dynamo.compile(
         action_context_exported,
         inputs=action_context_input_specs,
@@ -477,7 +475,7 @@ def main():
     )
 
     diffusion_exported = torch.export.export(diffusion_model, args=trt_diffusion_input, strict=False)
-    diffusion_input_specs = _make_input_spec(trt_diffusion_input)
+    diffusion_input_specs = make_input_spec(trt_diffusion_input)
     diffusion_trt_engine = torch_tensorrt.dynamo.compile(
         diffusion_exported,
         inputs=diffusion_input_specs,
@@ -584,7 +582,7 @@ def main():
     )
 
     diffusion_exported = torch.export.export(diffusion_model, args=diffusion_input, strict=False)
-    diffusion_input_specs = _make_input_spec(diffusion_input)
+    diffusion_input_specs = make_input_spec(diffusion_input)
     diffusion_trt_engine = torch_tensorrt.dynamo.compile(
         diffusion_exported,
         inputs=diffusion_input_specs,

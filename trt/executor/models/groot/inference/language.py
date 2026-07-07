@@ -5,53 +5,120 @@ import torch
 from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
 from trt.rope import make_rope_rotary_cos_sin
+from trt.compile import compile_trt_module
+from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     eagle = ctx.model.backbone.eagle_model
     language = eagle.language_model
+    device, dtype = ctx.device, ctx.dtype
 
-    input_ids = ctx.inference.tokenized["input_ids"].to(ctx.device)
-    attention_mask = ctx.inference.tokenized.get("attention_mask")
-    if attention_mask is not None:
-        attention_mask = attention_mask.to(ctx.device)
-
-    # From upstream vision stage.
+    # --- upstream vision output: [B * S_visual, H_lm] ---
     image_embs = inputs["tensors"]["image_embs"]
 
-    image_token_index = getattr(eagle, "image_token_index", eagle.config.image_token_index)
+    # --- tokenized prompt ---
+    input_ids = ctx.inference.tokenized["input_ids"].to(device=device, dtype=torch.long)
+    attention_mask = ctx.inference.tokenized.get("attention_mask")
 
-    token_embs = language.get_input_embeddings()(input_ids)
-    bsz, seq_len, hidden = token_embs.shape
+    image_token_index = getattr(
+        eagle, "image_token_index", eagle.config.image_token_index
+    )
 
-    flat_embs = token_embs.reshape(bsz * seq_len, hidden)
+    # --- build packed language embeddings (splice vision rows into token embeds) ---
+    input_embs = language.get_input_embeddings()(input_ids)
+    bsz, seq_len, hidden = input_embs.shape
+
+    flat_embs = input_embs.reshape(bsz * seq_len, hidden)
     flat_ids = input_ids.reshape(bsz * seq_len)
     image_token_mask = flat_ids == image_token_index
 
     flat_image_embs = image_embs.reshape(-1, hidden).to(
         device=flat_embs.device,
-        dtype=flat_embs.dtype,
+        dtype=flat_embs.dtype,   # match embedding dtype, not hardcoded fp16
     )
-
     num_slots = int(image_token_mask.sum().item())
-    if flat_image_embs.shape[0] < num_slots:
-        raise ValueError(
-            f"Not enough image embeddings for placeholders: "
-            f"{flat_image_embs.shape[0]} embeddings for {num_slots} slots"
-        )
-
     flat_embs[image_token_mask] = flat_image_embs[:num_slots]
+
     inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
+    inputs_embeds = inputs_embeds.to(device=device, dtype=dtype).contiguous()
+
+    position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
 
     if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=ctx.device)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
 
-    position_ids = torch.arange(seq_len, device=ctx.device, dtype=torch.long).unsqueeze(0)
+    # --- config dims ---
+    cfg = language.config
+    hidden_size = int(cfg.hidden_size)
+    num_attention_heads = int(cfg.num_attention_heads)
+    num_key_value_heads = int(cfg.num_key_value_heads)
+    head_dim = int(getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads))
+
+    decoder = getattr(language, "model", language)   # Qwen3Model with .layers
+    num_layers = len(decoder.layers)
+
+    # --- trace target: manual decoder loop + lm_head (PluginAttention inside) ---
+    lm_module = CausalLMExportModule(
+        decoder,
+        language.lm_head,
+        select_layer=-1,
+    ).eval().to(device=device)
+
+    # --- flat Edge-LLM bindings ---
+    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
+        cfg,
+        seq_len,
+        device,
+        language_model=language,
+        position_ids=position_ids,
+    )
+
+    ctx_len = torch.full((bsz,), seq_len, device=device, dtype=torch.int32)
+    last_token_ids = torch.full((bsz, 1), seq_len - 1, device=device, dtype=torch.int64)
+
+    kv_caches = [
+        torch.zeros(
+            bsz,
+            2,
+            num_key_value_heads,
+            seq_len,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        for _ in range(num_layers)
+    ]
+    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)  # fresh prefill
+
+    lm_inputs = (
+        inputs_embeds,          # spliced vision rows — NOT raw input_embs
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        last_token_ids,
+        *kv_caches,
+    )
+
+    # --- patch -> compile -> restore ---
+    patched = patch_language_attention(
+        decoder,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=head_dim,
+        enable_bidirectional_prefill=0,
+    )
+    try:
+        lm_engine = compile_trt_module(
+            lm_module, lm_inputs, {**ctx.trt_settings, "use_python_runtime": True}
+        )
+    finally:
+        restore_attention(patched)
 
     return {
-        "inputs_embeds": inputs_embeds,
-        "attention_mask": attention_mask,
-        "position_ids": position_ids,
-        "image_token_mask": image_token_mask.reshape(bsz, seq_len),
+        "lm_inputs": lm_inputs,
+        "lm_module": lm_module,
+        "lm_engine": lm_engine,
     }
 
 def execute(ctx: EdgeContext, inputs: dict) -> dict:
@@ -66,54 +133,35 @@ def execute(ctx: EdgeContext, inputs: dict) -> dict:
     raise ValueError(f"unsupported execution mode: {ctx.execution_mode}")
 
 def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
-    language = ctx.model.backbone.eagle_model.language_model
-
-    # Match the parity path you validated: fp16 + final hidden.
-    inputs_embeds = inputs["inputs_embeds"].to(device=ctx.device, dtype=ctx.dtype)
-    attention_mask = inputs["attention_mask"].to(ctx.device)
-    position_ids = inputs["position_ids"].to(ctx.device)
+    lm_module = inputs["lm_module"]
+    lm_inputs = inputs["lm_inputs"]
 
     with torch.no_grad():
-        out = language(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            output_hidden_states=True,
-            return_dict=True,
-        )
+        logits, lm_hidden, prefix_k, prefix_v = lm_module(*lm_inputs)
 
     return {
         "tensors": {
-            "lm_hidden_states": out.hidden_states[-1],
-            "logits": out.logits,
+            "logits": logits,
+            "lm_hidden": lm_hidden,
+            "prefix_k": prefix_k,
+            "prefix_v": prefix_v,
         },
         "metadata": {
             "backend": "eager",
         },
     }
 
-
 def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
-    module = ctx.handles.in_memory.language
-    if module is None:
-        raise RuntimeError("in-memory TRT backend missing language module")
-
-    flat_tensors = _build_language_flat_tensors(ctx, inputs)
+    lm_engine = inputs["lm_engine"]
+    lm_inputs = inputs["lm_inputs"]
 
     with torch.no_grad():
-        out = module(*flat_tensors)
-
-    logits, lm_hidden_states, prefix_k, prefix_v = (
-            out["logits"],
-            out["lm_hidden_states"],
-            out.get("prefix_k"),
-            out.get("prefix_v"),
-        )
+        logits, lm_hidden, prefix_k, prefix_v = lm_engine(*lm_inputs)
 
     return {
         "tensors": {
             "logits": logits,
-            "lm_hidden_states": lm_hidden_states,
+            "lm_hidden": lm_hidden,
             "prefix_k": prefix_k,
             "prefix_v": prefix_v,
         },
@@ -148,94 +196,8 @@ def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
 
 def postprocess(ctx: EdgeContext, result: dict) -> dict:
     tensors = result["tensors"]
-
     ctx.inference.logits = tensors.get("logits")
-    ctx.inference.lm_hidden_states = tensors["lm_hidden_states"]
+    ctx.inference.lm_hidden = tensors["lm_hidden"]
     ctx.inference.prefix_k = tensors.get("prefix_k")
     ctx.inference.prefix_v = tensors.get("prefix_v")
-
     return result
-
-def _build_language_flat_tensors(ctx: EdgeContext, inputs: dict) -> tuple[torch.Tensor, ...]:
-    """Build the flat input tuple expected by the Edge-LLM language engine.
-
-    HF eager only needs ``language(inputs_embeds, attention_mask, position_ids)``.
-    The TRT/plugin path uses the C++ LLMEngineRunner ABI consumed by
-    ``CausalLMExportModule.forward()``:
-
-    ``(inputs_embeds, rope, ctx_len, kvcache_start_index, last_token_ids, *kv_caches)``
-    """
-
-    # Qwen3ForCausalLM wrapper on the Eagle backbone.
-    language = ctx.model.backbone.eagle_model.language_model
-    # Inner Qwen3Model that owns ``.layers`` (unwrap ForCausalLM -> model).
-    decoder = getattr(language, "model", language)
-    # Model config: hidden_size, num_attention_heads, num_key_value_heads, head_dim.
-    cfg = language.config
-
-    # Packed prompt embeddings from preprocess(): text rows with vision spliced in.
-    # Shape: [B, S, H], e.g. [1, 566, 2048]. fp16 + contiguous for plugin/TRT runtime.
-    inputs_embeds = inputs["inputs_embeds"].to(
-        device=ctx.device,
-        dtype=torch.float16,
-    ).contiguous()
-
-    # bsz: batch size (usually 1). seq_len: packed language length after image expansion.
-    bsz, seq_len, _ = inputs_embeds.shape
-    # Per-head dimension for attention and RoPE (Qwen3: cfg.head_dim, typically 128).
-    head_dim = int(getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads))
-    # GQA KV head count (may be smaller than query head count).
-    num_key_value_heads = int(cfg.num_key_value_heads)
-    # One KV cache tensor per decoder layer (e.g. 12 for GR00T language).
-    num_layers = len(decoder.layers)
-
-    # Token positions for RoPE lookup. Shape: [B, S], e.g. [[0, 1, ..., 565]].
-    position_ids = inputs["position_ids"].to(ctx.device)
-
-    # External RoPE table for PluginAttention (HF eager builds this internally).
-    # Shape: [1, max_seq_len, rotary_dim], e.g. [1, 566, 128]. Must be fp32.
-    rope_rotary_cos_sin = make_rope_rotary_cos_sin(
-        cfg,
-        seq_len,
-        ctx.device,
-        language_model=language,
-        position_ids=position_ids,
-    )
-
-    # Per-batch valid sequence length for this prefill. Shape: [B], e.g. [566].
-    # sum(attention_mask) handles padding; all-ones mask gives seq_len. int32 for plugin API.
-    ctx_len = inputs["attention_mask"].sum(dim=1).to(
-        device=ctx.device,
-        dtype=torch.int32,
-    )
-
-    # KV cache write start index. Shape [0] means fresh prefill from position 0.
-    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=ctx.device)
-    # Index of last valid token for lm_head gather. Shape: [B, 1], e.g. [[565]].
-    last_token_ids = (ctx_len - 1).reshape(bsz, 1).to(dtype=torch.int64)
-
-    # One KV buffer per layer, passed as *past_key_values to CausalLMExportModule.
-    # Per-layer shape: [B, 2, num_key_value_heads, seq_len, head_dim]
-    #   B=2 -> key + value; seq_len is cache capacity for this profile.
-    kv_caches = [
-        torch.zeros(
-            bsz,
-            2,
-            num_key_value_heads,
-            seq_len,
-            head_dim,
-            device=ctx.device,
-            dtype=torch.float16,
-        )
-        for _ in range(num_layers)
-    ]
-
-    # Tuple order must match CausalLMExportModule.forward positional args exactly.
-    return (
-        inputs_embeds,
-        rope_rotary_cos_sin,
-        ctx_len,
-        kvcache_start_index,
-        last_token_ids,
-        *kv_caches,
-    )

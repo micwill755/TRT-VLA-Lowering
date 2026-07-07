@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import torch
+import torch_tensorrt
 
 from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
 from trt.modules.export.vision import GridVisionExportModule
+from trt.compile import compile_trt_module
+from trt.plugin.plugin_utils import patch_vision_attention, restore_attention
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     """Prepare the pixel tensor and eager vision wrapper for the vision stage.
@@ -16,6 +19,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
 
     # Eagle model owns the SigLIP vision tower and projector used by GR00T.
     eagle = ctx.model.backbone.eagle_model
+    vision = eagle.vision_model
 
     # Prefer the explicit stage input, but fall back to ctx.inference scratch state.
     # Shape: [B, C, H, W], e.g. [1, 3, 224, 224].
@@ -40,7 +44,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     #   [B * S_visual, H_lm]
     # Example from your run:
     #   [512, 2048]
-    visual = GridVisionExportModule(
+    visual_module = GridVisionExportModule(
         vision_model=eagle.vision_model,
         projector=eagle.mlp1,
         sample_pixel_values=pixel_values,
@@ -49,12 +53,28 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         downsample_ratio=eagle.downsample_ratio,
         vision_kwargs={},
     ).eval().to(device=ctx.device, dtype=ctx.dtype)
-
-    # Return only stage-local prepared objects. ``visual`` is used by eager only;
-    # TRT/serialized backends ignore it and call their loaded engine handles.
+    
+    # patch vision attention
+    hidden_states = vision.vision_model.embeddings(pixel_values)
+    batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+    patched = patch_vision_attention(
+        vision.vision_model,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        name="SigLIP",
+    )
+    try:
+        trt_engine = compile_trt_module(
+            visual_module,
+            (pixel_values,),
+            {**ctx.trt_settings, "use_python_runtime": True},
+        )
+    finally:
+        restore_attention(patched)
     return {
         "pixel_values": pixel_values,
-        "visual": visual,
+        "visual_module": visual_module,
+        "trt_engine": trt_engine,
     }
 
 def execute(ctx: EdgeContext, inputs: dict) -> dict:
@@ -70,14 +90,8 @@ def execute(ctx: EdgeContext, inputs: dict) -> dict:
     raise ValueError(f"unsupported execution mode: {ctx.execution_mode}")
 
 def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
-    # Eager uses the Python wrapper from preprocess.
-    visual = inputs["visual"]
-
-    # Pixel tensor shape: [B, C, H, W].
+    visual = inputs["visual_module"]
     pixel_values = inputs["pixel_values"]
-
-    # Run SigLIP + projector in PyTorch.
-    # Output shape: [B * S_visual, H_lm], e.g. [512, 2048].
     image_embs = visual(pixel_values)
 
     return {
@@ -86,6 +100,22 @@ def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
         },
         "metadata": {
             "backend": "eager",
+        },
+    }
+
+def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
+    trt_engine = inputs["trt_engine"]
+    pixel_values = inputs["pixel_values"].contiguous()
+
+    with torch.no_grad():
+        image_embs = trt_engine(pixel_values)
+
+    return {
+        "tensors": {
+            "image_embs": image_embs,
+        },
+        "metadata": {
+            "backend": "in_memory_trt",
         },
     }
 
@@ -110,31 +140,6 @@ def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
         },
     }
 
-def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
-    # In-memory backend is the Torch-TensorRT module created during same-process compile.
-    module = ctx.handles.in_memory.vision
-    if module is None:
-        raise RuntimeError("in-memory TRT backend missing vision module")
-
-    # Engine input shape matches exported vision ABI: [B, C, H, W] fp16.
-    pixel_values = inputs["pixel_values"].contiguous()
-
-    # Engine output shape matches eager wrapper: [B * S_visual, H_lm].
-    image_embs = module(pixel_values)
-
-    return {
-        "tensors": {
-            "image_embs": image_embs,
-        },
-        "metadata": {
-            "backend": "in_memory_trt",
-        },
-    }
-
 def postprocess(ctx: EdgeContext, result: dict) -> dict:
-    tensors = result["tensors"]
-
-    ctx.inference.pixel_values = tensors.get("pixel_values")
-    ctx.inference.image_embs = tensors.get("image_embs")
-
+    ctx.inference.image_embs = result["tensors"]["image_embs"]
     return result
