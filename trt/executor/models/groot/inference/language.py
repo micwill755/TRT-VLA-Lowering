@@ -99,7 +99,26 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         *kv_caches,
     )
 
-    # --- patch -> compile -> restore ---
+
+    return {
+        "lm_inputs": lm_inputs,
+        "lm_module": lm_module,
+        "decoder": decoder,
+        "hidden_size": hidden_size,
+        "num_attention_heads": num_attention_heads,
+        "num_key_value_heads": num_key_value_heads,
+        "head_dim": head_dim,
+    }
+
+def compile(ctx: EdgeContext, inputs: dict) -> dict:
+    lm_module = inputs["lm_module"]
+    lm_inputs = inputs["lm_inputs"]
+    decoder = inputs["decoder"]
+    hidden_size = inputs["hidden_size"]
+    num_attention_heads = inputs["num_attention_heads"]
+    num_key_value_heads = inputs["num_key_value_heads"]
+    head_dim = inputs["head_dim"]
+
     patched = patch_language_attention(
         decoder,
         hidden_size=hidden_size,
@@ -110,15 +129,24 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     )
     try:
         lm_engine = compile_trt_module(
-            lm_module, lm_inputs, {**ctx.trt_settings, "use_python_runtime": True}
+            lm_module,
+            lm_inputs,
+            {**ctx.trt_settings, "use_python_runtime": True},
         )
     finally:
         restore_attention(patched)
 
     return {
-        "lm_inputs": lm_inputs,
-        "lm_module": lm_module,
         "lm_engine": lm_engine,
+    }
+
+def load(ctx: EdgeContext, inputs: dict) -> dict:
+    serialized_language = SerializedGrootLanguage(
+        SerializedTRTEngine(ctx.engine_root / "language")
+    )
+    ctx.handles.serialized.language = serialized_language
+    return {
+        "serialized_engine": serialized_language,
     }
 
 def execute(ctx: EdgeContext, inputs: dict) -> dict:
@@ -171,23 +199,29 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
     }
 
 def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
-    module = ctx.handles.serialized.language
+    module = inputs.get("serialized_engine") or ctx.handles.serialized.language
     if module is None:
         raise RuntimeError("serialized TRT backend missing language module")
 
-    flat_tensors = _build_language_flat_tensors(ctx, inputs)
+    # SerializedGrootLanguage takes the same positional lm_inputs tuple built in
+    # preprocess and returns either logits or (logits, lm_hidden).
+    lm_inputs = inputs["lm_inputs"]
 
     with torch.no_grad():
-        out = module(*flat_tensors)
+        out = module(*lm_inputs)
 
-    logits, lm_hidden_states, prefix_k, prefix_v = _unpack_language_outputs(out)
+    if isinstance(out, (tuple, list)):
+        logits = out[0]
+        lm_hidden = out[1] if len(out) > 1 else out[0]
+    else:
+        logits, lm_hidden = None, out
 
     return {
         "tensors": {
             "logits": logits,
-            "lm_hidden_states": lm_hidden_states,
-            "prefix_k": prefix_k,
-            "prefix_v": prefix_v,
+            "lm_hidden": lm_hidden,
+            "prefix_k": None,
+            "prefix_v": None,
         },
         "metadata": {
             "backend": "serialized_trt",

@@ -17,8 +17,6 @@ import torch.nn as nn
 from trt.config.execution_mode import ExecutionMode
 from trt.profile import InMemoryHandles, SerializedHandles, VLAProfile
 
-
-
 @dataclass
 class InferenceState:
     """Mutable scratch space for one end-to-end inference pass.
@@ -128,7 +126,6 @@ class EdgeContext:
     # Filled as pipelines and stages run.
     artifacts: dict[str, StageResult] = field(default_factory=dict)
     export_state: dict[str, Any] = field(default_factory=dict)
-    handles: EdgeHandles = field(default_factory=EdgeHandles)
     benchmark: BenchmarkResult | None = None
     actions: torch.Tensor | None = None
 

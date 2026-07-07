@@ -8,6 +8,8 @@ from trt.context import EdgeContext
 from trt.modules.export.vision import GridVisionExportModule
 from trt.compile import compile_trt_module
 from trt.plugin.plugin_utils import patch_vision_attention, restore_attention
+from trt.executor.models.groot.load.serialize import SerializedGrootVision
+from trt.serialize import SerializedTRTEngine
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     """Prepare the pixel tensor and eager vision wrapper for the vision stage.
@@ -54,9 +56,19 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         vision_kwargs={},
     ).eval().to(device=ctx.device, dtype=ctx.dtype)
     
+    return {
+        "pixel_values": pixel_values,
+        "visual_module": visual_module
+    }
+
+def compile(ctx: EdgeContext, inputs: dict) -> dict:
+    eagle = ctx.model.backbone.eagle_model
+    vision = eagle.vision_model
+
     # patch vision attention
     hidden_states = vision.vision_model.embeddings(pixel_values)
     batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+    
     patched = patch_vision_attention(
         vision.vision_model,
         batch_size=batch_size,
@@ -71,10 +83,17 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         )
     finally:
         restore_attention(patched)
+    
     return {
-        "pixel_values": pixel_values,
-        "visual_module": visual_module,
         "trt_engine": trt_engine,
+    }
+
+def load(ctx: EdgeContext, inputs: dict) -> dict:
+    serialized_vision = SerializedGrootVision(
+        SerializedTRTEngine(ctx.engine_root / "visual")
+    )
+    return {
+        "serialized_engine": serialized_vision,
     }
 
 def execute(ctx: EdgeContext, inputs: dict) -> dict:
@@ -120,16 +139,11 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
     }
 
 def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
-    # Serialized backend is the loaded ``visual.engine`` runner.
-    module = ctx.handles.serialized.vision
-    if module is None:
-        raise RuntimeError("serialized TRT backend missing vision module")
-
-    # Engine input shape matches exported vision ABI: [B, C, H, W] fp16.
+    module = inputs["serialized_engine"]
     pixel_values = inputs["pixel_values"].contiguous()
 
-    # Engine output shape matches eager wrapper: [B * S_visual, H_lm].
-    image_embs = module(pixel_values)
+    with torch.no_grad():
+        image_embs = module(pixel_values)
 
     return {
         "tensors": {

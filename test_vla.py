@@ -17,6 +17,7 @@ from trt.modules.export.vision import GridVisionExportModule
 from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
 from trt.modules.export.diffusion import TRTDynamicCategorySpecificMLP, StaticActionVelocityStep, GrootDiTStepEncoder
 
+from trt.measure import parity
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
 from trt.utils import force_hf_attention
@@ -609,17 +610,5 @@ def main():
     parity("diffusion step A vs C", eager_velocity, trt_velocity)
     return 0
 
-def parity(name, a, b):
-    a = a.float()
-    b = b.float()
-    diff = (a - b).abs()
-    rel_l2 = (a - b).norm() / b.norm().clamp_min(1e-8)
-    rel_mean_pct = diff.mean() / b.abs().mean().clamp_min(1e-8) * 100
-    close = torch.isclose(a, b, rtol=1e-2, atol=1e-2).float().mean() * 100
-    print(
-        f"{name:<22} mean_abs={diff.mean():.6f}  max_abs={diff.max():.6f}  "
-        f"rel_l2={rel_l2:.4f}  rel_mean%={rel_mean_pct:.2f}  close%={close:.1f}"
-    )
-    
 if __name__ == "__main__":
     SystemExit(main())

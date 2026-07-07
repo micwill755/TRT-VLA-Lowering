@@ -7,8 +7,6 @@ from trt.io_spec import GROOT_EDGE_IO
 _I = "trt.executor.models.groot.inference"
 
 GROOT_INFERENCE_PIPELINE = PipelineConfig(
-    model_type="Gr00tN1d7",
-    io=GROOT_EDGE_IO,
     hooks={
         preprocess=f"{_I}.process:preprocess",
         preprocess=f"{_I}.process:postprocess",
@@ -21,8 +19,11 @@ GROOT_INFERENCE_PIPELINE = PipelineConfig(
             runner="trt.runner.inference:InferenceRunner",
             engine_subdir="visual",
             hooks={
-                preprocess=f"{_I}.vision:preprocess",
-                execute=f"{_I}.vision:execute",
+                "preprocess": f"{_I}.vision:preprocess",
+                "compile":    f"{_I}.vision:compile",
+                "load":       f"{_I}.vision:load",
+                "execute":    f"{_I}.vision:execute",
+                "postprocess": f"{_I}.vision:postprocess",
             },
         ),
         StageConfig(

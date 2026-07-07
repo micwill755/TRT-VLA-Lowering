@@ -10,7 +10,7 @@ from trt.config.stage_config import StageConfig
 from trt.context import EdgeContext
 from trt.hooks.resolve import resolve
 
-class BaseRunner:
+class InferenceRunner:
     def __init__(self, stage_cfg: StageConfig):
         self.stage_cfg = stage_cfg
         self.hooks = stage_cfg.hooks
