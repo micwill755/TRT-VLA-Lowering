@@ -20,6 +20,9 @@ from trt.io_spec import VLA_VISION_IO
 
 logger = logging.getLogger(__name__)
 
+VIT_ENGINE_INPUT_NAME = VLA_VISION_IO.input_names[0]
+VIT_ENGINE_OUTPUT_NAME = VLA_VISION_IO.output_names[0]
+
 def nchw_to_hwc(pixel_values: torch.Tensor) -> torch.Tensor:
     """Convert LeRobot/HF NCHW pixels to VitRunner HWC layout.
 

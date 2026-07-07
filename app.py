@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+import logging
+import torch_tensorrt
+
 from pathlib import Path
+
+torch_tensorrt.logging.set_level(logging.WARNING)
 
 _TEST_ROOT = Path(__file__).resolve().parent
 if str(_TEST_ROOT) not in sys.path:
