@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import torch
-import torch_tensorrt
 
-from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
+from trt.config.execution_mode import ExecutionMode
 from trt.modules.export.vision import GridVisionExportModule
 from trt.compile import compile_trt_module
 from trt.plugin.plugin_utils import patch_vision_attention, restore_attention
 from trt.executor.models.groot.load.serialize import SerializedGrootVision
 from trt.serialize import SerializedTRTEngine
+
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     """Prepare the pixel tensor and eager vision wrapper for the vision stage.

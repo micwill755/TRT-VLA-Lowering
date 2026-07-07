@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import torch
-import torch_tensorrt
 
-from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
 from trt.modules.export.vision import GridVisionExportModule
-from trt.compile import compile_trt_module
 from trt.plugin.plugin_utils import patch_vision_attention, restore_attention
-from trt.serialize import SerializedTRTEngine
 from trt.compile import save_trt_engine_module
-from trt.vision import (
-    nchw_to_hwc,
-)
+from trt.vision import nchw_to_hwc
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     eagle = ctx.model.backbone.eagle_model

@@ -8,12 +8,10 @@ from typing import Any
 from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.groot import GrootPolicy
 from lerobot.policies.groot.configuration_groot import GrootConfig
-from lerobot.policies.groot.groot_n1 import DEFAULT_TOKENIZER_ASSETS_REPO
-from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_STATE
 from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
 from trt.data import create_pil_messages, prepare_model_inputs
-from trt.io_spec import GROOT_EDGE_IO
 from trt.profile import VLAProfile
 from trt.utils import force_hf_attention
 

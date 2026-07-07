@@ -119,5 +119,6 @@ Related pages
 - :doc:`action-rollout` — ``sample_actions_raw``, adapters, and the multi-step loop
   outside the compiled engine.
 
-*Files:* ``trt/modules/export/diffusion.py``, ``trt/action_rollout.py``,
+*Files:* ``trt/modules/export/diffusion.py``,
+``trt/executor/models/groot/inference/diffusion.py``,
 ``trt/executor/models/groot/export/diffusion.py``

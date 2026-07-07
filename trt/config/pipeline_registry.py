@@ -1,4 +1,4 @@
-"""Registry mapping model types to export, inference, and benchmark pipelines.
+"""Registry mapping model types to export and inference pipelines.
 
 Model packages register their stage configs at import time via
 ``register_*_pipeline``. Lookups use the profile ``name`` (e.g. ``gr00t``).
@@ -11,11 +11,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TypeAlias
 
-from trt.config.benchmark_config import BenchmarkPipelineConfig
 from trt.config.stage_config import PipelineConfig
 from trt.executor.models.groot.export.pipeline import GROOT_PIPELINE
 from trt.executor.models.groot.inference.pipeline import GROOT_INFERENCE_PIPELINE
-from trt.executor.benchmark.pipeline import DEFAULT_BENCHMARK
 
 PipelineEntry: TypeAlias = PipelineConfig | Callable[[], PipelineConfig]
 
@@ -67,23 +65,6 @@ def get_inference_pipeline(model_type: str) -> PipelineConfig:
         known = sorted(_INFERENCE)
         raise KeyError(f"No inference pipeline for {model_type!r}. Known: {known}")
     return _resolve(_INFERENCE[key])
-
-
-def get_benchmark_pipeline(model_type: str | None = None) -> BenchmarkPipelineConfig:
-    """Return the benchmark pipeline config.
-
-    Currently model-agnostic; ``model_type`` is ignored and
-    ``DEFAULT_BENCHMARK`` is always returned.
-    """
-    return DEFAULT_BENCHMARK
-
-
-def get_pipeline_for_profile(profile) -> PipelineConfig:
-    """Resolve the export pipeline from a profile instance."""
-    name = getattr(profile, "name", None)
-    if not name:
-        raise ValueError(f"{type(profile).__name__} has no name")
-    return get_export_pipeline(name)
 
 
 def _register_builtin() -> None:

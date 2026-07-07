@@ -1,31 +1,9 @@
-import math
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lerobot.policies.pi05.modeling_pi05 import get_safe_dtype
-from trt.prefix_cache import PrefixKVCache, SmolVLAPrefixPastLayers
-
-def create_sinusoidal_pos_embedding(  # see openpi `create_sinusoidal_pos_embedding` (exact copy)
-    time: torch.Tensor, dimension: int, min_period: float, max_period: float, device="cpu"
-) -> torch.Tensor:
-    """Computes sine-cosine positional embedding vectors for scalar positions."""
-    if dimension % 2 != 0:
-        raise ValueError(f"dimension ({dimension}) must be divisible by 2")
-
-    if time.ndim != 1:
-        raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
-
-    dtype = get_safe_dtype(torch.float64, device.type)
-    fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
-    period = min_period * (max_period / min_period) ** fraction
-
-    # Compute the outer product
-    scaling_factor = 1.0 / period * 2 * math.pi
-    sin_input = scaling_factor[None, :] * time[:, None]
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
 
 class TRTFixedCategorySpecificLinearExportModule(nn.Module):
     """Freeze one GR00T embodiment-specific Linear into a normal Linear.
@@ -99,23 +77,6 @@ class TRTDynamicCategorySpecificLinearExportModule(nn.Module):
         # bias: [B, 1, output_dim], broadcast over T
         return out + selected_b.unsqueeze(1)
 
-class TRTFixedCategorySpecificMLP(nn.Module):
-    def __init__(self, mlp: nn.Module, embodiment_id: torch.Tensor):
-        super().__init__()
-        self.layer1 = TRTFixedCategorySpecificLinearExportModule(
-            mlp.layer1,
-            embodiment_id,
-        )
-        self.layer2 = TRTFixedCategorySpecificLinearExportModule(
-            mlp.layer2,
-            embodiment_id,
-        )
-
-    def forward(self, x, embodiment_id):
-        # Keep embodiment_id in the signature so StaticActionVelocityStep does
-        # not need to change. It is ignored because weights are already fixed.
-        hidden = F.relu(self.layer1(x))
-        return self.layer2(hidden)
 
 class TRTDynamicCategorySpecificMLPExportModule(nn.Module):
     """Dynamic two-layer category-specific MLP used by GR00T.
@@ -268,146 +229,6 @@ class StaticActionVelocityStepExportModule(nn.Module):
 
         return self.step_encoder.process_velocity(velocity)
 
-class PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
-    def __init__(self, action_embedder: nn.Module):
-        super().__init__()
-        self.action_embedder = action_embedder
-
-    def forward(
-        self,
-        x_t,
-        timestep,
-        prefix_k,
-        prefix_v,
-        position_ids,
-        attention_mask,
-    ):
-        suffix_embs = self.action_embedder(x_t, timestep)
-
-        expert_args = ()
-        expert_kwargs = {
-            "inputs_embeds": suffix_embs,
-            "position_ids": position_ids,
-            "attention_mask": attention_mask,
-            "past_key_values": PrefixKVCache(prefix_k, prefix_v),
-            "use_cache": False,
-        }
-
-        decoder_args = ()
-        decoder_kwargs = {}
-
-        return expert_args, expert_kwargs, decoder_args, decoder_kwargs
-
-class PI05PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
-    def __init__(self, core):
-        super().__init__()
-        self.action_in_proj = core.action_in_proj
-        self.time_mlp_in = core.time_mlp_in
-        self.time_mlp_out = core.time_mlp_out
-        self.config = core.config
-        self.hidden_size = core.action_in_proj.out_features
-
-    def forward(
-        self,
-        x_t,
-        timestep,
-        prefix_k,
-        prefix_v,
-        position_ids,
-        attention_mask,
-    ):
-        suffix_embs = self.action_in_proj(x_t)
-
-        time_emb = create_sinusoidal_pos_embedding(
-            timestep,
-            self.hidden_size,
-            min_period=self.config.min_period,
-            max_period=self.config.max_period,
-            device=timestep.device,
-        ).to(dtype=suffix_embs.dtype)
-
-        adarms_cond = self.time_mlp_in(time_emb)
-        adarms_cond = F.silu(adarms_cond)
-        adarms_cond = self.time_mlp_out(adarms_cond)
-        adarms_cond = F.silu(adarms_cond)
-
-        expert_kwargs = {
-            "inputs_embeds": suffix_embs,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "past_key_values": PrefixKVCache(prefix_k, prefix_v),
-            "use_cache": False,
-            "adarms_cond": adarms_cond,
-        }
-
-        return (), expert_kwargs, (), {}
-
-class SmolVLAPrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
-    def __init__(self, core):
-        super().__init__()
-        self.action_in_proj = core.action_in_proj
-        self.action_time_mlp_in = core.action_time_mlp_in
-        self.action_time_mlp_out = core.action_time_mlp_out
-        self.config = core.config
-        self.hidden_size = core.vlm_with_expert.expert_hidden_size
-
-    def forward(self, x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask):
-        action_emb = self.action_in_proj(x_t)
-
-        time_emb = create_sinusoidal_pos_embedding(
-            timestep,
-            self.hidden_size,
-            min_period=self.config.min_period,
-            max_period=self.config.max_period,
-            device=timestep.device,
-        ).to(dtype=action_emb.dtype)
-
-        time_emb = time_emb[:, None, :].expand_as(action_emb)
-        suffix_embs = torch.cat([action_emb, time_emb], dim=-1)
-        suffix_embs = self.action_time_mlp_out(F.silu(self.action_time_mlp_in(suffix_embs)))
-
-        if attention_mask.dtype != torch.bool:
-            attention_mask = attention_mask == 0
-
-        expert_kwargs = {
-            "inputs_embeds": [None, suffix_embs],
-            "position_ids": position_ids,
-            "attention_mask": attention_mask,
-            "past_key_values": SmolVLAPrefixPastLayers(prefix_k, prefix_v),
-            "use_cache": True,
-            "fill_kv_cache": False,
-        }
-        return (), expert_kwargs, (), {}
-
-    def get_action_hidden(self, expert_out, output_tokens: int):
-        outputs_embeds, _ = expert_out
-        suffix_out = outputs_embeds[1]
-        return suffix_out[:, -output_tokens:]
-
-class AlpamayoPrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
-    def __init__(self, model):
-        super().__init__()
-        self.action_in_proj = model.action_in_proj
-        self.action_space_dims = model.action_space.get_action_space_dims()
-        self.n_diffusion_tokens = self.action_space_dims[0]
-
-    def forward(self, x_t, timestep, prefix_k, prefix_v, position_ids, attention_mask):
-        suffix_embs = self.action_in_proj(x_t, timestep)
-
-        if suffix_embs.dim() == 2:
-            suffix_embs = suffix_embs.view(x_t.shape[0], self.n_diffusion_tokens, -1)
-
-        expert_kwargs = {
-            "inputs_embeds": suffix_embs,
-            "position_ids": position_ids,
-            "attention_mask": attention_mask,
-            "past_key_values": PrefixKVCache(prefix_k, prefix_v),
-            "use_cache": False,
-        }
-        return (), expert_kwargs, (), {}
-
-    def process_velocity(self, velocity):
-        return velocity.view(-1, *self.action_space_dims)
 
 class GrootDiTStepEncoderExportModule(ActionStepEncoderExportModule):
     def __init__(self, action_head, embodiment_id: torch.Tensor | None = None):

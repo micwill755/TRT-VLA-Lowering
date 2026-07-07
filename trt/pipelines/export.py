@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 import torch
 
-from trt.config.stage_config import PipelineConfig
 from trt.context import EdgeContext
 from trt.hooks.resolve import resolve
 

@@ -1,6 +1,4 @@
-import ctypes
 import json
-import os
 import pathlib
 from contextlib import contextmanager
 from inspect import Parameter, signature
@@ -340,29 +338,3 @@ def save_trt_engine_module(
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
     return engine_path
-
-
-def dump_tensor_bin(path: pathlib.Path, tensor: torch.Tensor) -> None:
-    """Write a contiguous CPU tensor as a raw binary blob."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cpu_tensor = tensor.detach().contiguous().cpu()
-    nbytes = cpu_tensor.numel() * cpu_tensor.element_size()
-    path.write_bytes(ctypes.string_at(cpu_tensor.data_ptr(), nbytes))
-
-
-def _fixture_filename(name: str) -> str:
-    return name if name.endswith(".bin") else f"{name}.bin"
-
-
-def dump_edge_fixture(
-    engine_root: str | pathlib.Path,
-    tensors: dict[str, torch.Tensor],
-    *,
-    fixture_subdir: str | None = None,
-) -> pathlib.Path:
-    """Write named tensor blobs under engine_root/fixtures/."""
-    subdir = fixture_subdir or f"pid_{os.getpid()}"
-    fixture_dir = pathlib.Path(engine_root) / "fixtures" / subdir
-    for name, tensor in tensors.items():
-        dump_tensor_bin(fixture_dir / _fixture_filename(name), tensor)
-    return fixture_dir

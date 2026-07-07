@@ -8,7 +8,7 @@ The compiled **action engine** implements exactly **one** denoising step:
    velocity = f(x_t, timestep, context)
 
 It does not initialize noise, choose timesteps, integrate velocities, or loop.
-That outer **rollout** lives in ``trt/action_rollout.py`` and mirrors the C++
+That outer **rollout** lives in ``trt/executor/models/groot/inference/diffusion.py`` and mirrors the C++
 ``ActionRunner`` loop at runtime.
 
 
@@ -230,7 +230,7 @@ When you can skip rollout
 -------------------------
 
 For a quick one-off GR00T script you can call ``action_head.get_action`` directly
-and never touch ``action_rollout.py``.
+and never touch the groot inference diffusion rollout helper.
 
 Use rollout when you need to:
 
@@ -247,4 +247,5 @@ Related pages
 - :doc:`components` — ``StaticActionVelocityStepExportModule`` and step encoders.
 - :doc:`groot-example` — tensor shapes for one GR00T denoising step.
 
-*Files:* ``trt/action_rollout.py``, ``trt/executor/models/groot/inference/action.py``
+*Files:* ``trt/executor/models/groot/inference/diffusion.py``,
+``trt/executor/models/groot/export/diffusion.py``

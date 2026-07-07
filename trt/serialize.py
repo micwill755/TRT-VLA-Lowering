@@ -4,15 +4,6 @@ import json
 import pathlib
 
 import torch
-from dataclasses import dataclass
-from typing import Any
-
-
-@dataclass(frozen=True)
-class SerializedModuleSpec:
-    name: str
-    engine_subdir: str
-    wrapper_cls: type
 
 
 class SerializedTRTEngine:
@@ -151,24 +142,6 @@ def _trt_dtype_to_torch(dtype) -> torch.dtype:
 def load_engine_config(engine_root: pathlib.Path, component: str) -> dict:
     with (engine_root / component / "config.json").open() as f:
         return json.load(f)
-
-
-def load_serialized_modules(
-    engine_root,
-    *,
-    specs: tuple[SerializedModuleSpec, ...],
-) -> tuple[Any, ...]:
-    from trt.plugin.plugin_utils import load_plugins_for_trt
-
-    load_plugins_for_trt()
-
-    engine_root = pathlib.Path(engine_root)
-    modules = []
-    for spec in specs:
-        engine_dir = engine_root / spec.engine_subdir
-        engine = SerializedTRTEngine(engine_dir)
-        modules.append(spec.wrapper_cls(engine))
-    return tuple(modules)
 
 
 class SerializedPositionalEngine:

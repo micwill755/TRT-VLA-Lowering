@@ -10,7 +10,6 @@ KV cache updates happen in-place on ``past_key_values_*`` inputs; prefix K/V are
 stacked views exported for the action head.
 """
 
-import copy
 import logging
 import pathlib
 from dataclasses import dataclass, field
@@ -21,12 +20,11 @@ import torch.nn as nn
 import torch_tensorrt
 
 from trt.compile import compile_trt_module, save_trt_engine_module
-from trt.io_spec import ComponentIOSpec, VLA_LANGUAGE_IO
+from trt.io_spec import ComponentIOSpec
 from trt.modules.export.language import (
     CausalLMExportModule,
     _as_tensor,
     gather_last_token_hidden,
-    ContextProjectionExportModule
 )
 from trt.rope import (
     config_to_dict,
