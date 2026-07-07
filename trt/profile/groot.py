@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+import torch
+
 from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.groot import GrootPolicy
 from lerobot.policies.groot.configuration_groot import GrootConfig
@@ -53,6 +55,11 @@ class GrootProfile(VLAProfile):
         self.lm = self.model.backbone.eagle_model.language_model
         self.vision = self.model.backbone.eagle_model.vision_model
         self.action = self.model.action_head
+
+        # GR00T ships bf16; the export/benchmark pipeline runs everything in fp16
+        # (kv caches, inputs_embeds, engines). Cast the model so the eager
+        # reference matches the fp16 TRT engines (mirrors test_vla_gr00t_e2e.py).
+        self.model.to(dtype=torch.float16)
 
         force_hf_attention(self.vision, "eager")
         force_hf_attention(self.lm, "eager")

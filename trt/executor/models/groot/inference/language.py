@@ -17,6 +17,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
 
     eagle = ctx.model.backbone.eagle_model
     language = eagle.language_model
+    language = language.to(device=ctx.device, dtype=ctx.dtype).eval()
 
     # --- upstream vision output: [B * S_visual, H_lm] ---
     image_embs = inputs["tensors"]["image_embs"]
