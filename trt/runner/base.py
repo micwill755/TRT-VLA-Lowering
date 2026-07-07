@@ -21,13 +21,13 @@ class InferenceRunner:
 
         # if the stage has a preprocess function, make sure we update inputs
         prepared = inputs 
-        if self.hooks.preprocess:
-            prepared = resolve(self.hooks.preprocess)(ctx)
+        if self.hooks.get("preprocess"):
+            prepared = resolve(self.hooks["preprocess"])(ctx)
 
-        result = resolve(self.hooks.execute)(ctx, prepared)
+        result = resolve(self.hooks["execute"])(ctx, prepared)
 
-        if self.hooks.postprocess:
-            result = resolve(self.hooks.postprocess)(ctx, result)
+        if self.hooks.get("postprocess"):
+            result = resolve(self.hooks["postprocess"])(ctx, result)
 
         execution_time = time.perf_counter() - t0
         print("Runner: execution complete in {}", execution_time)

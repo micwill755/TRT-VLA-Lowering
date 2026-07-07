@@ -21,8 +21,8 @@ class Pipeline:
         
         t0 = time.perf_counter()
 
-        if self.hooks.preprocess:
-            resolve(self.hooks.preprocess)(ctx)
+        if self.hooks.get("preprocess"):
+            resolve(self.hooks["preprocess"])(ctx)
 
         result = {}
         stage_outputs = {}
@@ -34,8 +34,8 @@ class Pipeline:
             stg_output = runner.run(ctx, inputs)
             stage_outputs[stage_cfg.stage_id] = stg_output
 
-        if self.hooks.postprocess:
-            result = resolve(self.hooks.postprocess)(ctx, result)
+        if self.hooks.get("postprocess"):
+            result = resolve(self.hooks["postprocess"])(ctx, result)
 
         execution_time = time.perf_counter() - t0
         print("Pipeline complete in {}", execution_time)

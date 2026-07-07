@@ -1,50 +1,68 @@
 from __future__ import annotations
 
-import time
-
-from trt.config.benchmark_config import BenchmarkPipelineConfig
 from trt.context import BenchmarkResult, EdgeContext
-from trt.measure import print_timing
+from trt.config.execution_mode import ExecutionMode
+from trt.config.pipeline_registry import get_inference_pipeline
+from trt.executor.models.groot.inference.pipeline import STAGE_PARITY_TENSORS
+from trt.measure import parity
+from trt.pipelines.inference import InferencePipeline
+
+SEED = 42
+
+_SERIALIZED_ENGINE_DIRS = ("visual", "language", "action_context", "action")
+
+def _has_serialized(ctx: EdgeContext) -> bool:
+    """True when all serialized engine directories exist under ``engine_root``."""
+    return all((ctx.engine_root / name).exists() for name in _SERIALIZED_ENGINE_DIRS)
+
+def _run_inference(ctx: EdgeContext, mode: ExecutionMode) -> None:
+    ctx.execution_mode = mode
+    ctx.inference.seed = SEED
+    ctx.stage_results.clear()
+    InferencePipeline(get_inference_pipeline(ctx.profile.name)).run(ctx)
+
+def _collect_stage_tensors(ctx: EdgeContext, pipeline_cfg, backend: str) -> None:
+    """Snapshot each stage's output tensors under ``backend`` for later parity."""
+    for stage_cfg in pipeline_cfg.stages:
+        result = ctx.stage_results.get(stage_cfg.stage_id)
+        if not result:
+            continue
+        tensors = result.get("tensors", {})
+        if tensors:
+            ctx.benchmark.record_stage(backend, stage_cfg.stage_name, tensors)
+
+def report_stage_parity(ctx: EdgeContext, reference: str = ExecutionMode.EAGER.value) -> None:
+    stage_tensors = ctx.benchmark.stage_tensors if ctx.benchmark else {}
+    ref = stage_tensors.get(reference)
+    if not ref:
+        return
+
+    for backend, stage_map in stage_tensors.items():
+        if backend == reference:
+            continue
+        print(f"\n=== stage parity: {reference} vs {backend} ===")
+        for stage_name, tensor_name in STAGE_PARITY_TENSORS.items():
+            a = ref.get(stage_name, {}).get(tensor_name)
+            b = stage_map.get(stage_name, {}).get(tensor_name)
+            if a is None or b is None:
+                continue
+            parity(f"{stage_name}:{tensor_name}", a, b)
 
 class BenchmarkPipeline:
-    def __init__(self, config: BenchmarkPipelineConfig):
+    def __init__(self, config=None):
         self.config = config
 
     def run(self, ctx: EdgeContext) -> BenchmarkResult:
-        if hooks.preprocess:
-            resolve(hooks.preprocess)(ctx)
-        
-        for stage_cfg in self.config.stages:
-            print("Executing {}".format(stage_cfg.name))
-            stg_input = stg_output
-            runner = resolve(stage_cfg.runner)(stage_cfg)
-            stg_output = runner.run(ctx, stg_input)
-        
-        if hooks.postprocess:
-            resolve(hooks.postprocess)(ctx)
-        
-        '''result = BenchmarkResult()
-        warmup = int(getattr(ctx.args, "warmup", 3))
-        iterations = int(getattr(ctx.args, "num_iterations", 12))
+        if ctx.benchmark is None:
+            ctx.benchmark = BenchmarkResult()
 
-        for iter_idx in range(iterations):
-            for stage in self.config.stages:
-                if not stage.enabled(ctx):
-                    continue
-                t0 = time.perf_counter()
-                stage.run(ctx)
-                result.record(stage.name, time.perf_counter() - t0)
-                if iter_idx == iterations - 1:
-                    if ctx.actions is not None:
-                        result.record_actions(stage.name, ctx.actions)
-                    if ctx.inference.image_embs is not None:
-                        result.record_image_embs(stage.name, ctx.inference.image_embs)
+        pipeline_cfg = get_inference_pipeline(ctx.profile.name)
 
-        ctx.benchmark = result
-        for name, samples in result.timings.items():
-            if len(samples) > warmup:
-                print_timing(name, [s * 1000 for s in samples[warmup:]])
-        self.config.hooks.report(ctx)
-        return result'''
-        pass
+        for mode in (ExecutionMode.EAGER, ExecutionMode.IN_MEMORY, ExecutionMode.SERIALIZED):
+            if mode is ExecutionMode.SERIALIZED and not _has_serialized(ctx):
+                continue
+            _run_inference(ctx, mode)
+            _collect_stage_tensors(ctx, pipeline_cfg, mode.value)
 
+        report_stage_parity(ctx)
+        return ctx.benchmark

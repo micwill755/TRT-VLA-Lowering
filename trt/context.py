@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 from trt.config.execution_mode import ExecutionMode
-from trt.profile import InMemoryHandles, SerializedHandles, VLAProfile
+from trt.profile import VLAProfile
 
 @dataclass
 class InferenceState:
@@ -56,19 +56,6 @@ class StageResult:
 
 
 @dataclass
-class EdgeHandles:
-    """Loaded TRT runners for in-memory and serialized execution.
-
-    Export may populate ``in_memory`` handles for same-process TRT runs.
-    :class:`LoadPipeline` fills ``serialized`` from ``engine_root`` for
-    benchmark and parity checks against eager PyTorch.
-    """
-
-    in_memory: InMemoryHandles = field(default_factory=InMemoryHandles)
-    serialized: SerializedHandles = field(default_factory=SerializedHandles)
-
-
-@dataclass
 class BenchmarkResult:
     """Timing and action outputs collected across benchmark stages.
 
@@ -79,6 +66,8 @@ class BenchmarkResult:
     timings: dict[str, list[float]] = field(default_factory=dict)
     actions: dict[str, torch.Tensor] = field(default_factory=dict)
     image_embs: dict[str, torch.Tensor] = field(default_factory=dict)
+    # backend -> stage_name -> tensor_name -> tensor (parity across execution modes)
+    stage_tensors: dict[str, dict[str, dict[str, torch.Tensor]]] = field(default_factory=dict)
 
     def record(self, backend: str, seconds: float) -> None:
         self.timings.setdefault(backend, []).append(seconds)
@@ -89,6 +78,11 @@ class BenchmarkResult:
     def record_image_embs(self, backend: str, image_embs: torch.Tensor) -> None:
         self.image_embs[backend] = image_embs.detach()
 
+    def record_stage(self, backend: str, stage_name: str, tensors: dict[str, torch.Tensor]) -> None:
+        self.stage_tensors.setdefault(backend, {}).setdefault(stage_name, {}).update({
+            k: v.detach() for k, v in tensors.items() if v is not None
+        })
+
 
 @dataclass
 class EdgeContext:
@@ -97,7 +91,7 @@ class EdgeContext:
     Created once by the orchestrator with the loaded profile, policy, model, one
     prepared sample batch (``model_inputs``), and CLI args. Passed through
     export, load, and benchmark pipelines; stages read inputs from it and write
-    intermediate results back (``export_state``, ``artifacts``, ``handles``,
+    intermediate results back (``export_state``, ``artifacts``,
     ``inference``, ``benchmark``).
 
     Flow::
@@ -107,8 +101,6 @@ class EdgeContext:
                 ▼
            EdgeContext ──► ExportPipeline  → artifacts, export_state
                 │
-                ├──► LoadPipeline         → handles.serialized
-                │
                 └──► BenchmarkPipeline    → inference, benchmark, actions
     """
 
@@ -117,15 +109,17 @@ class EdgeContext:
     policy: Any
     model: nn.Module
     device: torch.device
-    dtype: Any
     model_inputs: dict[str, Any]
     engine_root: Path
     args: Any
+    dtype: torch.dtype = torch.float16
+    trt_settings: dict[str, Any] = field(default_factory=dict)
     seed: int = 42
 
     # Filled as pipelines and stages run.
     artifacts: dict[str, StageResult] = field(default_factory=dict)
     export_state: dict[str, Any] = field(default_factory=dict)
+    inference: InferenceState = field(default_factory=InferenceState)
     benchmark: BenchmarkResult | None = None
     actions: torch.Tensor | None = None
 

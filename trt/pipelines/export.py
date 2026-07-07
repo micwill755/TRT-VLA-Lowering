@@ -11,12 +11,12 @@ class ExportPipeline:
 
     def run(self, ctx: EdgeContext) -> EdgeContext:
         hooks = self.config.hooks
-        if hooks.preprocess:
-            resolve(hooks.preprocess)(ctx)
+        if hooks.get("preprocess"):
+            resolve(hooks["preprocess"])(ctx)
         for stage_cfg in self.config.stages:
             runner = resolve(stage_cfg.runner)(stage_cfg)
             result = runner.run(ctx)
             ctx.artifacts[f"stage_{stage_cfg.stage_id}"] = result
-        if hooks.postprocess:
-            resolve(hooks.postprocess)(ctx)
+        if hooks.get("postprocess"):
+            resolve(hooks["postprocess"])(ctx)
         return ctx

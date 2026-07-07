@@ -100,7 +100,6 @@ def load(ctx: EdgeContext, inputs: dict) -> dict:
     serialized_action = SerializedGrootAction(
         SerializedTRTEngine(ctx.engine_root / "action")
     )
-    ctx.handles.serialized.action = serialized_action
     return {
         "serialized_engine": serialized_action,
     }
@@ -196,9 +195,7 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
 
 
 def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
-    module = inputs.get("serialized_engine") or ctx.handles.serialized.action
-    if module is None:
-        raise RuntimeError("serialized TRT backend missing action module")
+    module = inputs["serialized_engine"]
 
     with torch.no_grad():
         actions = _rollout_actions(

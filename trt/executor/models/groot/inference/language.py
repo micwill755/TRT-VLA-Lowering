@@ -6,7 +6,10 @@ from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
 from trt.rope import make_rope_rotary_cos_sin
 from trt.compile import compile_trt_module
-from trt.modules.export.language import CausalLMExportModule, ContextProjectionExportModule
+from trt.executor.models.groot.load.serialize import SerializedGrootLanguage
+from trt.modules.export.language import CausalLMExportModule
+from trt.plugin.plugin_utils import patch_language_attention, restore_attention
+from trt.serialize import SerializedTRTEngine
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     eagle = ctx.model.backbone.eagle_model
@@ -16,9 +19,9 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     # --- upstream vision output: [B * S_visual, H_lm] ---
     image_embs = inputs["tensors"]["image_embs"]
 
-    # --- tokenized prompt ---
-    input_ids = ctx.inference.tokenized["input_ids"].to(device=device, dtype=torch.long)
-    attention_mask = ctx.inference.tokenized.get("attention_mask")
+    # --- tokenized prompt (pipeline-level preprocess) ---
+    input_ids = inputs["input_ids"].to(device=device, dtype=torch.long)
+    attention_mask = inputs.get("attention_mask")
 
     image_token_index = getattr(
         eagle, "image_token_index", eagle.config.image_token_index
@@ -39,14 +42,23 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     num_slots = int(image_token_mask.sum().item())
     flat_embs[image_token_mask] = flat_image_embs[:num_slots]
 
-    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
-    inputs_embeds = inputs_embeds.to(device=device, dtype=dtype).contiguous()
+    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden).to(device=device).contiguous()
+    lm_dtype = next(language.parameters()).dtype
 
     position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
 
     if attention_mask is None:
         attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
 
+    # --- EAGER: stock HF path (match model weight dtype, test_vla rung A) ---
+    eager_inputs = {
+        "inputs_embeds": inputs_embeds.to(dtype=lm_dtype).contiguous(),
+        "attention_mask": attention_mask.to(device=device),
+        "position_ids": position_ids,
+    }
+
+    # --- TRT/SERIALIZED: flat Edge-LLM bindings (ctx.dtype for engine ABI) ---
+    trt_inputs_embeds = inputs_embeds.to(dtype=dtype).contiguous()
     # --- config dims ---
     cfg = language.config
     hidden_size = int(cfg.hidden_size)
@@ -91,7 +103,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)  # fresh prefill
 
     lm_inputs = (
-        inputs_embeds,          # spliced vision rows — NOT raw input_embs
+        trt_inputs_embeds,      # spliced vision rows — NOT raw input_embs
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
@@ -99,8 +111,9 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         *kv_caches,
     )
 
-
     return {
+        "language_model": language,
+        "eager_inputs": eager_inputs,
         "lm_inputs": lm_inputs,
         "lm_module": lm_module,
         "decoder": decoder,
@@ -144,7 +157,6 @@ def load(ctx: EdgeContext, inputs: dict) -> dict:
     serialized_language = SerializedGrootLanguage(
         SerializedTRTEngine(ctx.engine_root / "language")
     )
-    ctx.handles.serialized.language = serialized_language
     return {
         "serialized_engine": serialized_language,
     }
@@ -161,18 +173,26 @@ def execute(ctx: EdgeContext, inputs: dict) -> dict:
     raise ValueError(f"unsupported execution mode: {ctx.execution_mode}")
 
 def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
-    lm_module = inputs["lm_module"]
-    lm_inputs = inputs["lm_inputs"]
+    language = inputs["language_model"]
+    eager = inputs["eager_inputs"]
+    lm_dtype = next(language.parameters()).dtype
+    inputs_embeds = eager["inputs_embeds"].to(device=ctx.device, dtype=lm_dtype)
 
     with torch.no_grad():
-        logits, lm_hidden, prefix_k, prefix_v = lm_module(*lm_inputs)
+        out = language(
+            inputs_embeds=inputs_embeds,
+            attention_mask=eager["attention_mask"],
+            position_ids=eager["position_ids"],
+            output_hidden_states=True,
+            return_dict=True,
+        )
 
     return {
         "tensors": {
-            "logits": logits,
-            "lm_hidden": lm_hidden,
-            "prefix_k": prefix_k,
-            "prefix_v": prefix_v,
+            "logits": out.logits,
+            "lm_hidden": out.hidden_states[-1],
+            "prefix_k": None,
+            "prefix_v": None,
         },
         "metadata": {
             "backend": "eager",
@@ -199,9 +219,7 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
     }
 
 def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
-    module = inputs.get("serialized_engine") or ctx.handles.serialized.language
-    if module is None:
-        raise RuntimeError("serialized TRT backend missing language module")
+    module = inputs["serialized_engine"]
 
     # SerializedGrootLanguage takes the same positional lm_inputs tuple built in
     # preprocess and returns either logits or (logits, lm_hidden).
@@ -231,7 +249,7 @@ def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
 def postprocess(ctx: EdgeContext, result: dict) -> dict:
     tensors = result["tensors"]
     ctx.inference.logits = tensors.get("logits")
-    ctx.inference.lm_hidden = tensors["lm_hidden"]
+    ctx.inference.lm_hidden_states = tensors["lm_hidden"]
     ctx.inference.prefix_k = tensors.get("prefix_k")
     ctx.inference.prefix_v = tensors.get("prefix_v")
     return result

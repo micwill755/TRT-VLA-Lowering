@@ -25,9 +25,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
 
     # Prefer the explicit stage input, but fall back to ctx.inference scratch state.
     # Shape: [B, C, H, W], e.g. [1, 3, 224, 224].
-    pixel_values = inputs.get("pixel_values", ctx.inference.pixel_values)
-    if pixel_values is None:
-        raise ValueError("vision stage missing pixel_values")
+    pixel_values = inputs["pixel_values"]
 
     # Vision/TRT path uses fp16 pixels on the target device.
     # Contiguous layout keeps both HF eager and TRT runtime input ABI stable.
@@ -62,6 +60,9 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     }
 
 def compile(ctx: EdgeContext, inputs: dict) -> dict:
+    pixel_values = inputs["pixel_values"]
+    visual_module = inputs["visual_module"]
+
     eagle = ctx.model.backbone.eagle_model
     vision = eagle.vision_model
 

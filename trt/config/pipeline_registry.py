@@ -1,4 +1,4 @@
-"""Registry mapping model types to export, inference, load, and benchmark pipelines.
+"""Registry mapping model types to export, inference, and benchmark pipelines.
 
 Model packages register their stage configs at import time via
 ``register_*_pipeline``. Lookups use the profile ``name`` (e.g. ``gr00t``).
@@ -12,20 +12,15 @@ from collections.abc import Callable
 from typing import TypeAlias
 
 from trt.config.benchmark_config import BenchmarkPipelineConfig
-from trt.config.load_config import LoadPipelineConfig
 from trt.config.stage_config import PipelineConfig
 from trt.executor.models.groot.export.pipeline import GROOT_PIPELINE
 from trt.executor.models.groot.inference.pipeline import GROOT_INFERENCE_PIPELINE
-from trt.executor.models.groot.load.pipeline import GROOT_LOAD_PIPELINE
-from trt.executor.models.pi05.load.pipeline import PI05_LOAD_PIPELINE
-from trt.executor.models.smolvla.load.pipeline import SMOLVLA_LOAD_PIPELINE
 from trt.executor.benchmark.pipeline import DEFAULT_BENCHMARK
 
 PipelineEntry: TypeAlias = PipelineConfig | Callable[[], PipelineConfig]
 
 _EXPORT: dict[str, PipelineEntry] = {}
 _INFERENCE: dict[str, PipelineEntry] = {}
-_LOAD: dict[str, LoadPipelineConfig] = {}
 
 
 def register_export_pipeline(model_type: str, config: PipelineEntry) -> None:
@@ -46,18 +41,6 @@ def register_inference_pipeline(model_type: str, config: PipelineEntry) -> None:
     if key in _INFERENCE:
         raise KeyError(f"Inference pipeline already registered for {key!r}")
     _INFERENCE[key] = config
-
-
-def register_load_pipeline(model_type: str, config: LoadPipelineConfig) -> None:
-    """Register a serialized-engine load pipeline for ``model_type``.
-
-    Used after export to deserialize TRT engines from ``engine_root`` before
-    benchmark.
-    """
-    key = model_type.strip()
-    if key in _LOAD:
-        raise KeyError(f"Load pipeline already registered for {key!r}")
-    _LOAD[key] = config
 
 
 def _resolve(entry: PipelineEntry) -> PipelineConfig:
@@ -95,18 +78,6 @@ def get_benchmark_pipeline(model_type: str | None = None) -> BenchmarkPipelineCo
     return DEFAULT_BENCHMARK
 
 
-def get_load_pipeline(model_type: str) -> LoadPipelineConfig:
-    """Look up the load pipeline for ``model_type``.
-
-    Raises ``KeyError`` with known types if unregistered.
-    """
-    key = model_type.strip()
-    if key not in _LOAD:
-        known = sorted(_LOAD)
-        raise KeyError(f"No load pipeline for {model_type!r}. Known: {known}")
-    return _LOAD[key]
-
-
 def get_pipeline_for_profile(profile) -> PipelineConfig:
     """Resolve the export pipeline from a profile instance."""
     name = getattr(profile, "name", None)
@@ -118,10 +89,7 @@ def get_pipeline_for_profile(profile) -> PipelineConfig:
 def _register_builtin() -> None:
     """Register built-in model pipelines at module import time."""
     register_export_pipeline("gr00t", GROOT_PIPELINE)
-    register_load_pipeline("gr00t", GROOT_LOAD_PIPELINE)
     register_inference_pipeline("gr00t", GROOT_INFERENCE_PIPELINE)
-    register_load_pipeline("pi05", PI05_LOAD_PIPELINE)
-    register_load_pipeline("smolvla", SMOLVLA_LOAD_PIPELINE)
 
 
 _register_builtin()

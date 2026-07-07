@@ -5,7 +5,7 @@ Architecture
 ------------
 
 PipelineConfig (per model, frozen)
-    hooks: PipelineHooks          whole-pipeline bookends (preprocess / postprocess)
+    hooks: dict                   whole-pipeline bookends (preprocess / postprocess)
     stages: tuple[StageConfig]  ordered graph nodes
 
 StageConfig (per stage)
@@ -14,7 +14,7 @@ StageConfig (per stage)
     hooks: StageHooks             export-specific logic the runner invokes
 
 Execution (ExportPipeline)
-    1. config.hooks.preprocess(ctx)           once, before the stage loop
+    1. config.hooks["preprocess"](ctx)        once, before the stage loop
     2. for stage in config.stages:
            runner.run(ctx)                     generic TRT compile loop
                hooks.process_inputs(...)      optional inter-stage glue
@@ -23,7 +23,7 @@ Execution (ExportPipeline)
                [trace → compile → artifacts]
                hooks.metadata / save_artifacts / after_stage
            ctx.artifacts[f"stage_{id}"] = result
-    3. config.hooks.postprocess(ctx)          once, after all stages
+    3. config.hooks["postprocess"](ctx)       once, after all stages
 
 Unlike vLLM-Omni runtime (load PyTorch model → forward), export requires
 hooks.plan_export because subgraphs must be cloned, traced, and compiled to TRT.
@@ -34,22 +34,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from trt.io_spec import PipelineIOSpec
 
 @dataclass(frozen=True)
 class StageConfig:
-    """One node in the export graph."""
+    """One node in the export/inference graph."""
 
     stage_id: int
+    runner: str
+    input_sources: tuple[int, ...] = ()
+    hooks: dict = field(default_factory=dict)
     stage_name: str | None = None
-    input_sources: tuple[int, ...]  # upstream stage ids; () = entry point
-    runner: str                     # e.g. "trt.runner.export:ExportRunner"
-    hooks: dict
     result: bool = False
     engine_subdir: str | None = None
+    final_output: bool = False
+
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    pipeline_name: str
     stages: tuple[StageConfig, ...]
-    hooks: PipelineHooks = field(default_factory=PipelineHooks)
+    hooks: dict = field(default_factory=dict)
+    pipeline_name: str | None = None

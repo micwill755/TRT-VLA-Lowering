@@ -49,7 +49,6 @@ def load(ctx: EdgeContext, inputs: dict) -> dict:
     serialized_action_context = SerializedGrootActionContext(
         SerializedTRTEngine(ctx.engine_root / "action_context")
     )
-    ctx.handles.serialized.action_context = serialized_action_context
     return {
         "serialized_engine": serialized_action_context,
     }
@@ -102,9 +101,7 @@ def _run_trt(ctx: EdgeContext, inputs: dict) -> dict:
 
 
 def _run_serialized(ctx: EdgeContext, inputs: dict) -> dict:
-    module = inputs.get("serialized_engine") or ctx.handles.serialized.action_context
-    if module is None:
-        raise RuntimeError("serialized TRT backend missing action_context module")
+    module = inputs["serialized_engine"]
 
     lm_hidden = inputs["lm_hidden"].contiguous()
 

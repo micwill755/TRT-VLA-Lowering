@@ -6,12 +6,13 @@ from typing import Type
 
 import torch
 
-from trt.config.pipeline_registry import get_benchmark_pipeline, get_export_pipeline
+from trt.config.execution_mode import ExecutionMode
+from trt.config.pipeline_registry import get_export_pipeline, get_inference_pipeline
 from trt.context import EdgeContext
 from trt.data import load_test_data
 from trt.pipelines.benchmark import BenchmarkPipeline
 from trt.pipelines.export import ExportPipeline
-from trt.pipelines.load import LoadPipeline
+from trt.pipelines.inference import InferencePipeline
 from trt.profile import VLAProfile
 from trt.plugin.plugin_utils import load_plugins_for_trt
 
@@ -57,31 +58,47 @@ class EdgeOrchestrator:
             action="store_true",
             help="Load engines from --engine-dir and benchmark; skip export.",
         )
+        parser.add_argument(
+            "--inference-only",
+            action="store_true",
+            help="Run eager inference only; skip export and benchmark.",
+        )
         return parser
 
     def run(self) -> int:
         if self.args.export_only and self.args.benchmark_only:
             raise SystemExit("Use only one of --export-only or --benchmark-only")
+        if sum(bool(x) for x in (self.args.export_only, self.args.benchmark_only, self.args.inference_only)) > 1:
+            raise SystemExit("Use only one of --export-only, --benchmark-only, or --inference-only")
 
-        load_plugins_for_trt()
+        if not self._should_inference():
+            load_plugins_for_trt()
         ctx = self._build_context()
+
+        if self._should_inference():
+            ctx.execution_mode = ExecutionMode.EAGER
+            InferencePipeline(get_inference_pipeline(self.profile.name)).run(ctx)
+            if ctx.actions is not None:
+                print(f"actions shape: {tuple(ctx.actions.shape)}")
+            return 0
 
         if self._should_export():
             export_cfg = get_export_pipeline(self.profile.name)
             ExportPipeline(export_cfg).run(ctx)
 
         if self._should_benchmark():
-            LoadPipeline.for_model_type(self.profile.name).run(ctx)
-            bench_cfg = get_benchmark_pipeline(self.profile.name)
-            BenchmarkPipeline(bench_cfg).run(ctx)
+            BenchmarkPipeline().run(ctx)
 
         return 0
 
+    def _should_inference(self) -> bool:
+        return self.args.inference_only
+
     def _should_export(self) -> bool:
-        return not self.args.benchmark_only
+        return not self.args.benchmark_only and not self.args.inference_only
 
     def _should_benchmark(self) -> bool:
-        return not self.args.export_only
+        return not self.args.export_only and not self.args.inference_only
 
     def _build_context(self) -> EdgeContext:
         data = load_test_data(
