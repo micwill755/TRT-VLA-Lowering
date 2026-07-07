@@ -101,7 +101,7 @@ Putting it together — one GR00T step
 
 
 Step-by-step (same flow as the diagram)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **1. Step encoder — build DiT inputs**
 
@@ -170,10 +170,12 @@ Stage boundaries in the full GR00T pipeline
        classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
        class V,L,AC,A nvNode
 
-- **vision** → image embeddings.
-- **language** → ``lm_hidden`` / ``context_hidden``, prefix KV.
-- **action_context** → ``vl_embs`` fed as ``encoder_hidden_states``.
-- **action** → ``StaticActionVelocityStep`` engine; rollout loops over timesteps.
+- **vision** → image embeddings. See :doc:`../export_modules/vision-example`.
+- **language** → ``lm_hidden`` / prefix KV. See :doc:`../export_modules/language-example`.
+- **action_context** → ``vl_embs`` fed as ``encoder_hidden_states``. See
+  :doc:`../export_modules/action-context-example`.
+- **action** → ``StaticActionVelocityStep`` engine; :doc:`action-rollout` loops
+  over timesteps via ``sample_actions_raw``.
 
 
 Parity tips
@@ -194,5 +196,5 @@ When validating action-context or diffusion stages in ``test_vla.py``:
 
 
 *Files:* ``test_vla.py``, ``trt/modules/export/diffusion.py``,
-``trt/executor/models/groot/export/action.py``,
+``trt/executor/models/groot/export/diffusion.py``,
 ``lerobot/.../flow_matching_action_head.py``

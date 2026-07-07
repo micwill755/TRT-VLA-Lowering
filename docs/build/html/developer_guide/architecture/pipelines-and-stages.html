@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -876,10 +881,10 @@ window.runMermaid = runMermaid;</script>
 <section id="what-is-a-pipeline">
 <h2>What is a pipeline?<a class="headerlink" href="#what-is-a-pipeline" title="Link to this heading">#</a></h2>
 <p>A <strong>pipeline</strong> is a frozen configuration object that describes an ordered workflow.
-Export and inference use <code class="xref py py-class docutils literal notranslate"><span class="pre">PipelineConfig</span></code> (<code class="docutils literal notranslate"><span class="pre">stages</span></code> + <code class="docutils literal notranslate"><span class="pre">hooks</span></code>). Load uses
-<code class="xref py py-class docutils literal notranslate"><span class="pre">LoadPipelineConfig</span></code>. Benchmark uses <code class="xref py py-class docutils literal notranslate"><span class="pre">BenchmarkPipelineConfig</span></code>.</p>
-<p>Each pipeline type has a thin executor class that loops over its stages and delegates
-to runners or callables:</p>
+Export and inference use <code class="xref py py-class docutils literal notranslate"><span class="pre">PipelineConfig</span></code> (<code class="docutils literal notranslate"><span class="pre">stages</span></code> + <code class="docutils literal notranslate"><span class="pre">hooks</span></code>).
+Benchmark uses <code class="xref py py-class docutils literal notranslate"><span class="pre">BenchmarkPipeline</span></code> directly (no separate config loop).</p>
+<p>Each pipeline type has a thin executor class that loops over its stages and
+delegates to runners:</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 22.0%" />
@@ -901,13 +906,9 @@ to runners or callables:</p>
 <td><p><code class="docutils literal notranslate"><span class="pre">InferencePipeline</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">PipelineConfig</span></code></p></td>
 </tr>
-<tr class="row-even"><td><p>Load</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">LoadPipeline</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">LoadPipelineConfig</span></code></p></td>
-</tr>
-<tr class="row-odd"><td><p>Benchmark</p></td>
+<tr class="row-even"><td><p>Benchmark</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">BenchmarkPipeline</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">BenchmarkPipelineConfig</span></code></p></td>
+<td><p>(invokes inference config per mode)</p></td>
 </tr>
 </tbody>
 </table>
@@ -915,8 +916,8 @@ to runners or callables:</p>
 </section>
 <section id="what-is-a-stage">
 <h2>What is a stage?<a class="headerlink" href="#what-is-a-stage" title="Link to this heading">#</a></h2>
-<p>A <strong>stage</strong> is one node in the pipeline graph. For export and inference, each stage is
-a <code class="xref py py-class docutils literal notranslate"><span class="pre">StageConfig</span></code>:</p>
+<p>A <strong>stage</strong> is one node in the pipeline graph. For export and inference, each
+stage is a <code class="xref py py-class docutils literal notranslate"><span class="pre">StageConfig</span></code>:</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 22.0%" />
@@ -944,7 +945,7 @@ a <code class="xref py py-class docutils literal notranslate"><span class="pre">
 <td><p>Subdirectory under <code class="docutils literal notranslate"><span class="pre">engine_root</span></code> (e.g. <code class="docutils literal notranslate"><span class="pre">visual/</span></code>, <code class="docutils literal notranslate"><span class="pre">language/</span></code>)</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">final_output</span></code></p></td>
-<td><p>When true, inference pipeline reads <code class="docutils literal notranslate"><span class="pre">actions</span></code> from this stage</p></td>
+<td><p>When true, postprocess writes <code class="docutils literal notranslate"><span class="pre">actions</span></code> to <code class="docutils literal notranslate"><span class="pre">ctx.actions</span></code></p></td>
 </tr>
 </tbody>
 </table>
@@ -952,8 +953,8 @@ a <code class="xref py py-class docutils literal notranslate"><span class="pre">
 </section>
 <section id="stage-graph-gr00t-example">
 <h2>Stage graph (GR00T example)<a class="headerlink" href="#stage-graph-gr00t-example" title="Link to this heading">#</a></h2>
-<p>Export and inference share the same stage IDs and <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> edges. GR00T uses
-four stages:</p>
+<p>Export and inference share the same stage IDs and <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> edges. GR00T
+uses four stages:</p>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph LR
@@ -975,7 +976,7 @@ graph LR
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
     PC[PipelineConfig]
-    PH[PipelineHooks&lt;br/&gt;preprocess / postprocess]
+    PH[Pipeline hooks&lt;br/&gt;preprocess / postprocess]
     STAGES[tuple of StageConfig]
     S0[StageConfig 0]
     S1[StageConfig 1]
@@ -988,7 +989,7 @@ graph TB
     STAGES --&gt; SN
 
     S0 --&gt; R0[runner class]
-    S0 --&gt; H0[StageHooks]
+    S0 --&gt; H0[stage hooks]
     S0 --&gt; IS0[input_sources]
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
@@ -999,13 +1000,17 @@ graph TB
     </pre></section>
 <section id="inter-stage-data">
 <h2>Inter-stage data<a class="headerlink" href="#inter-stage-data" title="Link to this heading">#</a></h2>
-<p>Stages communicate through <code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeContext</span></code>:</p>
-<ul class="simple">
-<li><p><strong>Export</strong> — upstream <code class="docutils literal notranslate"><span class="pre">StageResult</span></code> objects in <code class="docutils literal notranslate"><span class="pre">ctx.artifacts[&quot;stage_N&quot;]</span></code></p></li>
-<li><p><strong>Inference</strong> — upstream <code class="docutils literal notranslate"><span class="pre">InferenceStageResult</span></code> in <code class="docutils literal notranslate"><span class="pre">ctx.stage_results[N]</span></code></p></li>
-</ul>
-<p><code class="docutils literal notranslate"><span class="pre">hooks.process_inputs</span></code> glue functions wire tensors from upstream stages into the
-current stage’s inputs.</p>
+<p>Stages communicate through merged dicts built by the pipeline executor:</p>
+<ol class="arabic simple">
+<li><p><strong>Pipeline inputs</strong> — returned by pipeline <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> (normalized
+<code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code>).</p></li>
+<li><p><strong>Upstream stage output</strong> — the dict stored at
+<code class="docutils literal notranslate"><span class="pre">ctx.stage_results[upstream_id]</span></code> when <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> is set.</p></li>
+<li><p><strong>Stage result</strong> — returned by the runner and stored at
+<code class="docutils literal notranslate"><span class="pre">ctx.stage_results[stage_id]</span></code>.</p></li>
+</ol>
+<p>Cross-stage tensor wiring (for example vision <code class="docutils literal notranslate"><span class="pre">image_embs</span></code> → language
+<code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>) is handled in each downstream stage’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> hook.</p>
 <p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/config/stage_config.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/*/pipeline.py</span></code></p>
 </section>
 </section>

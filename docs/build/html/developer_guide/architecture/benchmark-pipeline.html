@@ -500,7 +500,7 @@ window.runMermaid = runMermaid;</script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
     <link rel="next" title="Plugins Overview" href="../plugins/overview.html" />
-    <link rel="prev" title="Load Pipeline" href="load-pipeline.html" />
+    <link rel="prev" title="Engine Load (Serialized Inference)" href="load-pipeline.html" />
 
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -873,87 +878,123 @@ window.runMermaid = runMermaid;</script>
                   
   <section id="benchmark-pipeline">
 <h1>Benchmark Pipeline<a class="headerlink" href="#benchmark-pipeline" title="Link to this heading">#</a></h1>
-<p>The <strong>benchmark pipeline</strong> times multiple inference backends on the same prepared
-inputs and reports action (and optional logits) parity. It runs after
-<code class="xref py py-class docutils literal notranslate"><span class="pre">LoadPipeline</span></code> when benchmarking pre-built engines.</p>
+<p>The <strong>benchmark pipeline</strong> runs the inference pipeline once per execution mode on
+the same prepared inputs and reports per-stage tensor parity against eager
+PyTorch. It does not run a separate load step — serialized engines are loaded
+per stage by each stage’s <code class="docutils literal notranslate"><span class="pre">load</span></code> hook when <code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span></code> is
+<code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code>.</p>
 <section id="flow">
 <h2>Flow<a class="headerlink" href="#flow" title="Link to this heading">#</a></h2>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
     START[BenchmarkPipeline.run]
-    LOOP[iterations x stages]
-    ENABLED{stage.enabled?}
-    RUN[stage.run ctx]
-    TIME[record timing]
-    ACT[record actions]
-    REPORT[hooks.report]
+    LOOP[for each ExecutionMode]
+    INF[InferencePipeline.run]
+    SNAP[record_stage tensors]
+    PARITY[report_stage_parity]
 
-    START --&gt; LOOP --&gt; ENABLED
-    ENABLED --&gt;|yes| RUN --&gt; TIME --&gt; ACT
-    ENABLED --&gt;|no| LOOP
-    ACT --&gt; LOOP
-    LOOP --&gt; REPORT
+    START --&gt; LOOP --&gt; INF --&gt; SNAP --&gt; LOOP
+    LOOP --&gt; PARITY
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
-    class START,REPORT nvNode
-    class LOOP,ENABLED,RUN,TIME,ACT greyNode
+    class START,PARITY nvNode
+    class LOOP,INF,SNAP greyNode
     </pre></section>
-<section id="default-backends">
-<h2>Default backends<a class="headerlink" href="#default-backends" title="Link to this heading">#</a></h2>
-<p>The default <code class="xref py py-class docutils literal notranslate"><span class="pre">BenchmarkPipelineConfig</span></code> runs three stages (when enabled):</p>
-<pre  class="mermaid">
-        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
-graph LR
-    PY[pytorch&lt;br/&gt;ExecutionMode.EAGER]
-    MEM[in_memory_trt&lt;br/&gt;ExecutionMode.IN_MEMORY]
-    SER[serialized_trt&lt;br/&gt;ExecutionMode.SERIALIZED]
-
-    PY --&gt; MEM --&gt; SER
-
-    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
-    class PY,MEM,SER nvNode
-    </pre><p>Each backend stage calls <code class="xref py py-func docutils literal notranslate"><span class="pre">_run_inference()</span></code>, which sets <code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span></code> and
-runs <code class="xref py py-class docutils literal notranslate"><span class="pre">InferencePipeline</span></code> for the registered model type.</p>
+<section id="backends">
+<h2>Backends<a class="headerlink" href="#backends" title="Link to this heading">#</a></h2>
+<p>The benchmark runs three modes in order (serialized is skipped when engine
+directories are missing):</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 22.0%" />
 <col style="width: 78.0%" />
 </colgroup>
 <thead>
-<tr class="row-odd"><th class="head"><p>Stage name</p></th>
-<th class="head"><p>Enabled when</p></th>
+<tr class="row-odd"><th class="head"><p>Mode</p></th>
+<th class="head"><p>Description</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">pytorch</span></code></p></td>
-<td><p>Always</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">eager</span></code></p></td>
+<td><p>Reference PyTorch path (<code class="docutils literal notranslate"><span class="pre">ExecutionMode.EAGER</span></code>)</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">in_memory_trt</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">ctx.handles.in_memory.vision</span></code> is populated</p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">in_memory</span></code></p></td>
+<td><p>On-the-fly TRT compile per stage (<code class="docutils literal notranslate"><span class="pre">ExecutionMode.IN_MEMORY</span></code>)</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">serialized_trt</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">ctx.handles.serialized.vision</span></code> is populated</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">serialized</span></code></p></td>
+<td><p>Engines from <code class="docutils literal notranslate"><span class="pre">--engine-dir</span></code> (<code class="docutils literal notranslate"><span class="pre">ExecutionMode.SERIALIZED</span></code>)</p></td>
 </tr>
 </tbody>
 </table>
 </div>
+<p>Each run sets a fixed seed (<code class="docutils literal notranslate"><span class="pre">SEED</span> <span class="pre">=</span> <span class="pre">42</span></code>), clears <code class="docutils literal notranslate"><span class="pre">ctx.stage_results</span></code>, and
+snapshots each stage’s output tensors into <code class="docutils literal notranslate"><span class="pre">ctx.benchmark.stage_tensors</span></code>.</p>
 </section>
 <section id="reporting">
 <h2>Reporting<a class="headerlink" href="#reporting" title="Link to this heading">#</a></h2>
-<p>After all iterations, <code class="docutils literal notranslate"><span class="pre">hooks.report</span></code> prints timing summaries (warmup excluded) and
-parity metrics. GR00T registers <code class="docutils literal notranslate"><span class="pre">report_groot_benchmark</span></code> for language logits and
-action ADE comparisons.</p>
+<p>After all backends complete, <code class="docutils literal notranslate"><span class="pre">report_stage_parity</span></code> prints aligned tables
+comparing eager against each TRT backend. GR00T registers these parity tensors
+in <code class="docutils literal notranslate"><span class="pre">STAGE_PARITY_TENSORS</span></code>:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 22.0%" />
+<col style="width: 28.0%" />
+<col style="width: 50.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Stage</p></th>
+<th class="head"><p>Tensor key</p></th>
+<th class="head"><p>Metric columns</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">vision</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">image_embs</span></code></p></td>
+<td><p>mean abs, max abs, rel L2, rel mean %, close %</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">language</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_hidden</span></code></p></td>
+<td><p>same</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">action_context</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">context_embs</span></code></p></td>
+<td><p>same</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">action</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">actions</span></code></p></td>
+<td><p>same</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Example output:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Parity: eager vs in_memory
+--------------------------------------------------------------------------------
+Stage            Tensor           Mean Abs    Max Abs   Rel L2  Rel Mean   Close
+--------------------------------------------------------------------------------
+vision           image_embs       0.006502   0.358398   0.0206     1.15%   90.0%
+language         lm_hidden        0.090187  12.605469   0.0770     7.45%   21.1%
+...
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--warmup</span></code> and <code class="docutils literal notranslate"><span class="pre">--num-iterations</span></code> are reserved on the CLI for future timing
+loops; the current benchmark pipeline runs one inference pass per mode for
+parity only.</p>
 </section>
 <section id="cli">
 <h2>CLI<a class="headerlink" href="#cli" title="Link to this heading">#</a></h2>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--benchmark-only<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/groot_edge_llm
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Export + benchmark (default)</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/groot_edge_llm
+
+<span class="c1"># Benchmark only (engines already exported)</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--benchmark-only<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/groot_edge_llm
 </pre></div>
 </div>
-<p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/pipelines/benchmark.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/config/benchmark_config.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/pipeline.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/run.py</span></code></p>
+<p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/pipelines/benchmark.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/measure.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/inference/pipeline.py</span></code> (<code class="docutils literal notranslate"><span class="pre">STAGE_PARITY_TENSORS</span></code>)</p>
 </section>
 </section>
 
@@ -973,7 +1014,7 @@ action ADE comparisons.</p>
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">Load Pipeline</p>
+        <p class="prev-next-title">Engine Load (Serialized Inference)</p>
       </div>
     </a>
     <a class="right-next"
@@ -1007,7 +1048,7 @@ action ADE comparisons.</p>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flow">Flow</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#default-backends">Default backends</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#backends">Backends</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#reporting">Reporting</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cli">CLI</a></li>
 </ul>

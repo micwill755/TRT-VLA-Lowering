@@ -499,7 +499,7 @@ window.runMermaid = runMermaid;</script>
 
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="next" title="Customization Guide" href="../customization/customization-guide.html" />
+    <link rel="next" title="Action Rollout" href="action-rollout.html" />
     <link rel="prev" title="Diffusion Components" href="components.html" />
 
 
@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="components.html">Diffusion Components</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -1030,10 +1035,12 @@ graph LR
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     class V,L,AC,A nvNode
     </pre><ul class="simple">
-<li><p><strong>vision</strong> → image embeddings.</p></li>
-<li><p><strong>language</strong> → <code class="docutils literal notranslate"><span class="pre">lm_hidden</span></code> / <code class="docutils literal notranslate"><span class="pre">context_hidden</span></code>, prefix KV.</p></li>
-<li><p><strong>action_context</strong> → <code class="docutils literal notranslate"><span class="pre">vl_embs</span></code> fed as <code class="docutils literal notranslate"><span class="pre">encoder_hidden_states</span></code>.</p></li>
-<li><p><strong>action</strong> → <code class="docutils literal notranslate"><span class="pre">StaticActionVelocityStep</span></code> engine; rollout loops over timesteps.</p></li>
+<li><p><strong>vision</strong> → image embeddings. See <a class="reference internal" href="../export_modules/vision-example.html"><span class="doc">GR00T Vision Export Example</span></a>.</p></li>
+<li><p><strong>language</strong> → <code class="docutils literal notranslate"><span class="pre">lm_hidden</span></code> / prefix KV. See <a class="reference internal" href="../export_modules/language-example.html"><span class="doc">GR00T Language Export Example</span></a>.</p></li>
+<li><p><strong>action_context</strong> → <code class="docutils literal notranslate"><span class="pre">vl_embs</span></code> fed as <code class="docutils literal notranslate"><span class="pre">encoder_hidden_states</span></code>. See
+<a class="reference internal" href="../export_modules/action-context-example.html"><span class="doc">GR00T Action Context Export Example</span></a>.</p></li>
+<li><p><strong>action</strong> → <code class="docutils literal notranslate"><span class="pre">StaticActionVelocityStep</span></code> engine; <a class="reference internal" href="action-rollout.html"><span class="doc">Action Rollout</span></a> loops
+over timesteps via <code class="docutils literal notranslate"><span class="pre">sample_actions_raw</span></code>.</p></li>
 </ul>
 </section>
 <section id="parity-tips">
@@ -1052,7 +1059,7 @@ debugging action_context, not <code class="docutils literal notranslate"><span c
 should be low before end-to-end ADE <code class="docutils literal notranslate"><span class="pre">&lt;</span> <span class="pre">0.01</span></code> is achievable.</p></li>
 </ol>
 <p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">test_vla.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/modules/export/diffusion.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/action.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/diffusion.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">lerobot/.../flow_matching_action_head.py</span></code></p>
 </section>
 </section>
@@ -1077,11 +1084,11 @@ should be low before end-to-end ADE <code class="docutils literal notranslate"><
       </div>
     </a>
     <a class="right-next"
-       href="../customization/customization-guide.html"
+       href="action-rollout.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Customization Guide</p>
+        <p class="prev-next-title">Action Rollout</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>

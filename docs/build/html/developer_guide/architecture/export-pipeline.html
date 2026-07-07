@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="hooks.html">Hooks</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -874,63 +879,82 @@ window.runMermaid = runMermaid;</script>
   <section id="export-pipeline">
 <h1>Export Pipeline<a class="headerlink" href="#export-pipeline" title="Link to this heading">#</a></h1>
 <p>The <strong>export pipeline</strong> compiles each stage subgraph to a TensorRT engine under
-<code class="docutils literal notranslate"><span class="pre">engine_root</span></code>. It uses <code class="xref py py-class docutils literal notranslate"><span class="pre">PipelineConfig</span></code> with <code class="xref py py-class docutils literal notranslate"><span class="pre">ExportRunner</span></code> per stage.</p>
+<code class="docutils literal notranslate"><span class="pre">engine_root</span></code>. It uses <code class="xref py py-class docutils literal notranslate"><span class="pre">PipelineConfig</span></code> with <code class="xref py py-class docutils literal notranslate"><span class="pre">ExportRunner</span></code> per
+stage. Export and inference share the same top-level loop: pipeline-level
+<code class="docutils literal notranslate"><span class="pre">preprocess</span></code> → stage loop with upstream merge → pipeline-level <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>.</p>
 <section id="flow">
 <h2>Flow<a class="headerlink" href="#flow" title="Link to this heading">#</a></h2>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
     START[ExportPipeline.run]
-    PRE[hooks.preprocess]
-    LOOP[for each StageConfig]
+    PRE[pipeline preprocess]
+    MERGE[merge pipeline_inputs + upstream]
     RUN[ExportRunner.run]
-    ART[ctx.artifacts stage_N]
-    POST[hooks.postprocess]
+    OUT[stage_outputs stage_id]
+    POST[pipeline postprocess]
 
-    START --&gt; PRE --&gt; LOOP --&gt; RUN --&gt; ART
-    ART --&gt; LOOP
-    LOOP --&gt; POST
+    START --&gt; PRE --&gt; MERGE --&gt; RUN --&gt; OUT
+    OUT --&gt; MERGE
+    MERGE --&gt; POST
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
     class START,POST nvNode
-    class PRE,LOOP,RUN,ART greyNode
+    class PRE,MERGE,RUN,OUT greyNode
     </pre></section>
-<section id="per-stage-compile-loop">
-<h2>Per-stage compile loop<a class="headerlink" href="#per-stage-compile-loop" title="Link to this heading">#</a></h2>
+<section id="per-stage-export-loop">
+<h2>Per-stage export loop<a class="headerlink" href="#per-stage-export-loop" title="Link to this heading">#</a></h2>
+<p>Each <code class="xref py py-class docutils literal notranslate"><span class="pre">ExportRunner</span></code> runs the same hook sequence for every stage:</p>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph LR
-    GLUE[process_inputs]
-    PLAN[plan_export&lt;br/&gt;clone + ExportPlan]
-    COMPILE[compile&lt;br/&gt;torch.export + TRT]
-    SAVE[save_artifacts]
+    PRE[preprocess]
+    EXP[export&lt;br/&gt;trace + TRT compile]
+    SAVE[save_artifacts?]
+    POST[postprocess]
     OUT[&quot;engine_root/&amp;lt;subdir&amp;gt;/&quot;]
 
-    GLUE --&gt; PLAN --&gt; COMPILE --&gt; SAVE --&gt; OUT
+    PRE --&gt; EXP --&gt; SAVE --&gt; POST --&gt; OUT
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
-    class PLAN,COMPILE nvNode
-    class GLUE,SAVE,OUT greyNode
-    </pre></section>
+    class EXP nvNode
+    class PRE,SAVE,POST,OUT greyNode
+    </pre><p>Stage inputs are built by the pipeline executor, not by a separate glue hook:</p>
+<ol class="arabic simple">
+<li><p>Start from pipeline-level inputs (<code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code> normalized by pipeline
+<code class="docutils literal notranslate"><span class="pre">preprocess</span></code>).</p></li>
+<li><p>Merge the upstream stage dict when <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> is set.</p></li>
+<li><p>Pass the merged dict to <code class="xref py py-class docutils literal notranslate"><span class="pre">ExportRunner</span></code>.</p></li>
+</ol>
+<p>Each stage’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> hook shapes tensors for that engine boundary.
+Cross-stage wiring (for example splicing <code class="docutils literal notranslate"><span class="pre">image_embs</span></code> into language
+<code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>) lives in the downstream stage’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, not in a
+generic runner.</p>
+</section>
 <section id="outputs">
 <h2>Outputs<a class="headerlink" href="#outputs" title="Link to this heading">#</a></h2>
-<p>Each stage writes a <code class="xref py py-class docutils literal notranslate"><span class="pre">StageResult</span></code> to <code class="docutils literal notranslate"><span class="pre">ctx.artifacts[&quot;stage_N&quot;]</span></code> containing:</p>
+<p>Each stage returns a dict stored at <code class="docutils literal notranslate"><span class="pre">ctx.stage_results[stage_id]</span></code>. Typical keys:</p>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">engine_path</span></code> — compiled <code class="docutils literal notranslate"><span class="pre">.engine</span></code> file</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">spec</span></code> — the <code class="xref py py-class docutils literal notranslate"><span class="pre">ExportPlan</span></code> used for compile</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">tensors</span></code> — representative stage tensors for downstream glue</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">engine_path</span></code> — compiled <code class="docutils literal notranslate"><span class="pre">.engine</span></code> file under <code class="docutils literal notranslate"><span class="pre">engine_root/&lt;subdir&gt;/</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tensors</span></code> — representative stage outputs passed to downstream stages
+(for example <code class="docutils literal notranslate"><span class="pre">image_embs</span></code>, <code class="docutils literal notranslate"><span class="pre">lm_hidden</span></code>, <code class="docutils literal notranslate"><span class="pre">context_embs</span></code>, <code class="docutils literal notranslate"><span class="pre">actions</span></code>)</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">metadata</span></code> — optional stage metadata</p></li>
 </ul>
+<p>The language stage additionally uses <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> to write Edge-LLM
+sidecars (tokenizer JSON, embedding table) beside <code class="docutils literal notranslate"><span class="pre">language.engine</span></code>.</p>
+<p>Export stages use dummy or eager-forward tensors where needed so the pipeline
+does not re-run compiled modules after export.</p>
 </section>
 <section id="cli">
 <h2>CLI<a class="headerlink" href="#cli" title="Link to this heading">#</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--export-only<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/groot_edge_llm
 </pre></div>
 </div>
+<p>On completion the pipeline prints <code class="docutils literal notranslate"><span class="pre">Pipeline</span> <span class="pre">complete</span> <span class="pre">in</span> <span class="pre">X.XXs</span></code>.</p>
 <p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/pipelines/export.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/runner/export.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/compile.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/export/pipeline.py</span></code></p>
 </section>
@@ -986,7 +1010,7 @@ graph LR
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flow">Flow</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#per-stage-compile-loop">Per-stage compile loop</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#per-stage-export-loop">Per-stage export loop</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#outputs">Outputs</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cli">CLI</a></li>
 </ul>

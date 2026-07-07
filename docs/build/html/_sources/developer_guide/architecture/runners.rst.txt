@@ -4,11 +4,12 @@ Runners
 What is a runner?
 -----------------
 
-A **runner** is a generic stage executor. It implements the control flow for one stage
-and calls **hooks** for model-specific work. Runners are referenced by dotted import
-path on each :class:`StageConfig` (e.g. ``trt.runner.export:ExportRunner``).
+A **runner** is a generic stage executor. It implements the control flow for one
+stage and calls **hooks** for model-specific work. Runners are referenced by
+dotted import path on each :class:`StageConfig` (e.g.
+``trt.runner.export:ExportRunner``).
 
-Export and inference each have their own runner; load and benchmark do not use the
+Export and inference each have their own runner; benchmark does not use the
 runner pattern.
 
 
@@ -22,26 +23,27 @@ ExportRunner
    %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
    graph TB
        START[ExportRunner.run]
-       UP[Read upstream artifacts]
-       GLUE[process_inputs hook]
-       PLAN[plan_export hook]
-       COMPILE[compile hook]
-       META[metadata hook]
-       SAVE[save_artifacts hook]
-       RESULT[StageResult]
-       CLEAN[cleanup cloned modules]
+       PRE[preprocess hook]
+       EXP[export hook]
+       SAVE[save_artifacts hook?]
+       POST[postprocess hook]
+       RESULT[stage dict]
 
-       START --> UP --> GLUE --> PLAN --> COMPILE --> META --> SAVE --> RESULT --> CLEAN
+       START --> PRE --> EXP --> SAVE --> POST --> RESULT
 
        classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
        classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
        class START,RESULT nvNode
-       class UP,GLUE,PLAN,COMPILE,META,SAVE,CLEAN greyNode
+       class PRE,EXP,SAVE,POST greyNode
 
 
-Required export hooks: ``plan_export``, ``compile``. Optional: ``process_inputs``,
-``metadata``, ``save_artifacts``, ``after_stage``.
+Required export hooks: ``export``. Optional: ``preprocess``, ``save_artifacts``,
+``postprocess``.
+
+The ``export`` hook owns subgraph selection, attention patching, TRT trace/compile,
+and writing ``config.json`` sidecars. It returns ``engine_path``, ``tensors``,
+and optional ``metadata`` merged into the stage result.
 
 *File:* ``trt/runner/export.py``
 
@@ -57,31 +59,34 @@ InferenceRunner
    %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
    graph TB
        START[InferenceRunner.run]
-       UP[Read upstream stage_results]
-       GLUE[process_inputs hook]
+       PRE[preprocess hook]
        MODE{execution_mode}
-       EAGER[run_eager hook]
-       SER[run_serialized hook]
-       TRT[run_trt hook]
-       STORE[ctx.stage_results id]
+       COMP[compile hook]
+       LOAD[load hook]
+       EXEC[execute hook]
+       POST[postprocess hook]
+       RESULT[stage dict]
 
-       START --> UP --> GLUE --> MODE
-       MODE -->|EAGER| EAGER
-       MODE -->|SERIALIZED| SER
-       MODE -->|IN_MEMORY| TRT
-       EAGER --> STORE
-       SER --> STORE
-       TRT --> STORE
+       START --> PRE --> MODE
+       MODE -->|IN_MEMORY| COMP --> EXEC
+       MODE -->|SERIALIZED| LOAD --> EXEC
+       MODE -->|EAGER| EXEC
+       EXEC --> POST --> RESULT
 
        classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
        classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
-       class START,STORE nvNode
-       class UP,GLUE,MODE,EAGER,SER,TRT greyNode
+       class START,RESULT nvNode
+       class PRE,MODE,COMP,LOAD,EXEC,POST greyNode
 
 
-The runner picks ``run_eager``, ``run_serialized``, or ``run_trt`` based on
-``ctx.execution_mode``. Per-stage timing is recorded in ``ctx.inference.stage_ms``.
+Required inference hooks: ``execute``. Optional: ``preprocess``, ``compile``,
+``load``, ``postprocess``.
+
+The ``execute`` hook dispatches internally to eager, in-memory TRT, or serialized
+TRT backends. ``compile`` runs only for ``IN_MEMORY``; ``load`` runs only for
+``SERIALIZED`` and typically constructs a wrapper from
+``SerializedTRTEngine(ctx.engine_root / <subdir>)``.
 
 *File:* ``trt/runner/inference.py``
 
@@ -96,10 +101,11 @@ Runner vs pipeline
    * - Layer
      - Responsibility
    * - **Pipeline** (``ExportPipeline``, ``InferencePipeline``)
-     - Owns the stage loop, calls ``config.hooks.preprocess/postprocess``, stores results
+     - Owns the stage loop, merges upstream outputs, calls pipeline
+       ``preprocess`` / ``postprocess``, stores ``ctx.stage_results``
    * - **Runner** (``ExportRunner``, ``InferenceRunner``)
-     - Owns one stage's execution loop and dispatches to hooks
+     - Owns one stage's hook sequence
    * - **Hooks**
-     - Model-specific logic (clone subgraph, compile TRT, run eager/TRT forward)
+     - Model-specific logic (prepare tensors, compile TRT, run forward)
 
-*Base class:* ``trt/runner/base.py``
+*Shared types:* ``trt/config/stage_config.py``

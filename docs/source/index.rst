@@ -2,7 +2,7 @@ Torch-TRT pipelines Documentation
 =================================
 
 Welcome to the Torch-TRT pipelines documentation. This project provides export,
-load, inference, and benchmark orchestration for VLA models on top of
+inference, and benchmark orchestration for VLA models on top of
 `TensorRT Edge-LLM <https://nvidia.github.io/TensorRT-Edge-LLM/latest/>`_.
 
 .. toctree::
@@ -46,8 +46,12 @@ load, inference, and benchmark orchestration for VLA models on top of
 
 .. toctree::
    :maxdepth: 2
-   :caption: Diffusion
+   :caption: Export Modules
 
+   developer_guide/export_modules/overview
+   developer_guide/export_modules/vision-example
+   developer_guide/export_modules/language-example
+   developer_guide/export_modules/action-context-example
    developer_guide/diffusion/overview
    developer_guide/diffusion/components
    developer_guide/diffusion/groot-example

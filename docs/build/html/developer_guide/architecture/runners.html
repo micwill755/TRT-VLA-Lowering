@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -875,10 +880,11 @@ window.runMermaid = runMermaid;</script>
 <h1>Runners<a class="headerlink" href="#runners" title="Link to this heading">#</a></h1>
 <section id="what-is-a-runner">
 <h2>What is a runner?<a class="headerlink" href="#what-is-a-runner" title="Link to this heading">#</a></h2>
-<p>A <strong>runner</strong> is a generic stage executor. It implements the control flow for one stage
-and calls <strong>hooks</strong> for model-specific work. Runners are referenced by dotted import
-path on each <code class="xref py py-class docutils literal notranslate"><span class="pre">StageConfig</span></code> (e.g. <code class="docutils literal notranslate"><span class="pre">trt.runner.export:ExportRunner</span></code>).</p>
-<p>Export and inference each have their own runner; load and benchmark do not use the
+<p>A <strong>runner</strong> is a generic stage executor. It implements the control flow for one
+stage and calls <strong>hooks</strong> for model-specific work. Runners are referenced by
+dotted import path on each <code class="xref py py-class docutils literal notranslate"><span class="pre">StageConfig</span></code> (e.g.
+<code class="docutils literal notranslate"><span class="pre">trt.runner.export:ExportRunner</span></code>).</p>
+<p>Export and inference each have their own runner; benchmark does not use the
 runner pattern.</p>
 </section>
 <section id="exportrunner">
@@ -888,24 +894,24 @@ runner pattern.</p>
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
     START[ExportRunner.run]
-    UP[Read upstream artifacts]
-    GLUE[process_inputs hook]
-    PLAN[plan_export hook]
-    COMPILE[compile hook]
-    META[metadata hook]
-    SAVE[save_artifacts hook]
-    RESULT[StageResult]
-    CLEAN[cleanup cloned modules]
+    PRE[preprocess hook]
+    EXP[export hook]
+    SAVE[save_artifacts hook?]
+    POST[postprocess hook]
+    RESULT[stage dict]
 
-    START --&gt; UP --&gt; GLUE --&gt; PLAN --&gt; COMPILE --&gt; META --&gt; SAVE --&gt; RESULT --&gt; CLEAN
+    START --&gt; PRE --&gt; EXP --&gt; SAVE --&gt; POST --&gt; RESULT
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
     class START,RESULT nvNode
-    class UP,GLUE,PLAN,COMPILE,META,SAVE,CLEAN greyNode
-    </pre><p>Required export hooks: <code class="docutils literal notranslate"><span class="pre">plan_export</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>. Optional: <code class="docutils literal notranslate"><span class="pre">process_inputs</span></code>,
-<code class="docutils literal notranslate"><span class="pre">metadata</span></code>, <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code>, <code class="docutils literal notranslate"><span class="pre">after_stage</span></code>.</p>
+    class PRE,EXP,SAVE,POST greyNode
+    </pre><p>Required export hooks: <code class="docutils literal notranslate"><span class="pre">export</span></code>. Optional: <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code>,
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code>.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">export</span></code> hook owns subgraph selection, attention patching, TRT trace/compile,
+and writing <code class="docutils literal notranslate"><span class="pre">config.json</span></code> sidecars. It returns <code class="docutils literal notranslate"><span class="pre">engine_path</span></code>, <code class="docutils literal notranslate"><span class="pre">tensors</span></code>,
+and optional <code class="docutils literal notranslate"><span class="pre">metadata</span></code> merged into the stage result.</p>
 <p><em>File:</em> <code class="docutils literal notranslate"><span class="pre">trt/runner/export.py</span></code></p>
 </section>
 <section id="inferencerunner">
@@ -916,29 +922,31 @@ graph TB
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
     START[InferenceRunner.run]
-    UP[Read upstream stage_results]
-    GLUE[process_inputs hook]
+    PRE[preprocess hook]
     MODE{execution_mode}
-    EAGER[run_eager hook]
-    SER[run_serialized hook]
-    TRT[run_trt hook]
-    STORE[ctx.stage_results id]
+    COMP[compile hook]
+    LOAD[load hook]
+    EXEC[execute hook]
+    POST[postprocess hook]
+    RESULT[stage dict]
 
-    START --&gt; UP --&gt; GLUE --&gt; MODE
-    MODE --&gt;|EAGER| EAGER
-    MODE --&gt;|SERIALIZED| SER
-    MODE --&gt;|IN_MEMORY| TRT
-    EAGER --&gt; STORE
-    SER --&gt; STORE
-    TRT --&gt; STORE
+    START --&gt; PRE --&gt; MODE
+    MODE --&gt;|IN_MEMORY| COMP --&gt; EXEC
+    MODE --&gt;|SERIALIZED| LOAD --&gt; EXEC
+    MODE --&gt;|EAGER| EXEC
+    EXEC --&gt; POST --&gt; RESULT
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
-    class START,STORE nvNode
-    class UP,GLUE,MODE,EAGER,SER,TRT greyNode
-    </pre><p>The runner picks <code class="docutils literal notranslate"><span class="pre">run_eager</span></code>, <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code>, or <code class="docutils literal notranslate"><span class="pre">run_trt</span></code> based on
-<code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span></code>. Per-stage timing is recorded in <code class="docutils literal notranslate"><span class="pre">ctx.inference.stage_ms</span></code>.</p>
+    class START,RESULT nvNode
+    class PRE,MODE,COMP,LOAD,EXEC,POST greyNode
+    </pre><p>Required inference hooks: <code class="docutils literal notranslate"><span class="pre">execute</span></code>. Optional: <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>,
+<code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">execute</span></code> hook dispatches internally to eager, in-memory TRT, or serialized
+TRT backends. <code class="docutils literal notranslate"><span class="pre">compile</span></code> runs only for <code class="docutils literal notranslate"><span class="pre">IN_MEMORY</span></code>; <code class="docutils literal notranslate"><span class="pre">load</span></code> runs only for
+<code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code> and typically constructs a wrapper from
+<code class="docutils literal notranslate"><span class="pre">SerializedTRTEngine(ctx.engine_root</span> <span class="pre">/</span> <span class="pre">&lt;subdir&gt;)</span></code>.</p>
 <p><em>File:</em> <code class="docutils literal notranslate"><span class="pre">trt/runner/inference.py</span></code></p>
 </section>
 <section id="runner-vs-pipeline">
@@ -955,18 +963,19 @@ graph TB
 </thead>
 <tbody>
 <tr class="row-even"><td><p><strong>Pipeline</strong> (<code class="docutils literal notranslate"><span class="pre">ExportPipeline</span></code>, <code class="docutils literal notranslate"><span class="pre">InferencePipeline</span></code>)</p></td>
-<td><p>Owns the stage loop, calls <code class="docutils literal notranslate"><span class="pre">config.hooks.preprocess/postprocess</span></code>, stores results</p></td>
+<td><p>Owns the stage loop, merges upstream outputs, calls pipeline
+<code class="docutils literal notranslate"><span class="pre">preprocess</span></code> / <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>, stores <code class="docutils literal notranslate"><span class="pre">ctx.stage_results</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>Runner</strong> (<code class="docutils literal notranslate"><span class="pre">ExportRunner</span></code>, <code class="docutils literal notranslate"><span class="pre">InferenceRunner</span></code>)</p></td>
-<td><p>Owns one stage’s execution loop and dispatches to hooks</p></td>
+<td><p>Owns one stage’s hook sequence</p></td>
 </tr>
 <tr class="row-even"><td><p><strong>Hooks</strong></p></td>
-<td><p>Model-specific logic (clone subgraph, compile TRT, run eager/TRT forward)</p></td>
+<td><p>Model-specific logic (prepare tensors, compile TRT, run forward)</p></td>
 </tr>
 </tbody>
 </table>
 </div>
-<p><em>Base class:</em> <code class="docutils literal notranslate"><span class="pre">trt/runner/base.py</span></code></p>
+<p><em>Shared types:</em> <code class="docutils literal notranslate"><span class="pre">trt/config/stage_config.py</span></code></p>
 </section>
 </section>
 

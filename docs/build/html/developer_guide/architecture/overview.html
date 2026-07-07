@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -873,10 +878,10 @@ window.runMermaid = runMermaid;</script>
                   
   <section id="overview">
 <h1>Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h1>
-<p><strong>Torch-TRT pipelines</strong> orchestrates VLA export, engine load, inference, and benchmark
-through a single <code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeOrchestrator</span></code> and shared <code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeContext</span></code>. Generic
-<strong>pipelines</strong> walk ordered <strong>stages</strong>; <strong>runners</strong> execute each stage; model-specific
-<strong>hooks</strong> supply the behavior.</p>
+<p><strong>Torch-TRT pipelines</strong> orchestrates VLA export, inference, and benchmark through
+a single <code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeOrchestrator</span></code> and shared <code class="xref py py-class docutils literal notranslate"><span class="pre">EdgeContext</span></code>. Generic
+<strong>pipelines</strong> walk ordered <strong>stages</strong>; <strong>runners</strong> execute each stage;
+model-specific <strong>hooks</strong> supply the behavior.</p>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
@@ -887,7 +892,6 @@ graph TB
 
     subgraph PIPELINES [&quot;Registered pipelines&quot;]
         EXPORT[Export Pipeline]
-        LOAD[Load Pipeline]
         BENCH[Benchmark Pipeline]
         INFER[Inference Pipeline]
     end
@@ -896,8 +900,7 @@ graph TB
     ORCH --&gt; PROFILE
     ORCH --&gt; CTX
     ORCH --&gt; EXPORT
-    ORCH --&gt; LOAD
-    LOAD --&gt; BENCH
+    ORCH --&gt; BENCH
     BENCH --&gt; INFER
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
@@ -906,7 +909,7 @@ graph TB
     classDef lightSubGraph fill:none,stroke:#aaa,stroke-width:1.5px
 
     class CLIENT inputNode
-    class ORCH,PROFILE,CTX,EXPORT,LOAD,BENCH,INFER nvNode
+    class ORCH,PROFILE,CTX,EXPORT,BENCH,INFER nvNode
     class PIPELINES lightSubGraph
     </pre><section id="orchestrator-flow">
 <h2>Orchestrator flow<a class="headerlink" href="#orchestrator-flow" title="Link to this heading">#</a></h2>
@@ -915,19 +918,51 @@ graph TB
 graph LR
     START[EdgeOrchestrator.run] --&gt; CTX_BUILD[_build_context]
     CTX_BUILD --&gt; MODE{CLI flags}
+    MODE --&gt;|--inference-only| INF[InferencePipeline EAGER]
     MODE --&gt;|default or --export-only| EXPORT[ExportPipeline]
-    MODE --&gt;|default or --benchmark-only| LOAD[LoadPipeline]
-    LOAD --&gt; BENCH[BenchmarkPipeline]
-    BENCH --&gt; INFER[InferencePipeline per backend]
+    MODE --&gt;|default or --benchmark-only| BENCH[BenchmarkPipeline]
+    BENCH --&gt; INF2[InferencePipeline per mode]
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
     classDef inputNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
     class START inputNode
-    class CTX_BUILD,EXPORT,LOAD,BENCH,INFER nvNode
+    class CTX_BUILD,EXPORT,BENCH,INF,INF2 nvNode
     class MODE greyNode
     </pre></section>
+<section id="cli-modes">
+<h2>CLI modes<a class="headerlink" href="#cli-modes" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 28.0%" />
+<col style="width: 72.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Flag</p></th>
+<th class="head"><p>Behavior</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>(default)</p></td>
+<td><p>Export engines, then benchmark (parity across eager / in-memory / serialized)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--export-only</span></code></p></td>
+<td><p>Compile engines to <code class="docutils literal notranslate"><span class="pre">--engine-dir</span></code>; skip benchmark</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--benchmark-only</span></code></p></td>
+<td><p>Run benchmark parity; skip export (requires existing engines for serialized)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--inference-only</span></code></p></td>
+<td><p>Single eager inference pass; skip export and benchmark</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Serialized engines are loaded lazily inside each inference stage’s <code class="docutils literal notranslate"><span class="pre">load</span></code> hook
+when the benchmark (or a serialized inference run) sets
+<code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span> <span class="pre">=</span> <span class="pre">SERIALIZED</span></code>. There is no separate load pipeline step.</p>
+</section>
 <section id="key-files">
 <h2>Key files<a class="headerlink" href="#key-files" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
@@ -942,16 +977,17 @@ graph LR
 </thead>
 <tbody>
 <tr class="row-even"><td><p>Orchestration</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/orchestrator/edge_orchestrator.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/context.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/orchestrator/edge_orchestrator.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/context.py</span></code>, <code class="docutils literal notranslate"><span class="pre">app.py</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p>Pipeline configs</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/config/stage_config.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/config/load_config.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/config/benchmark_config.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/config/pipeline_registry.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/config/stage_config.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/config/pipeline_registry.py</span></code></p></td>
 </tr>
 <tr class="row-even"><td><p>Per-model graphs</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/export/pipeline.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/inference/pipeline.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/load/pipeline.py</span></code></p></td>
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/inference/pipeline.py</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Serialized wrappers</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/load/serialize.py</span></code></p></td>
 </tr>
 </tbody>
 </table>
@@ -1009,6 +1045,7 @@ graph LR
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#orchestrator-flow">Orchestrator flow</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cli-modes">CLI modes</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#key-files">Key files</a></li>
 </ul>
   </nav></div>

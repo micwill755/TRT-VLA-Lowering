@@ -4,12 +4,12 @@ Hooks
 What are hooks?
 ---------------
 
-**Hooks** are model-specific callables registered as dotted import paths on pipeline
-and stage configs. Generic runners resolve and invoke them; hooks contain the actual
-export, compile, and inference logic for each model.
+**Hooks** are model-specific callables registered as dotted import paths on
+pipeline and stage configs. Generic runners resolve and invoke them; hooks
+contain the actual export and inference logic for each model.
 
-Hooks are resolved at runtime by :func:`resolve` — ``"module.path:callable"`` → imported
-function.
+Hooks are resolved at runtime by :func:`resolve` — ``"module.path:callable"`` →
+imported function.
 
 
 Hook resolution
@@ -20,7 +20,7 @@ Hook resolution
    %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
    graph LR
        CFG[StageConfig.hooks]
-       PATH["trt.executor.models.groot.export.vision:plan_export"]
+       PATH["trt.executor.models.groot.export.vision:export"]
        RESOLVE[resolve path]
        FN[callable]
        RUNNER[ExportRunner / InferenceRunner]
@@ -47,9 +47,10 @@ Pipeline hooks vs stage hooks
 
    * - Type
      - When invoked
-   * - **PipelineHooks** — ``preprocess``, ``postprocess``
-     - Once before / after the full stage loop
-   * - **StageHooks** — per-stage callables
+   * - **Pipeline hooks** — ``preprocess``, ``postprocess``
+     - Once before / after the full stage loop. ``preprocess`` returns pipeline
+       inputs (tokenized tensors, state, etc.) merged into every stage.
+   * - **Stage hooks** — per-stage callables
      - Invoked by the runner for each stage
 
 
@@ -63,33 +64,29 @@ Stage hook catalog
    * - Hook
      - Used by
      - Purpose
-   * - ``process_inputs``
+   * - ``preprocess``
      - Export, Inference
-     - Glue upstream tensors into current stage inputs
-   * - ``plan_export``
+     - Shape stage inputs from merged pipeline + upstream dict
+   * - ``export``
      - Export
-     - Clone subgraph, build :class:`ExportPlan`
-   * - ``compile``
-     - Export
-     - ``torch.export`` trace + Torch-TensorRT compile
+     - Trace subgraph, compile TRT engine, return ``engine_path`` and
+       downstream ``tensors``
    * - ``save_artifacts``
      - Export
      - Write Edge-LLM sidecars (tokenizer, embeddings, etc.)
-   * - ``metadata``
-     - Export
-     - Attach stage metadata to ``StageResult``
-   * - ``run_eager``
-     - Inference
-     - PyTorch forward on live ``ctx.model`` / ``ctx.policy``
-   * - ``run_serialized``
-     - Inference
-     - Forward through ``ctx.handles.serialized``
-   * - ``run_trt``
-     - Inference
-     - Forward through in-memory TRT module
-   * - ``after_stage``
+   * - ``postprocess``
      - Export, Inference
-     - Optional post-stage side effects
+     - Update ``ctx.inference`` / ``ctx.actions`` from stage result
+   * - ``compile``
+     - Inference
+     - On-the-fly TRT compile when ``execution_mode`` is ``IN_MEMORY``
+   * - ``load``
+     - Inference
+     - Deserialize engine wrapper when ``execution_mode`` is ``SERIALIZED``
+   * - ``execute``
+     - Inference
+     - Run eager, in-memory TRT, or serialized TRT forward (mode dispatch
+       inside the hook)
 
 
 Where hooks live
@@ -102,15 +99,21 @@ Model hooks are organized under ``trt/executor/models/<model>/``:
    groot/
      export/
        pipeline.py      # StageConfig + hook paths
-       vision.py        # plan_export, compile
+       process.py       # pipeline preprocess / postprocess
+       vision.py        # preprocess, export, postprocess
        language.py
-       glue.py          # process_inputs
+       action_context.py
+       diffusion.py
      inference/
        pipeline.py
-       vision.py        # run_eager, run_serialized, run_trt
-       glue.py
+       process.py
+       vision.py        # preprocess, compile, load, execute, postprocess
+       language.py
+     load/
+       serialize.py     # SerializedGroot* wrappers (not pipeline hooks)
 
-Shared export utilities (not hooks) live in ``trt/modules/export/``, ``trt/compile.py``,
-and ``trt/plugin/``.
+Shared export utilities (not hooks) live in ``trt/modules/export/``,
+``trt/compile.py``, and ``trt/plugin/``.
 
-*Config types:* ``trt/config/stage_config.py`` (:class:`PipelineHooks`, :class:`StageHooks`)
+*Config types:* ``trt/config/stage_config.py`` (:class:`PipelineConfig`,
+:class:`StageConfig`)

@@ -500,7 +500,7 @@ window.runMermaid = runMermaid;</script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
     <link rel="next" title="Diffusion Components" href="components.html" />
-    <link rel="prev" title="Parity and Debugging" href="../plugins/parity-and-debugging.html" />
+    <link rel="prev" title="GR00T Action Context Export Example" href="../export_modules/action-context-example.html" />
 
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -993,11 +998,14 @@ graph TB
 <section id="related-pages">
 <h2>Related pages<a class="headerlink" href="#related-pages" title="Link to this heading">#</a></h2>
 <ul class="simple">
+<li><p><a class="reference internal" href="../export_modules/overview.html"><span class="doc">Export Modules Overview</span></a> — all GR00T export stages at a glance.</p></li>
 <li><p><a class="reference internal" href="components.html"><span class="doc">Diffusion Components</span></a> — class-by-class reference for wrappers and encoders.</p></li>
 <li><p><a class="reference internal" href="groot-example.html"><span class="doc">GR00T Diffusion Step Example</span></a> — end-to-end GR00T one-step walkthrough with tensor shapes.</p></li>
+<li><p><a class="reference internal" href="action-rollout.html"><span class="doc">Action Rollout</span></a> — <code class="docutils literal notranslate"><span class="pre">sample_actions_raw</span></code>, adapters, and the multi-step loop
+outside the compiled engine.</p></li>
 </ul>
 <p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/modules/export/diffusion.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/action_rollout.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/action.py</span></code></p>
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/diffusion.py</span></code></p>
 </section>
 </section>
 
@@ -1012,12 +1020,12 @@ graph TB
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="../plugins/parity-and-debugging.html"
+       href="../export_modules/action-context-example.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">Parity and Debugging</p>
+        <p class="prev-next-title">GR00T Action Context Export Example</p>
       </div>
     </a>
     <a class="right-next"

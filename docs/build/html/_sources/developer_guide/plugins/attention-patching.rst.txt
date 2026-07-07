@@ -109,7 +109,8 @@ Where patching happens
      - ``test_vision.py``, ``molmo2-test.py``
 
 
-``plan_export`` clones the HuggingFace subgraph first (see export pipeline docs).
+``plan_export`` clones the HuggingFace subgraph inside the stage ``export`` hook
+(see export pipeline docs).
 Patching operates on ``plan.args["patch_target"]`` or the cloned ``language_model``,
 not the live model used for eager inference benchmarks.
 

@@ -9,7 +9,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Load Pipeline &#8212; Torch-TRT pipelines</title>
+    <title>Engine Load (Serialized Inference) &#8212; Torch-TRT pipelines</title>
   
   
   
@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">Load Pipeline</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -854,7 +859,7 @@ window.runMermaid = runMermaid;</script>
         <i class="fa-solid fa-home"></i>
       </a>
     </li>
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Load Pipeline</span></li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Engine Load (Serialized Inference)</span></li>
   </ul>
 </nav>
 </div>
@@ -871,33 +876,31 @@ window.runMermaid = runMermaid;</script>
 <div id="searchbox"></div>
                 <article class="bd-article">
                   
-  <section id="load-pipeline">
-<h1>Load Pipeline<a class="headerlink" href="#load-pipeline" title="Link to this heading">#</a></h1>
-<p>The <strong>load pipeline</strong> deserializes compiled TensorRT engines from <code class="docutils literal notranslate"><span class="pre">engine_root</span></code> into
-<code class="docutils literal notranslate"><span class="pre">ctx.handles.serialized</span></code>. It runs before benchmark when engines were built in a
-prior export step (or supplied via <code class="docutils literal notranslate"><span class="pre">--engine-dir</span></code>).</p>
+  <section id="engine-load-serialized-inference">
+<h1>Engine Load (Serialized Inference)<a class="headerlink" href="#engine-load-serialized-inference" title="Link to this heading">#</a></h1>
+<p>Serialized TensorRT engines are <strong>not</strong> loaded by a separate pipeline step.
+Instead, each inference stage’s <code class="docutils literal notranslate"><span class="pre">load</span></code> hook constructs a wrapper from
+<code class="docutils literal notranslate"><span class="pre">ctx.engine_root</span></code> when <code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span></code> is <code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code>.</p>
 <section id="flow">
 <h2>Flow<a class="headerlink" href="#flow" title="Link to this heading">#</a></h2>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
-    START[LoadPipeline.run]
-    SPECS[SerializedStageSpec list]
-    LOAD[load_serialized_modules]
-    HANDLES[ctx.handles.serialized]
+    MODE[ExecutionMode.SERIALIZED]
+    LOAD[stage load hook]
+    WRAP[SerializedGroot* wrapper]
+    EXEC[stage execute hook]
 
-    START --&gt; SPECS --&gt; LOAD --&gt; HANDLES
+    MODE --&gt; LOAD --&gt; WRAP --&gt; EXEC
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
-    class START,HANDLES nvNode
-    class SPECS,LOAD greyNode
+    class MODE,EXEC nvNode
+    class LOAD,WRAP greyNode
     </pre></section>
-<section id="stage-specs">
-<h2>Stage specs<a class="headerlink" href="#stage-specs" title="Link to this heading">#</a></h2>
-<p>Each <code class="xref py py-class docutils literal notranslate"><span class="pre">SerializedStageSpec</span></code> maps a handle key to an engine subdirectory and
-wrapper class:</p>
+<section id="gr00t-wrappers">
+<h2>GR00T wrappers<a class="headerlink" href="#gr00t-wrappers" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 18.0%" />
@@ -906,32 +909,32 @@ wrapper class:</p>
 <col style="width: 42.0%" />
 </colgroup>
 <thead>
-<tr class="row-odd"><th class="head"><p>key</p></th>
+<tr class="row-odd"><th class="head"><p>Stage</p></th>
 <th class="head"><p>engine_subdir</p></th>
-<th class="head"><p>wrapper</p></th>
-<th class="head"><p>Example (GR00T)</p></th>
+<th class="head"><p>Wrapper class</p></th>
+<th class="head"><p>Engine file</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">vision</span></code></p></td>
+<tr class="row-even"><td><p>vision</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">visual/</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">SerializedGrootVision</span></code></p></td>
-<td><p>Vision TRT engine</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual.engine</span></code></p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">language</span></code></p></td>
+<tr class="row-odd"><td><p>language</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">language/</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">SerializedGrootLanguage</span></code></p></td>
-<td><p>Language TRT engine</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">language.engine</span></code></p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">action_context</span></code></p></td>
+<tr class="row-even"><td><p>action_context</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">action_context/</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">SerializedGrootActionContext</span></code></p></td>
-<td><p>Context splice engine</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">context.engine</span></code></p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">action</span></code></p></td>
+<tr class="row-odd"><td><p>action</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">action/</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">SerializedGrootAction</span></code></p></td>
-<td><p>Action / diffusion engine</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">action.engine</span></code></p></td>
 </tr>
 </tbody>
 </table>
@@ -940,16 +943,18 @@ wrapper class:</p>
 <section id="directory-layout">
 <h2>Directory layout<a class="headerlink" href="#directory-layout" title="Link to this heading">#</a></h2>
 <div class="highlight-text notranslate"><div class="highlight"><pre><span></span>engine_root/
-  visual/engine.trt + config.json
-  language/engine.trt + config.json
-  action_context/engine.trt + config.json
-  action/engine.trt + config.json
+  visual/visual.engine + config.json
+  language/language.engine + config.json + tokenizer + embedding.safetensors
+  action_context/context.engine + config.json
+  action/action.engine + config.json
 </pre></div>
 </div>
-<p>Load does <strong>not</strong> use runners or stage hooks — it is a straight deserialize step.
-Inference <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code> hooks call into the loaded wrappers.</p>
-<p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/pipelines/load.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/config/load_config.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/serialize.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/load/pipeline.py</span></code></p>
+<p>Each <code class="docutils literal notranslate"><span class="pre">load</span></code> hook reads <code class="docutils literal notranslate"><span class="pre">config.json</span></code> via <code class="xref py py-class docutils literal notranslate"><span class="pre">SerializedTRTEngine</span></code> and
+returns a model-specific callable used by <code class="docutils literal notranslate"><span class="pre">execute</span></code>.</p>
+<p>The benchmark pipeline checks that all four engine directories exist before
+running the <code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code> mode.</p>
+<p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/serialize.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/load/serialize.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/inference/*.py</span></code> (<code class="docutils literal notranslate"><span class="pre">load</span></code> hooks)</p>
 </section>
 </section>
 
@@ -1003,7 +1008,7 @@ Inference <code class="docutils literal notranslate"><span class="pre">run_seria
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flow">Flow</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stage-specs">Stage specs</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#gr00t-wrappers">GR00T wrappers</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#directory-layout">Directory layout</a></li>
 </ul>
   </nav></div>

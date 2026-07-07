@@ -22,40 +22,37 @@ A single run is driven by :class:`EdgeOrchestrator` and one shared
    VLAProfile (policy, model, prepare_compile_inputs)
         │
         ▼
-   EdgeContext  ──► ExportPipeline   (compile engines → engine_root/)
-        │          LoadPipeline      (deserialize engines → handles.serialized)
-        │          BenchmarkPipeline   (eager vs TRT timing + parity)
+   EdgeContext  ──► ExportPipeline     (compile engines → engine_root/)
+        │          BenchmarkPipeline   (eager vs TRT parity)
+        │          InferencePipeline   (per-stage eager / compile / load)
         │
-        └── artifacts, export_state, inference, benchmark
+        └── stage_results, inference, benchmark
 
-Each **model** defines three pipeline configs (export, inference, load) as a
-**linear or DAG stage graph**. Stages are generic; behavior lives in **hooks**
-under ``trt/executor/models/<model>/``.
+Each **model** defines export and inference pipeline configs as a **linear stage
+graph**. Stages are generic; behavior lives in **hooks** under
+``trt/executor/models/<model>/``.
 
 **Export stage loop** (``ExportRunner``):
 
 .. code-block:: text
 
-   preprocess(ctx)
+   pipeline preprocess(ctx) → pipeline_inputs
    for stage in stages:
-       process_inputs? (glue)
-       plan_export  → ExportPlan (module, sample_inputs, engine_dir, cleanup_modules)
-       compile      → torch.export trace + TensorRT engine + config.json
-       metadata / save_artifacts?
-       ctx.artifacts["stage_N"] = StageResult
-   postprocess?(ctx)
+       stage_inputs = merge(pipeline_inputs, upstream stage_results)
+       preprocess? → export → save_artifacts? → postprocess?
+       ctx.stage_results[stage_id] = stage dict
+   pipeline postprocess?(ctx, stage_results)
 
 **Inference stage loop** (``InferenceRunner``):
 
 .. code-block:: text
 
-   preprocess(ctx)
+   pipeline preprocess(ctx) → pipeline_inputs
    for stage in stages:
-       process_inputs? (glue)
-       run_eager | run_serialized | run_trt  (selected by ExecutionMode)
-       ctx.stage_results[N] = InferenceStageResult
-   pick final_output stage → ctx.actions
-   postprocess?(ctx)
+       stage_inputs = merge(pipeline_inputs, upstream stage_results)
+       preprocess? → compile? | load? → execute → postprocess?
+       ctx.stage_results[stage_id] = stage dict
+   pipeline postprocess?(ctx, stage_results)
 
 Reference implementation: **GR00T** (``Gr00tN1d7``) — four engines:
 
@@ -81,8 +78,8 @@ Reference implementation: **GR00T** (``Gr00tN1d7``) — four engines:
      - ``groot/inference/action_context.py``
    * - 3 Action (diffusion step)
      - ``action/``
-     - ``groot/export/action.py``
-     - ``groot/inference/action.py``
+     - ``groot/export/diffusion.py``
+     - ``groot/inference/diffusion.py``
 
 
 Pipeline Customization Points
@@ -97,31 +94,29 @@ Pipeline Customization Points
      - What to update
    * - Orchestrator
      - ``trt/orchestrator/edge_orchestrator.py``, ``app.py``
-     - CLI entry, ``EdgeContext`` construction, export/load/benchmark sequencing.
+     - CLI entry, ``EdgeContext`` construction, export/benchmark/inference sequencing.
    * - Pipeline registry
      - ``trt/config/pipeline_registry.py``
-     - ``register_export_pipeline``, ``register_inference_pipeline``,
-       ``register_load_pipeline``; aliases (e.g. ``gr00t`` → ``Gr00tN1d7``).
+     - ``register_export_pipeline``, ``register_inference_pipeline``; aliases
+       (e.g. ``gr00t`` → ``Gr00tN1d7``).
    * - Export topology
      - ``trt/executor/models/<model>/export/pipeline.py``
-     - ``PipelineConfig``: ordered ``StageConfig`` list, ``PipelineHooks``,
+     - ``PipelineConfig``: ordered ``StageConfig`` list, pipeline hooks,
        stage ``input_sources`` (DAG edges).
    * - Inference topology
      - ``trt/executor/models/<model>/inference/pipeline.py``
-     - Same graph as export; ``StageHooks`` use ``run_eager`` /
-       ``run_serialized`` / ``run_trt``.
-   * - Load topology
-     - ``trt/executor/models/<model>/load/pipeline.py``,
-       ``load/serialize.py``
-     - ``SerializedStageSpec(key, engine_subdir, wrapper_cls)`` per engine.
+     - Same graph as export; stage hooks use ``preprocess``, ``compile``,
+       ``load``, ``execute``, ``postprocess``.
+   * - Serialized wrappers
+     - ``trt/executor/models/<model>/load/serialize.py``
+     - ``SerializedGroot*`` callables used by inference ``load`` hooks.
    * - Generic runners
-     - ``trt/pipelines/{export,inference,load,benchmark}.py``,
+     - ``trt/pipelines/{export,inference,benchmark}.py``,
        ``trt/runner/{export,inference}.py``
      - Usually unchanged; new models plug in via hooks + config.
    * - Benchmark
-     - ``trt/executor/benchmark/pipeline.py``,
-       ``trt/executor/benchmark/run.py``
-     - Benchmark stages (eager, serialized TRT), parity reports.
+     - ``trt/pipelines/benchmark.py``, ``trt/measure.py``
+     - Runs inference per execution mode; prints stage parity tables.
 
 
 Profile Customization Points
@@ -163,7 +158,7 @@ Stage Hook Customization Points
 Each stage is a **node** with a **runner** and **hooks** (string paths resolved
 at runtime via ``trt.hooks.resolve``).
 
-**Export** (``StageHooks``):
+**Export** (stage hooks):
 
 .. list-table::
    :header-rows: 1
@@ -172,27 +167,23 @@ at runtime via ``trt.hooks.resolve``).
    * - Hook
      - Typical module
      - Responsibility
-   * - ``plan_export``
+   * - ``preprocess``
      - ``export/<stage>.py``
-     - Clone subgraph, build ``ExportPlan`` (module, ``sample_inputs``,
-       ``engine_dir``, ``cleanup_modules``).
-   * - ``compile``
+     - Shape stage inputs from merged pipeline + upstream dict; splice upstream
+       tensors when needed.
+   * - ``export``
      - ``export/<stage>.py``
-     - Patch attention plugins if needed, ``save_trt_engine_module``, write
-       ``config.json`` sidecars.
-   * - ``metadata``
-     - ``export/<stage>.py``
-     - Shapes and fields stored on ``StageResult.metadata`` for downstream
-       stages / load.
+     - Patch attention plugins if needed, trace subgraph, ``save_trt_engine_module``,
+       return ``engine_path`` and downstream ``tensors``.
    * - ``save_artifacts``
      - ``export/<stage>.py``
      - Non-TRT files (e.g. embedding table, tokenizer JSON beside
        ``language.engine``).
-   * - ``process_inputs``
-     - ``export/glue.py``
-     - Inter-stage tensor wiring; may use dummy tensors for trace.
+   * - ``postprocess``
+     - ``export/<stage>.py``
+     - Optional stage cleanup or context updates.
 
-**Inference** (``StageHooks``):
+**Inference** (stage hooks):
 
 .. list-table::
    :header-rows: 1
@@ -201,18 +192,22 @@ at runtime via ``trt.hooks.resolve``).
    * - Hook
      - Typical module
      - Responsibility
-   * - ``run_eager``
+   * - ``preprocess``
      - ``inference/<stage>.py``
-     - PyTorch parity path on live ``ctx.model`` / ``ctx.policy``.
-   * - ``run_serialized``
+     - Shape stage inputs; read upstream ``tensors`` from merged dict.
+   * - ``compile``
      - ``inference/<stage>.py``
-     - Call ``ctx.handles.serialized.<key>`` (loaded ``.engine``).
-   * - ``run_trt``
+     - On-the-fly TRT compile when ``execution_mode`` is ``IN_MEMORY``.
+   * - ``load``
+     - ``inference/<stage>.py`` + ``load/serialize.py``
+     - Construct serialized engine wrapper when ``execution_mode`` is
+       ``SERIALIZED``.
+   * - ``execute``
      - ``inference/<stage>.py``
-     - In-process TRT module (``ctx.handles.in_memory``) when populated.
-   * - ``process_inputs``
-     - ``inference/glue.py``
-     - Copy upstream ``StageResult`` tensors into ``ctx.inference`` scratch.
+     - Dispatch eager / in-memory TRT / serialized TRT forward internally.
+   * - ``postprocess``
+     - ``inference/<stage>.py``
+     - Copy outputs into ``ctx.inference`` or ``ctx.actions``.
 
 
 Shared Module Customization Points
@@ -306,27 +301,24 @@ Follow these steps in order. Use GR00T as the template
      ``PipelineConfig(stages=...)``.
    - For each stage, implement ``export/<stage>.py``:
 
-     - ``plan_export(ctx, stage_inputs) -> ExportPlan``
-     - ``compile(plan) -> Path``
-     - ``metadata`` / ``save_artifacts`` as needed
+     - ``preprocess(ctx, inputs)`` — shape bindings from merged pipeline + upstream dict
+     - ``export(ctx, prepared)`` — trace, compile, return ``engine_path`` and ``tensors``
+     - ``save_artifacts`` / ``postprocess`` as needed
 
-   - Add ``export/glue.py`` for ``process_inputs`` between stages.
-   - Add ``export/preprocess.py`` / ``postprocess.py`` if the whole pipeline
-     needs bookends.
+   - Add ``export/process.py`` for pipeline-level ``preprocess`` / ``postprocess``.
 
 4. **Create the inference pipeline**
 
    - Mirror the **same** ``stage_id`` and ``input_sources`` graph in
      ``inference/pipeline.py``.
-   - Implement ``run_eager``, ``run_serialized``, ``run_trt`` per stage in
-     ``inference/<stage>.py``.
-   - Reuse or share packing logic with export (e.g. ``pack_*_language_inputs``).
+   - Implement ``preprocess``, ``compile``, ``load``, ``execute``, and
+     ``postprocess`` per stage in ``inference/<stage>.py``.
+   - Reuse packing logic with export (e.g. language embedding splice).
 
-5. **Create the load pipeline**
+5. **Add serialized wrappers**
 
-   - ``load/pipeline.py``: tuple of ``SerializedStageSpec``.
    - ``load/serialize.py``: thin wrappers around ``SerializedTRTEngine`` with
-     correct positional args per engine.
+     correct positional args per engine, used by inference ``load`` hooks.
 
 6. **Register pipelines**
 
@@ -335,12 +327,10 @@ Follow these steps in order. Use GR00T as the template
 
      .. code-block:: python
 
-        register_export_pipeline("MyModel", MY_PIPELINE, aliases=("mymodel",))
-        register_inference_pipeline("MyModel", MY_INFERENCE_PIPELINE, aliases=("mymodel",))
-        register_load_pipeline("MyModel", MY_LOAD_PIPELINE, aliases=("mymodel",))
+        register_export_pipeline("MyModel", MY_PIPELINE)
+        register_inference_pipeline("MyModel", MY_INFERENCE_PIPELINE)
 
-   - Ensure ``profile.pipeline_model_type`` or ``profile.name`` resolves via
-     aliases.
+   - Ensure ``profile.name`` resolves via registry lookup.
 
 7. **Export and verify**
 
@@ -358,9 +348,7 @@ Follow these steps in order. Use GR00T as the template
 
       python app.py --model mymodel --benchmark-only --engine-dir /tmp/my_model_edge_llm
 
-   - Review timing summary, action ADE vs eager, and language logits parity
-     (``compare_language_logits`` in ``groot/inference/language.py`` as
-     reference).
+   - Review per-stage parity tables (eager vs in-memory vs serialized).
 
 
 Adding A Pipeline Stage
@@ -371,11 +359,13 @@ language and action):
 
 1. Assign the next ``stage_id`` and set ``input_sources`` to upstream stage
    id(s).
-2. Add export + inference hook modules and glue functions.
-3. Add ``SerializedStageSpec`` and wrapper in ``load/``.
+2. Add export hooks (``preprocess``, ``export``, ``postprocess``) and matching
+   inference hooks (``preprocess``, ``compile``, ``load``, ``execute``,
+   ``postprocess``).
+3. Add a serialized wrapper in ``load/serialize.py`` if the stage has a TRT
+   engine.
 4. Append ``StageConfig`` to export and inference ``pipeline.py`` tuples.
-5. Update ``PipelineIOSpec`` and any ``plan_export`` metadata consumed by
-   downstream glue.
+5. Update ``PipelineIOSpec`` and downstream stage ``preprocess`` wiring.
 
 
 Component Reference
@@ -422,7 +412,7 @@ StageConfig Fields
    * - Field
      - Meaning
    * - ``stage_id``
-     - Unique index; referenced by ``input_sources`` and ``ctx.artifacts``.
+     - Unique index; referenced by ``input_sources`` and ``ctx.stage_results``.
    * - ``input_sources``
      - Tuple of upstream ``stage_id`` values; ``()`` = graph entry (uses
        ``ctx.model_inputs``).

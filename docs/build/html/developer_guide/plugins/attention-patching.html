@@ -362,7 +362,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../architecture/hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -375,11 +375,16 @@
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -541,7 +546,8 @@ patched attention into later stages or CPU offload paths:</p>
 </tbody>
 </table>
 </div>
-<p><code class="docutils literal notranslate"><span class="pre">plan_export</span></code> clones the HuggingFace subgraph first (see export pipeline docs).
+<p><code class="docutils literal notranslate"><span class="pre">plan_export</span></code> clones the HuggingFace subgraph inside the stage <code class="docutils literal notranslate"><span class="pre">export</span></code> hook
+(see export pipeline docs).
 Patching operates on <code class="docutils literal notranslate"><span class="pre">plan.args[&quot;patch_target&quot;]</span></code> or the cloned <code class="docutils literal notranslate"><span class="pre">language_model</span></code>,
 not the live model used for eager inference benchmarks.</p>
 </section>

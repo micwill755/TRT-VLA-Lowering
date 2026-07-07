@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -876,25 +881,22 @@ window.runMermaid = runMermaid;</script>
 <p>This example shows how GR00T wraps a vision-language-action model as a set of
 TensorRT engines and how the export, load, and inference pipelines sit above the
 runtime layer. Use it as the template when adding another engine-backed model.</p>
-<p>At a high level, the runtime owns the live model, policy, device, sample inputs,
-and engine directory. The pipeline layer does not replace that runtime. It
-adapts the runtime state into ordered export stages, writes engines, loads those
-engines back, and then drives inference through the same stage graph.</p>
+<p>At a high level, the orchestrator owns the live model, policy, device, sample inputs,
+and engine directory. The pipeline layer adapts that state into ordered export
+stages, writes engines, and drives inference and benchmark through the same
+stage graph.</p>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
-    RT[&quot;LLMEngineRuntime / orchestrator&lt;br/&gt;model, policy, inputs, device&quot;]
+    RT[&quot;EdgeOrchestrator / EdgeContext&lt;br/&gt;model, policy, inputs, device&quot;]
     CTX[&quot;EdgeContext&lt;br/&gt;shared run state&quot;]
     EXP[&quot;ExportPipeline&lt;br/&gt;compile engines&quot;]
-    LOAD[&quot;LoadPipeline&lt;br/&gt;deserialize engines&quot;]
     INF[&quot;InferencePipeline&lt;br/&gt;run stage graph&quot;]
     BENCH[&quot;BenchmarkPipeline&lt;br/&gt;compare backends&quot;]
 
     RT --&gt; CTX
     CTX --&gt; EXP
     EXP --&gt; CTX
-    CTX --&gt; LOAD
-    LOAD --&gt; CTX
     CTX --&gt; BENCH
     BENCH --&gt; INF
     INF --&gt; CTX
@@ -902,22 +904,22 @@ graph TB
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
     class RT,CTX nvNode
-    class EXP,LOAD,INF,BENCH greyNode
+    class EXP,INF,BENCH greyNode
     </pre><section id="design-pattern">
 <h2>Design pattern<a class="headerlink" href="#design-pattern" title="Link to this heading">#</a></h2>
 <p>GR00T keeps the generic pipeline mechanics separate from model-specific logic:</p>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">PipelineConfig</span></code> describes the ordered graph.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">StageConfig</span></code> describes one engine boundary.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">PipelineHooks</span></code> run once before and after the full stage loop.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">StageHooks</span></code> contain model-specific export, glue, inference, metadata, and
-artifact behavior.</p></li>
+<li><p>Pipeline <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> / <code class="docutils literal notranslate"><span class="pre">postprocess</span></code> run once around the stage loop.</p></li>
+<li><p>Stage hooks contain model-specific export and inference behavior.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">ExportRunner</span></code> and <code class="docutils literal notranslate"><span class="pre">InferenceRunner</span></code> are generic. They resolve hook paths
 and call them in a fixed order.</p></li>
 </ul>
-<p>For a new model, first decide where the runtime model should be split into
-engines. Then write one stage per engine and use hook functions to isolate the
-model-specific details.</p>
+<p>Export and inference share the same top-level loop: merge pipeline inputs with
+upstream stage outputs, then run the stage runner. Cross-stage tensor wiring
+lives in each downstream stage’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> hook (not in a separate glue
+module).</p>
 </section>
 <section id="gr00t-stages">
 <h2>GR00T stages<a class="headerlink" href="#gr00t-stages" title="Link to this heading">#</a></h2>
@@ -982,49 +984,51 @@ graph LR
     </pre></section>
 <section id="export-data-flow">
 <h2>Export data flow<a class="headerlink" href="#export-data-flow" title="Link to this heading">#</a></h2>
-<p>Export starts with a single <code class="docutils literal notranslate"><span class="pre">EdgeContext</span></code> built from the runtime. The context
-carries <code class="docutils literal notranslate"><span class="pre">ctx.model</span></code>, <code class="docutils literal notranslate"><span class="pre">ctx.policy</span></code>, <code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code>, <code class="docutils literal notranslate"><span class="pre">ctx.engine_root</span></code>,
-and mutable export state. Each export stage reads from that context, optionally
-reads upstream <code class="docutils literal notranslate"><span class="pre">StageResult</span></code> objects, and writes one new <code class="docutils literal notranslate"><span class="pre">StageResult</span></code>.</p>
+<p>Export starts with a single <code class="docutils literal notranslate"><span class="pre">EdgeContext</span></code> built by the orchestrator. Pipeline
+<code class="docutils literal notranslate"><span class="pre">preprocess</span></code> normalizes <code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code> into tokenized tensors, pixels,
+state, and embodiment id. Each export stage receives a merged input dict:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>stage_inputs = {**pipeline_inputs, **upstream_stage_output}
+</pre></div>
+</div>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
-    PRE[&quot;pipeline preprocess&lt;br/&gt;normalize runtime inputs&quot;]
-    UP[&quot;upstream StageResult tensors&quot;]
-    GLUE[&quot;process_inputs hook&lt;br/&gt;shape current stage inputs&quot;]
-    PLAN[&quot;plan_export hook&lt;br/&gt;clone subgraph + ExportPlan&quot;]
-    COMP[&quot;compile hook&lt;br/&gt;torch.export + TRT&quot;]
-    SAVE[&quot;save_artifacts / metadata hooks&quot;]
-    RESULT[&quot;StageResult&lt;br/&gt;engine_path, spec, tensors, metadata&quot;]
-    ART[&quot;ctx.artifacts['stage_N']&quot;]
+    PRE[&quot;pipeline preprocess&lt;br/&gt;tokenize + pack state&quot;]
+    UP[&quot;upstream stage dict&lt;br/&gt;tensors + metadata&quot;]
+    SPRE[&quot;stage preprocess&lt;br/&gt;shape bindings&quot;]
+    EXP[&quot;export hook&lt;br/&gt;trace + TRT compile&quot;]
+    SAVE[&quot;save_artifacts?&lt;br/&gt;language only&quot;]
+    POST[&quot;stage postprocess&quot;]
+    RESULT[&quot;ctx.stage_results stage_id&quot;]
 
-    PRE --&gt; GLUE
-    UP --&gt; GLUE
-    GLUE --&gt; PLAN --&gt; COMP --&gt; SAVE --&gt; RESULT --&gt; ART
+    PRE --&gt; SPRE
+    UP --&gt; SPRE
+    SPRE --&gt; EXP --&gt; SAVE --&gt; POST --&gt; RESULT
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
-    class PLAN,COMP,RESULT nvNode
-    class PRE,UP,GLUE,SAVE,ART greyNode
+    class EXP,RESULT nvNode
+    class PRE,UP,SPRE,SAVE,POST greyNode
     </pre><p>The fixed runner order is:</p>
 <ol class="arabic simple">
-<li><p>Collect upstream results from <code class="docutils literal notranslate"><span class="pre">ctx.artifacts</span></code> using <code class="docutils literal notranslate"><span class="pre">input_sources</span></code>.</p></li>
-<li><p>Start with <code class="docutils literal notranslate"><span class="pre">ctx.model_inputs</span></code>.</p></li>
-<li><p>Call <code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> when the stage needs glue from an upstream engine.</p></li>
-<li><p>Call <code class="docutils literal notranslate"><span class="pre">plan_export</span></code> to clone the correct submodule and build an
-<code class="docutils literal notranslate"><span class="pre">ExportPlan</span></code>.</p></li>
-<li><p>Call <code class="docutils literal notranslate"><span class="pre">compile</span></code> to trace and compile the subgraph to a TensorRT engine.</p></li>
-<li><p>Call optional <code class="docutils literal notranslate"><span class="pre">metadata</span></code>, <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code>, and <code class="docutils literal notranslate"><span class="pre">after_stage</span></code> hooks.</p></li>
-<li><p>Store <code class="docutils literal notranslate"><span class="pre">StageResult</span></code> at <code class="docutils literal notranslate"><span class="pre">ctx.artifacts[&quot;stage_N&quot;]</span></code>.</p></li>
+<li><p>Merge pipeline inputs with upstream <code class="docutils literal notranslate"><span class="pre">ctx.stage_results[input_sources[0]]</span></code>.</p></li>
+<li><p>Call stage <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> to shape tensors for this engine boundary.</p></li>
+<li><p>Call <code class="docutils literal notranslate"><span class="pre">export</span></code> to trace, compile, and write the engine under
+<code class="docutils literal notranslate"><span class="pre">ctx.engine_root/&lt;engine_subdir&gt;/</span></code>.</p></li>
+<li><p>Call <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> when the stage needs Edge-LLM sidecars (language only).</p></li>
+<li><p>Call stage <code class="docutils literal notranslate"><span class="pre">postprocess</span></code> and store the returned dict at
+<code class="docutils literal notranslate"><span class="pre">ctx.stage_results[stage_id]</span></code>.</p></li>
 </ol>
-<p>The important rule is that each stage should export only the subgraph owned by
-that engine. Cross-stage reshaping, tensor selection, and bookkeeping belong in
-<code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> glue, not inside the generic runner.</p>
+<p>Each stage returns representative <code class="docutils literal notranslate"><span class="pre">tensors</span></code> for downstream stages (for example
+<code class="docutils literal notranslate"><span class="pre">image_embs</span></code> after vision). Export does not re-run compiled TRT modules after
+compile — downstream tensors come from eager forwards or dummy tensors sized to
+the engine ABI.</p>
 </section>
 <section id="hook-map">
 <h2>Hook map<a class="headerlink" href="#hook-map" title="Link to this heading">#</a></h2>
-<p>GR00T registers dotted hook paths under <code class="docutils literal notranslate"><span class="pre">trt.executor.models.groot</span></code>. The paths
-are resolved at runtime, which keeps the pipeline config declarative.</p>
+<p>GR00T registers dotted hook paths under <code class="docutils literal notranslate"><span class="pre">trt.executor.models.groot</span></code>. See the
+<a class="reference internal" href="../developer_guide/export_modules/overview.html"><span class="doc">Export Modules Overview</span></a> pages for how each export
+module is wired.</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 20.0%" />
@@ -1039,25 +1043,25 @@ are resolved at runtime, which keeps the pipeline config declarative.</p>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">visual</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">export.vision:plan_export</span></code>, <code class="docutils literal notranslate"><span class="pre">export.vision:compile</span></code>,
-<code class="docutils literal notranslate"><span class="pre">export.vision:metadata</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">inference.vision:run_eager</span></code>, <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code>, <code class="docutils literal notranslate"><span class="pre">run_trt</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.vision:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">export</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.vision:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">execute</span></code>,
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">language</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">export.glue:vision_to_language</span></code>, <code class="docutils literal notranslate"><span class="pre">export.language:plan_export</span></code>,
-<code class="docutils literal notranslate"><span class="pre">export.language:compile</span></code>, <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code>, <code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">inference.glue:vision_to_language</span></code>, <code class="docutils literal notranslate"><span class="pre">inference.language:run_*</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.language:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">export</span></code>, <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code>,
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.language:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">execute</span></code>,
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">action_context</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">export.glue:language_to_action_context</span></code>,
-<code class="docutils literal notranslate"><span class="pre">export.action_context:plan_export</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">inference.glue:language_to_action_context</span></code>,
-<code class="docutils literal notranslate"><span class="pre">inference.action_context:run_*</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.action_context:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">export</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.action_context:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">load</span></code>,
+<code class="docutils literal notranslate"><span class="pre">execute</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">action</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">export.glue:action_context_to_action</span></code>,
-<code class="docutils literal notranslate"><span class="pre">export.action:plan_export</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">inference.action:run_*</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export.diffusion:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">export</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference.diffusion:preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">execute</span></code>,
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
 </tr>
 </tbody>
 </table>
@@ -1065,20 +1069,20 @@ are resolved at runtime, which keeps the pipeline config declarative.</p>
 </section>
 <section id="inference-and-engine-flow">
 <h2>Inference and engine flow<a class="headerlink" href="#inference-and-engine-flow" title="Link to this heading">#</a></h2>
-<p>After export, <code class="docutils literal notranslate"><span class="pre">LoadPipeline</span></code> maps each engine directory back to a serialized
-handle: <code class="docutils literal notranslate"><span class="pre">visual</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">vision</span></code>, <code class="docutils literal notranslate"><span class="pre">language</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">language</span></code>,
-<code class="docutils literal notranslate"><span class="pre">action_context</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">action_context</span></code>, and <code class="docutils literal notranslate"><span class="pre">action</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">action</span></code>. Those
-handles are stored on <code class="docutils literal notranslate"><span class="pre">ctx.handles.serialized</span></code>.</p>
-<p>The inference pipeline runs the same stage graph and dispatches each stage by
-execution mode:</p>
+<p>Serialized engines are loaded per stage by each inference stage’s <code class="docutils literal notranslate"><span class="pre">load</span></code> hook
+when <code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span></code> is <code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code>. Wrappers live in
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/load/serialize.py</span></code> (<code class="docutils literal notranslate"><span class="pre">SerializedGrootVision</span></code>,
+<code class="docutils literal notranslate"><span class="pre">SerializedGrootLanguage</span></code>, etc.).</p>
+<p>The inference pipeline uses the same stage graph and dispatches each stage by
+execution mode inside the <code class="docutils literal notranslate"><span class="pre">execute</span></code> hook:</p>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">EAGER</span></code> calls <code class="docutils literal notranslate"><span class="pre">run_eager</span></code> on the live runtime model or policy.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code> calls <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code> through loaded engine handles.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">IN_MEMORY</span></code> calls <code class="docutils literal notranslate"><span class="pre">run_trt</span></code> through in-process TRT modules.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">EAGER</span></code> runs live PyTorch (language uses stock HF <code class="docutils literal notranslate"><span class="pre">language_model</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code> runs through the loaded engine wrapper from the <code class="docutils literal notranslate"><span class="pre">load</span></code> hook.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">IN_MEMORY</span></code> runs through an on-the-fly TRT module from the <code class="docutils literal notranslate"><span class="pre">compile</span></code> hook.</p></li>
 </ul>
 <p>Inference scratch tensors live in <code class="docutils literal notranslate"><span class="pre">ctx.inference</span></code>. Stage outputs live in
-<code class="docutils literal notranslate"><span class="pre">ctx.stage_results</span></code>. When the final <code class="docutils literal notranslate"><span class="pre">action</span></code> stage completes, the pipeline
-copies <code class="docutils literal notranslate"><span class="pre">ctx.stage_results[3].tensors[&quot;actions&quot;]</span></code> to <code class="docutils literal notranslate"><span class="pre">ctx.actions</span></code>.</p>
+<code class="docutils literal notranslate"><span class="pre">ctx.stage_results</span></code>. The final <code class="docutils literal notranslate"><span class="pre">action</span></code> stage writes <code class="docutils literal notranslate"><span class="pre">actions</span></code> to
+<code class="docutils literal notranslate"><span class="pre">ctx.actions</span></code> via <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>.</p>
 </section>
 <section id="edge-llm-runtime">
 <h2>Edge LLM Runtime<a class="headerlink" href="#edge-llm-runtime" title="Link to this heading">#</a></h2>
@@ -1359,21 +1363,21 @@ then copies the result into <code class="docutils literal notranslate"><span cla
 <ol class="arabic simple">
 <li><p>Choose stable engine boundaries and assign one <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> per engine.</p></li>
 <li><p>Create export stage configs with <code class="docutils literal notranslate"><span class="pre">runner=&quot;trt.runner.export:ExportRunner&quot;</span></code>.</p></li>
-<li><p>Implement <code class="docutils literal notranslate"><span class="pre">plan_export</span></code> and <code class="docutils literal notranslate"><span class="pre">compile</span></code> for every engine.</p></li>
-<li><p>Implement <code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> glue wherever a stage consumes upstream tensors.</p></li>
-<li><p>Add <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> only for sidecars needed by load or inference.</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">export</span></code>, and <code class="docutils literal notranslate"><span class="pre">postprocess</span></code> for every engine.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> only for sidecars needed by the C++ runtime (language).</p></li>
 <li><p>Mirror the same stage IDs in an inference pipeline with
 <code class="docutils literal notranslate"><span class="pre">runner=&quot;trt.runner.inference:InferenceRunner&quot;</span></code>.</p></li>
-<li><p>Add a load pipeline that maps engine subdirectories to serialized handle
-classes.</p></li>
-<li><p>Register export, load, and inference configs in the pipeline registry.</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">execute</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code> per inference stage.</p></li>
+<li><p>Add serialized wrappers under <code class="docutils literal notranslate"><span class="pre">load/serialize.py</span></code> for <code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code> mode.</p></li>
+<li><p>Register export and inference configs in <code class="docutils literal notranslate"><span class="pre">trt/config/pipeline_registry.py</span></code>.</p></li>
 </ol>
-<p>The pipeline should remain a thin wrapper around the runtime: the runtime creates
-the model state and sample inputs, while the pipeline declares how that state is
-sliced into engines, compiled, loaded, and replayed.</p>
+<p>The pipeline should remain a thin wrapper around the runtime: the orchestrator
+creates the model state and sample inputs, while the pipeline declares how that
+state is sliced into engines, compiled, loaded per stage, and replayed.</p>
 <p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/pipeline.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/inference/pipeline.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/load/pipeline.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/runner/export.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/load/serialize.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/runner/export.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">trt/runner/inference.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/context.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">examples/llm/llm_inference.cpp</span></code>, <code class="docutils literal notranslate"><span class="pre">cpp/runtime/llmInferenceRuntime.cpp</span></code></p>
 </section>

@@ -361,7 +361,7 @@
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -374,11 +374,16 @@
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -413,7 +418,7 @@
   <section id="torch-trt-pipelines-documentation">
 <h1>Torch-TRT pipelines Documentation<a class="headerlink" href="#torch-trt-pipelines-documentation" title="Link to this heading">#</a></h1>
 <p>Welcome to the Torch-TRT pipelines documentation. This project provides export,
-load, inference, and benchmark orchestration for VLA models on top of
+inference, and benchmark orchestration for VLA models on top of
 <a class="reference external" href="https://nvidia.github.io/TensorRT-Edge-LLM/latest/">TensorRT Edge-LLM</a>.</p>
 <div class="toctree-wrapper compound">
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
@@ -448,6 +453,7 @@ load, inference, and benchmark orchestration for VLA models on top of
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/overview.html">Overview</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/overview.html#orchestrator-flow">Orchestrator flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/overview.html#cli-modes">CLI modes</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/overview.html#key-files">Key files</a></li>
 </ul>
 </li>
@@ -476,27 +482,28 @@ load, inference, and benchmark orchestration for VLA models on top of
 </li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html">Export Pipeline</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#flow">Flow</a></li>
-<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#per-stage-compile-loop">Per-stage compile loop</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#per-stage-export-loop">Per-stage export loop</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#outputs">Outputs</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/export-pipeline.html#cli">CLI</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#flow">Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#per-stage-inference-loop">Per-stage inference loop</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#execution-modes">Execution modes</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#gr00t-stage-sequence">GR00T stage sequence</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/inference-pipeline.html#invocation">Invocation</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html">Load Pipeline</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html">Engine Load (Serialized Inference)</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html#flow">Flow</a></li>
-<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html#stage-specs">Stage specs</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html#gr00t-wrappers">GR00T wrappers</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/load-pipeline.html#directory-layout">Directory layout</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#flow">Flow</a></li>
-<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#default-backends">Default backends</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#backends">Backends</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#reporting">Reporting</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/architecture/benchmark-pipeline.html#cli">CLI</a></li>
 </ul>
@@ -572,8 +579,40 @@ load, inference, and benchmark orchestration for VLA models on top of
 </ul>
 </div>
 <div class="toctree-wrapper compound">
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/overview.html">Export Modules Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/overview.html#stage-map">Stage map</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/overview.html#common-export-hook-pattern">Common export hook pattern</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/overview.html#related-pages">Related pages</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/vision-example.html">GR00T Vision Export Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/vision-example.html#typical-tensor-shapes-gr00t-n1-5-libero-sample">Typical tensor shapes (GR00T N1.5, Libero sample)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/vision-example.html#export-module-wiring">Export module wiring</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/vision-example.html#putting-it-together-vision-forward">Putting it together — vision forward</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/vision-example.html#what-the-export-hook-returns">What the export hook returns</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/vision-example.html#parity-tips">Parity tips</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/language-example.html">GR00T Language Export Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/language-example.html#typical-tensor-shapes-gr00t-n1-5-libero-sample">Typical tensor shapes (GR00T N1.5, Libero sample)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/language-example.html#export-module-wiring">Export module wiring</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/language-example.html#putting-it-together-manual-decoder-loop">Putting it together — manual decoder loop</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/language-example.html#eager-vs-trt-inference-note">Eager vs TRT inference note</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/language-example.html#dummy-tensor-for-downstream-export">Dummy tensor for downstream export</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/language-example.html#parity-tips">Parity tips</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html">GR00T Action Context Export Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html#typical-tensor-shapes-gr00t-n1-5-libero-sample">Typical tensor shapes (GR00T N1.5, Libero sample)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html#export-module-wiring">Export module wiring</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html#putting-it-together-context-projection">Putting it together — context projection</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html#dummy-tensor-for-downstream-export">Dummy tensor for downstream export</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html#stage-boundary-in-the-full-pipeline">Stage boundary in the full pipeline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/export_modules/action-context-example.html#parity-tips">Parity tips</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/overview.html">Diffusion Overview</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/overview.html#the-design-problem">The design problem</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/overview.html#three-pluggable-roles">Three pluggable roles</a></li>
@@ -596,6 +635,19 @@ load, inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#putting-it-together-one-gr00t-step">Putting it together — one GR00T step</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#stage-boundaries-in-the-full-gr00t-pipeline">Stage boundaries in the full GR00T pipeline</a></li>
 <li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/groot-example.html#parity-tips">Parity tips</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html">Action Rollout</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#why-rollout-is-separate-from-the-engine">Why rollout is separate from the engine</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#two-layers-of-generalization">Two layers of generalization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#sample-actions-raw">sample_actions_raw</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#actionrolloutcontext">ActionRolloutContext</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#actionrolloutadapter">ActionRolloutAdapter</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#per-model-adapters">Per-model adapters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#end-to-end-flow-gr00t">End-to-end flow (GR00T)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#relationship-to-eager-flowmatchingactionhead">Relationship to eager FlowmatchingActionHead</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#when-you-can-skip-rollout">When you can skip rollout</a></li>
+<li class="toctree-l2"><a class="reference internal" href="developer_guide/diffusion/action-rollout.html#related-pages">Related pages</a></li>
 </ul>
 </li>
 </ul>

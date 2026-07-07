@@ -113,10 +113,11 @@ High-level export flow
 Related pages
 -------------
 
+- :doc:`../export_modules/overview` — all GR00T export stages at a glance.
 - :doc:`components` — class-by-class reference for wrappers and encoders.
 - :doc:`groot-example` — end-to-end GR00T one-step walkthrough with tensor shapes.
 - :doc:`action-rollout` — ``sample_actions_raw``, adapters, and the multi-step loop
   outside the compiled engine.
 
 *Files:* ``trt/modules/export/diffusion.py``, ``trt/action_rollout.py``,
-``trt/executor/models/groot/export/action.py``
+``trt/executor/models/groot/export/diffusion.py``

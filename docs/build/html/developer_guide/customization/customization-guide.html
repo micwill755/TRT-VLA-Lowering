@@ -63,7 +63,7 @@
 
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="prev" title="GR00T Diffusion Step Example" href="../diffusion/groot-example.html" />
+    <link rel="prev" title="Action Rollout" href="../diffusion/action-rollout.html" />
 
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -361,7 +361,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../architecture/hooks.html">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -374,11 +374,16 @@
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="current nav bd-sidenav">
@@ -451,35 +456,32 @@ PyTorch.</p>
 VLAProfile (policy, model, prepare_compile_inputs)
      │
      ▼
-EdgeContext  ──► ExportPipeline   (compile engines → engine_root/)
-     │          LoadPipeline      (deserialize engines → handles.serialized)
-     │          BenchmarkPipeline   (eager vs TRT timing + parity)
+EdgeContext  ──► ExportPipeline     (compile engines → engine_root/)
+     │          BenchmarkPipeline   (eager vs TRT parity)
+     │          InferencePipeline   (per-stage eager / compile / load)
      │
-     └── artifacts, export_state, inference, benchmark
+     └── stage_results, inference, benchmark
 </pre></div>
 </div>
-<p>Each <strong>model</strong> defines three pipeline configs (export, inference, load) as a
-<strong>linear or DAG stage graph</strong>. Stages are generic; behavior lives in <strong>hooks</strong>
-under <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/</span></code>.</p>
+<p>Each <strong>model</strong> defines export and inference pipeline configs as a <strong>linear stage
+graph</strong>. Stages are generic; behavior lives in <strong>hooks</strong> under
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/</span></code>.</p>
 <p><strong>Export stage loop</strong> (<code class="docutils literal notranslate"><span class="pre">ExportRunner</span></code>):</p>
-<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>preprocess(ctx)
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>pipeline preprocess(ctx) → pipeline_inputs
 for stage in stages:
-    process_inputs? (glue)
-    plan_export  → ExportPlan (module, sample_inputs, engine_dir, cleanup_modules)
-    compile      → torch.export trace + TensorRT engine + config.json
-    metadata / save_artifacts?
-    ctx.artifacts[&quot;stage_N&quot;] = StageResult
-postprocess?(ctx)
+    stage_inputs = merge(pipeline_inputs, upstream stage_results)
+    preprocess? → export → save_artifacts? → postprocess?
+    ctx.stage_results[stage_id] = stage dict
+pipeline postprocess?(ctx, stage_results)
 </pre></div>
 </div>
 <p><strong>Inference stage loop</strong> (<code class="docutils literal notranslate"><span class="pre">InferenceRunner</span></code>):</p>
-<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>preprocess(ctx)
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>pipeline preprocess(ctx) → pipeline_inputs
 for stage in stages:
-    process_inputs? (glue)
-    run_eager | run_serialized | run_trt  (selected by ExecutionMode)
-    ctx.stage_results[N] = InferenceStageResult
-pick final_output stage → ctx.actions
-postprocess?(ctx)
+    stage_inputs = merge(pipeline_inputs, upstream stage_results)
+    preprocess? → compile? | load? → execute → postprocess?
+    ctx.stage_results[stage_id] = stage dict
+pipeline postprocess?(ctx, stage_results)
 </pre></div>
 </div>
 <p>Reference implementation: <strong>GR00T</strong> (<code class="docutils literal notranslate"><span class="pre">Gr00tN1d7</span></code>) — four engines:</p>
@@ -515,8 +517,8 @@ postprocess?(ctx)
 </tr>
 <tr class="row-odd"><td><p>3 Action (diffusion step)</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">action/</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">groot/export/action.py</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">groot/inference/action.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/export/diffusion.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot/inference/diffusion.py</span></code></p></td>
 </tr>
 </tbody>
 </table>
@@ -539,37 +541,35 @@ postprocess?(ctx)
 <tbody>
 <tr class="row-even"><td><p>Orchestrator</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">trt/orchestrator/edge_orchestrator.py</span></code>, <code class="docutils literal notranslate"><span class="pre">app.py</span></code></p></td>
-<td><p>CLI entry, <code class="docutils literal notranslate"><span class="pre">EdgeContext</span></code> construction, export/load/benchmark sequencing.</p></td>
+<td><p>CLI entry, <code class="docutils literal notranslate"><span class="pre">EdgeContext</span></code> construction, export/benchmark/inference sequencing.</p></td>
 </tr>
 <tr class="row-odd"><td><p>Pipeline registry</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">trt/config/pipeline_registry.py</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">register_export_pipeline</span></code>, <code class="docutils literal notranslate"><span class="pre">register_inference_pipeline</span></code>,
-<code class="docutils literal notranslate"><span class="pre">register_load_pipeline</span></code>; aliases (e.g. <code class="docutils literal notranslate"><span class="pre">gr00t</span></code> → <code class="docutils literal notranslate"><span class="pre">Gr00tN1d7</span></code>).</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">register_export_pipeline</span></code>, <code class="docutils literal notranslate"><span class="pre">register_inference_pipeline</span></code>; aliases
+(e.g. <code class="docutils literal notranslate"><span class="pre">gr00t</span></code> → <code class="docutils literal notranslate"><span class="pre">Gr00tN1d7</span></code>).</p></td>
 </tr>
 <tr class="row-even"><td><p>Export topology</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/export/pipeline.py</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">PipelineConfig</span></code>: ordered <code class="docutils literal notranslate"><span class="pre">StageConfig</span></code> list, <code class="docutils literal notranslate"><span class="pre">PipelineHooks</span></code>,
+<td><p><code class="docutils literal notranslate"><span class="pre">PipelineConfig</span></code>: ordered <code class="docutils literal notranslate"><span class="pre">StageConfig</span></code> list, pipeline hooks,
 stage <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> (DAG edges).</p></td>
 </tr>
 <tr class="row-odd"><td><p>Inference topology</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/inference/pipeline.py</span></code></p></td>
-<td><p>Same graph as export; <code class="docutils literal notranslate"><span class="pre">StageHooks</span></code> use <code class="docutils literal notranslate"><span class="pre">run_eager</span></code> /
-<code class="docutils literal notranslate"><span class="pre">run_serialized</span></code> / <code class="docutils literal notranslate"><span class="pre">run_trt</span></code>.</p></td>
+<td><p>Same graph as export; stage hooks use <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>,
+<code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">execute</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>.</p></td>
 </tr>
-<tr class="row-even"><td><p>Load topology</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/load/pipeline.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">load/serialize.py</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">SerializedStageSpec(key,</span> <span class="pre">engine_subdir,</span> <span class="pre">wrapper_cls)</span></code> per engine.</p></td>
+<tr class="row-even"><td><p>Serialized wrappers</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/load/serialize.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">SerializedGroot*</span></code> callables used by inference <code class="docutils literal notranslate"><span class="pre">load</span></code> hooks.</p></td>
 </tr>
 <tr class="row-odd"><td><p>Generic runners</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/pipelines/{export,inference,load,benchmark}.py</span></code>,
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/pipelines/{export,inference,benchmark}.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">trt/runner/{export,inference}.py</span></code></p></td>
 <td><p>Usually unchanged; new models plug in via hooks + config.</p></td>
 </tr>
 <tr class="row-even"><td><p>Benchmark</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/pipeline.py</span></code>,
-<code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/run.py</span></code></p></td>
-<td><p>Benchmark stages (eager, serialized TRT), parity reports.</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/pipelines/benchmark.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/measure.py</span></code></p></td>
+<td><p>Runs inference per execution mode; prints stage parity tables.</p></td>
 </tr>
 </tbody>
 </table>
@@ -623,7 +623,7 @@ between language → action_context → action.</p></td>
 <h2>Stage Hook Customization Points<a class="headerlink" href="#stage-hook-customization-points" title="Link to this heading">#</a></h2>
 <p>Each stage is a <strong>node</strong> with a <strong>runner</strong> and <strong>hooks</strong> (string paths resolved
 at runtime via <code class="docutils literal notranslate"><span class="pre">trt.hooks.resolve</span></code>).</p>
-<p><strong>Export</strong> (<code class="docutils literal notranslate"><span class="pre">StageHooks</span></code>):</p>
+<p><strong>Export</strong> (stage hooks):</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 18.0%" />
@@ -637,34 +637,29 @@ at runtime via <code class="docutils literal notranslate"><span class="pre">trt.
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">plan_export</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">preprocess</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
-<td><p>Clone subgraph, build <code class="docutils literal notranslate"><span class="pre">ExportPlan</span></code> (module, <code class="docutils literal notranslate"><span class="pre">sample_inputs</span></code>,
-<code class="docutils literal notranslate"><span class="pre">engine_dir</span></code>, <code class="docutils literal notranslate"><span class="pre">cleanup_modules</span></code>).</p></td>
+<td><p>Shape stage inputs from merged pipeline + upstream dict; splice upstream
+tensors when needed.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compile</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">export</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
-<td><p>Patch attention plugins if needed, <code class="docutils literal notranslate"><span class="pre">save_trt_engine_module</span></code>, write
-<code class="docutils literal notranslate"><span class="pre">config.json</span></code> sidecars.</p></td>
+<td><p>Patch attention plugins if needed, trace subgraph, <code class="docutils literal notranslate"><span class="pre">save_trt_engine_module</span></code>,
+return <code class="docutils literal notranslate"><span class="pre">engine_path</span></code> and downstream <code class="docutils literal notranslate"><span class="pre">tensors</span></code>.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
-<td><p>Shapes and fields stored on <code class="docutils literal notranslate"><span class="pre">StageResult.metadata</span></code> for downstream
-stages / load.</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
 <td><p>Non-TRT files (e.g. embedding table, tokenizer JSON beside
 <code class="docutils literal notranslate"><span class="pre">language.engine</span></code>).</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">process_inputs</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">export/glue.py</span></code></p></td>
-<td><p>Inter-stage tensor wiring; may use dummy tensors for trace.</p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code></p></td>
+<td><p>Optional stage cleanup or context updates.</p></td>
 </tr>
 </tbody>
 </table>
 </div>
-<p><strong>Inference</strong> (<code class="docutils literal notranslate"><span class="pre">StageHooks</span></code>):</p>
+<p><strong>Inference</strong> (stage hooks):</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 18.0%" />
@@ -678,21 +673,26 @@ stages / load.</p></td>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">run_eager</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">preprocess</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code></p></td>
-<td><p>PyTorch parity path on live <code class="docutils literal notranslate"><span class="pre">ctx.model</span></code> / <code class="docutils literal notranslate"><span class="pre">ctx.policy</span></code>.</p></td>
+<td><p>Shape stage inputs; read upstream <code class="docutils literal notranslate"><span class="pre">tensors</span></code> from merged dict.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">run_serialized</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compile</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code></p></td>
-<td><p>Call <code class="docutils literal notranslate"><span class="pre">ctx.handles.serialized.&lt;key&gt;</span></code> (loaded <code class="docutils literal notranslate"><span class="pre">.engine</span></code>).</p></td>
+<td><p>On-the-fly TRT compile when <code class="docutils literal notranslate"><span class="pre">execution_mode</span></code> is <code class="docutils literal notranslate"><span class="pre">IN_MEMORY</span></code>.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">run_trt</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">load</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code> + <code class="docutils literal notranslate"><span class="pre">load/serialize.py</span></code></p></td>
+<td><p>Construct serialized engine wrapper when <code class="docutils literal notranslate"><span class="pre">execution_mode</span></code> is
+<code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">execute</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code></p></td>
-<td><p>In-process TRT module (<code class="docutils literal notranslate"><span class="pre">ctx.handles.in_memory</span></code>) when populated.</p></td>
+<td><p>Dispatch eager / in-memory TRT / serialized TRT forward internally.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">process_inputs</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">inference/glue.py</span></code></p></td>
-<td><p>Copy upstream <code class="docutils literal notranslate"><span class="pre">StageResult</span></code> tensors into <code class="docutils literal notranslate"><span class="pre">ctx.inference</span></code> scratch.</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code></p></td>
+<td><p>Copy outputs into <code class="docutils literal notranslate"><span class="pre">ctx.inference</span></code> or <code class="docutils literal notranslate"><span class="pre">ctx.actions</span></code>.</p></td>
 </tr>
 </tbody>
 </table>
@@ -810,44 +810,39 @@ outputs are spliced by index.</p></li>
 <code class="docutils literal notranslate"><span class="pre">PipelineConfig(stages=...)</span></code>.</p></li>
 <li><p>For each stage, implement <code class="docutils literal notranslate"><span class="pre">export/&lt;stage&gt;.py</span></code>:</p>
 <ul>
-<li><p><code class="docutils literal notranslate"><span class="pre">plan_export(ctx,</span> <span class="pre">stage_inputs)</span> <span class="pre">-&gt;</span> <span class="pre">ExportPlan</span></code></p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">compile(plan)</span> <span class="pre">-&gt;</span> <span class="pre">Path</span></code></p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">metadata</span></code> / <code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> as needed</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">preprocess(ctx,</span> <span class="pre">inputs)</span></code> — shape bindings from merged pipeline + upstream dict</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">export(ctx,</span> <span class="pre">prepared)</span></code> — trace, compile, return <code class="docutils literal notranslate"><span class="pre">engine_path</span></code> and <code class="docutils literal notranslate"><span class="pre">tensors</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code> / <code class="docutils literal notranslate"><span class="pre">postprocess</span></code> as needed</p></li>
 </ul>
 </li>
-<li><p>Add <code class="docutils literal notranslate"><span class="pre">export/glue.py</span></code> for <code class="docutils literal notranslate"><span class="pre">process_inputs</span></code> between stages.</p></li>
-<li><p>Add <code class="docutils literal notranslate"><span class="pre">export/preprocess.py</span></code> / <code class="docutils literal notranslate"><span class="pre">postprocess.py</span></code> if the whole pipeline
-needs bookends.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">export/process.py</span></code> for pipeline-level <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> / <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>.</p></li>
 </ul>
 </li>
 <li><p><strong>Create the inference pipeline</strong></p>
 <ul class="simple">
 <li><p>Mirror the <strong>same</strong> <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> and <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> graph in
 <code class="docutils literal notranslate"><span class="pre">inference/pipeline.py</span></code>.</p></li>
-<li><p>Implement <code class="docutils literal notranslate"><span class="pre">run_eager</span></code>, <code class="docutils literal notranslate"><span class="pre">run_serialized</span></code>, <code class="docutils literal notranslate"><span class="pre">run_trt</span></code> per stage in
-<code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code>.</p></li>
-<li><p>Reuse or share packing logic with export (e.g. <code class="docutils literal notranslate"><span class="pre">pack_*_language_inputs</span></code>).</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">execute</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code> per stage in <code class="docutils literal notranslate"><span class="pre">inference/&lt;stage&gt;.py</span></code>.</p></li>
+<li><p>Reuse packing logic with export (e.g. language embedding splice).</p></li>
 </ul>
 </li>
-<li><p><strong>Create the load pipeline</strong></p>
+<li><p><strong>Add serialized wrappers</strong></p>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">load/pipeline.py</span></code>: tuple of <code class="docutils literal notranslate"><span class="pre">SerializedStageSpec</span></code>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">load/serialize.py</span></code>: thin wrappers around <code class="docutils literal notranslate"><span class="pre">SerializedTRTEngine</span></code> with
-correct positional args per engine.</p></li>
+correct positional args per engine, used by inference <code class="docutils literal notranslate"><span class="pre">load</span></code> hooks.</p></li>
 </ul>
 </li>
 <li><p><strong>Register pipelines</strong></p>
 <ul>
 <li><p>In <code class="docutils literal notranslate"><span class="pre">trt/config/pipeline_registry.py</span></code> <code class="docutils literal notranslate"><span class="pre">_register_builtin()</span></code> (or a
 model-specific import):</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">register_export_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_PIPELINE</span><span class="p">,</span> <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;mymodel&quot;</span><span class="p">,))</span>
-<span class="n">register_inference_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_INFERENCE_PIPELINE</span><span class="p">,</span> <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;mymodel&quot;</span><span class="p">,))</span>
-<span class="n">register_load_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_LOAD_PIPELINE</span><span class="p">,</span> <span class="n">aliases</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;mymodel&quot;</span><span class="p">,))</span>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">register_export_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_PIPELINE</span><span class="p">)</span>
+<span class="n">register_inference_pipeline</span><span class="p">(</span><span class="s2">&quot;MyModel&quot;</span><span class="p">,</span> <span class="n">MY_INFERENCE_PIPELINE</span><span class="p">)</span>
 </pre></div>
 </div>
 </li>
-<li><p>Ensure <code class="docutils literal notranslate"><span class="pre">profile.pipeline_model_type</span></code> or <code class="docutils literal notranslate"><span class="pre">profile.name</span></code> resolves via
-aliases.</p></li>
+<li><p>Ensure <code class="docutils literal notranslate"><span class="pre">profile.name</span></code> resolves via registry lookup.</p></li>
 </ul>
 </li>
 <li><p><strong>Export and verify</strong></p>
@@ -865,9 +860,7 @@ Edge-LLM expectations.</p></li>
 </pre></div>
 </div>
 <ul class="simple">
-<li><p>Review timing summary, action ADE vs eager, and language logits parity
-(<code class="docutils literal notranslate"><span class="pre">compare_language_logits</span></code> in <code class="docutils literal notranslate"><span class="pre">groot/inference/language.py</span></code> as
-reference).</p></li>
+<li><p>Review per-stage parity tables (eager vs in-memory vs serialized).</p></li>
 </ul>
 </li>
 </ol>
@@ -879,11 +872,13 @@ language and action):</p>
 <ol class="arabic simple">
 <li><p>Assign the next <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> and set <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> to upstream stage
 id(s).</p></li>
-<li><p>Add export + inference hook modules and glue functions.</p></li>
-<li><p>Add <code class="docutils literal notranslate"><span class="pre">SerializedStageSpec</span></code> and wrapper in <code class="docutils literal notranslate"><span class="pre">load/</span></code>.</p></li>
+<li><p>Add export hooks (<code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">export</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>) and matching
+inference hooks (<code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">compile</span></code>, <code class="docutils literal notranslate"><span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">execute</span></code>,
+<code class="docutils literal notranslate"><span class="pre">postprocess</span></code>).</p></li>
+<li><p>Add a serialized wrapper in <code class="docutils literal notranslate"><span class="pre">load/serialize.py</span></code> if the stage has a TRT
+engine.</p></li>
 <li><p>Append <code class="docutils literal notranslate"><span class="pre">StageConfig</span></code> to export and inference <code class="docutils literal notranslate"><span class="pre">pipeline.py</span></code> tuples.</p></li>
-<li><p>Update <code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> and any <code class="docutils literal notranslate"><span class="pre">plan_export</span></code> metadata consumed by
-downstream glue.</p></li>
+<li><p>Update <code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> and downstream stage <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> wiring.</p></li>
 </ol>
 </section>
 <section id="component-reference">
@@ -944,7 +939,7 @@ directly into the action engine; see <code class="docutils literal notranslate">
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">stage_id</span></code></p></td>
-<td><p>Unique index; referenced by <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> and <code class="docutils literal notranslate"><span class="pre">ctx.artifacts</span></code>.</p></td>
+<td><p>Unique index; referenced by <code class="docutils literal notranslate"><span class="pre">input_sources</span></code> and <code class="docutils literal notranslate"><span class="pre">ctx.stage_results</span></code>.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">input_sources</span></code></p></td>
 <td><p>Tuple of upstream <code class="docutils literal notranslate"><span class="pre">stage_id</span></code> values; <code class="docutils literal notranslate"><span class="pre">()</span></code> = graph entry (uses
@@ -1066,12 +1061,12 @@ upstream reference for vision + language + action engine layout</p></li>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="../diffusion/groot-example.html"
+       href="../diffusion/action-rollout.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">GR00T Diffusion Step Example</p>
+        <p class="prev-next-title">Action Rollout</p>
       </div>
     </a>
 </div>

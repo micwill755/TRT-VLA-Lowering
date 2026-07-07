@@ -798,7 +798,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Hooks</a></li>
 <li class="toctree-l1"><a class="reference internal" href="export-pipeline.html">Export Pipeline</a></li>
 <li class="toctree-l1"><a class="reference internal" href="inference-pipeline.html">Inference Pipeline</a></li>
-<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Load Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="load-pipeline.html">Engine Load (Serialized Inference)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark-pipeline.html">Benchmark Pipeline</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
@@ -811,11 +811,16 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/attention-patching.html">Attention Patching</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../plugins/parity-and-debugging.html">Parity and Debugging</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Diffusion</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/overview.html">Diffusion Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/components.html">Diffusion Components</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../diffusion/action-rollout.html">Action Rollout</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
 <ul class="nav bd-sidenav">
@@ -875,11 +880,11 @@ window.runMermaid = runMermaid;</script>
 <h1>Hooks<a class="headerlink" href="#hooks" title="Link to this heading">#</a></h1>
 <section id="what-are-hooks">
 <h2>What are hooks?<a class="headerlink" href="#what-are-hooks" title="Link to this heading">#</a></h2>
-<p><strong>Hooks</strong> are model-specific callables registered as dotted import paths on pipeline
-and stage configs. Generic runners resolve and invoke them; hooks contain the actual
-export, compile, and inference logic for each model.</p>
-<p>Hooks are resolved at runtime by <code class="xref py py-func docutils literal notranslate"><span class="pre">resolve()</span></code> — <code class="docutils literal notranslate"><span class="pre">&quot;module.path:callable&quot;</span></code> → imported
-function.</p>
+<p><strong>Hooks</strong> are model-specific callables registered as dotted import paths on
+pipeline and stage configs. Generic runners resolve and invoke them; hooks
+contain the actual export and inference logic for each model.</p>
+<p>Hooks are resolved at runtime by <code class="xref py py-func docutils literal notranslate"><span class="pre">resolve()</span></code> — <code class="docutils literal notranslate"><span class="pre">&quot;module.path:callable&quot;</span></code> →
+imported function.</p>
 </section>
 <section id="hook-resolution">
 <h2>Hook resolution<a class="headerlink" href="#hook-resolution" title="Link to this heading">#</a></h2>
@@ -887,7 +892,7 @@ function.</p>
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph LR
     CFG[StageConfig.hooks]
-    PATH[&quot;trt.executor.models.groot.export.vision:plan_export&quot;]
+    PATH[&quot;trt.executor.models.groot.export.vision:export&quot;]
     RESOLVE[resolve path]
     FN[callable]
     RUNNER[ExportRunner / InferenceRunner]
@@ -915,10 +920,11 @@ graph LR
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><strong>PipelineHooks</strong> — <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
-<td><p>Once before / after the full stage loop</p></td>
+<tr class="row-even"><td><p><strong>Pipeline hooks</strong> — <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
+<td><p>Once before / after the full stage loop. <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> returns pipeline
+inputs (tokenized tensors, state, etc.) merged into every stage.</p></td>
 </tr>
-<tr class="row-odd"><td><p><strong>StageHooks</strong> — per-stage callables</p></td>
+<tr class="row-odd"><td><p><strong>Stage hooks</strong> — per-stage callables</p></td>
 <td><p>Invoked by the runner for each stage</p></td>
 </tr>
 </tbody>
@@ -940,41 +946,35 @@ graph LR
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">process_inputs</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">preprocess</span></code></p></td>
 <td><p>Export, Inference</p></td>
-<td><p>Glue upstream tensors into current stage inputs</p></td>
+<td><p>Shape stage inputs from merged pipeline + upstream dict</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">plan_export</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">export</span></code></p></td>
 <td><p>Export</p></td>
-<td><p>Clone subgraph, build <code class="xref py py-class docutils literal notranslate"><span class="pre">ExportPlan</span></code></p></td>
+<td><p>Trace subgraph, compile TRT engine, return <code class="docutils literal notranslate"><span class="pre">engine_path</span></code> and
+downstream <code class="docutils literal notranslate"><span class="pre">tensors</span></code></p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">compile</span></code></p></td>
-<td><p>Export</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">torch.export</span></code> trace + Torch-TensorRT compile</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">save_artifacts</span></code></p></td>
 <td><p>Export</p></td>
 <td><p>Write Edge-LLM sidecars (tokenizer, embeddings, etc.)</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">metadata</span></code></p></td>
-<td><p>Export</p></td>
-<td><p>Attach stage metadata to <code class="docutils literal notranslate"><span class="pre">StageResult</span></code></p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">run_eager</span></code></p></td>
-<td><p>Inference</p></td>
-<td><p>PyTorch forward on live <code class="docutils literal notranslate"><span class="pre">ctx.model</span></code> / <code class="docutils literal notranslate"><span class="pre">ctx.policy</span></code></p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">run_serialized</span></code></p></td>
-<td><p>Inference</p></td>
-<td><p>Forward through <code class="docutils literal notranslate"><span class="pre">ctx.handles.serialized</span></code></p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">run_trt</span></code></p></td>
-<td><p>Inference</p></td>
-<td><p>Forward through in-memory TRT module</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">after_stage</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">postprocess</span></code></p></td>
 <td><p>Export, Inference</p></td>
-<td><p>Optional post-stage side effects</p></td>
+<td><p>Update <code class="docutils literal notranslate"><span class="pre">ctx.inference</span></code> / <code class="docutils literal notranslate"><span class="pre">ctx.actions</span></code> from stage result</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">compile</span></code></p></td>
+<td><p>Inference</p></td>
+<td><p>On-the-fly TRT compile when <code class="docutils literal notranslate"><span class="pre">execution_mode</span></code> is <code class="docutils literal notranslate"><span class="pre">IN_MEMORY</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">load</span></code></p></td>
+<td><p>Inference</p></td>
+<td><p>Deserialize engine wrapper when <code class="docutils literal notranslate"><span class="pre">execution_mode</span></code> is <code class="docutils literal notranslate"><span class="pre">SERIALIZED</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">execute</span></code></p></td>
+<td><p>Inference</p></td>
+<td><p>Run eager, in-memory TRT, or serialized TRT forward (mode dispatch
+inside the hook)</p></td>
 </tr>
 </tbody>
 </table>
@@ -986,18 +986,24 @@ graph LR
 <div class="highlight-text notranslate"><div class="highlight"><pre><span></span>groot/
   export/
     pipeline.py      # StageConfig + hook paths
-    vision.py        # plan_export, compile
+    process.py       # pipeline preprocess / postprocess
+    vision.py        # preprocess, export, postprocess
     language.py
-    glue.py          # process_inputs
+    action_context.py
+    diffusion.py
   inference/
     pipeline.py
-    vision.py        # run_eager, run_serialized, run_trt
-    glue.py
+    process.py
+    vision.py        # preprocess, compile, load, execute, postprocess
+    language.py
+  load/
+    serialize.py     # SerializedGroot* wrappers (not pipeline hooks)
 </pre></div>
 </div>
-<p>Shared export utilities (not hooks) live in <code class="docutils literal notranslate"><span class="pre">trt/modules/export/</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/compile.py</span></code>,
-and <code class="docutils literal notranslate"><span class="pre">trt/plugin/</span></code>.</p>
-<p><em>Config types:</em> <code class="docutils literal notranslate"><span class="pre">trt/config/stage_config.py</span></code> (<code class="xref py py-class docutils literal notranslate"><span class="pre">PipelineHooks</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">StageHooks</span></code>)</p>
+<p>Shared export utilities (not hooks) live in <code class="docutils literal notranslate"><span class="pre">trt/modules/export/</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/compile.py</span></code>, and <code class="docutils literal notranslate"><span class="pre">trt/plugin/</span></code>.</p>
+<p><em>Config types:</em> <code class="docutils literal notranslate"><span class="pre">trt/config/stage_config.py</span></code> (<code class="xref py py-class docutils literal notranslate"><span class="pre">PipelineConfig</span></code>,
+<code class="xref py py-class docutils literal notranslate"><span class="pre">StageConfig</span></code>)</p>
 </section>
 </section>
 

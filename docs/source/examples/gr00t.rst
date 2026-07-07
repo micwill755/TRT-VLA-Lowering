@@ -5,27 +5,24 @@ This example shows how GR00T wraps a vision-language-action model as a set of
 TensorRT engines and how the export, load, and inference pipelines sit above the
 runtime layer. Use it as the template when adding another engine-backed model.
 
-At a high level, the runtime owns the live model, policy, device, sample inputs,
-and engine directory. The pipeline layer does not replace that runtime. It
-adapts the runtime state into ordered export stages, writes engines, loads those
-engines back, and then drives inference through the same stage graph.
+At a high level, the orchestrator owns the live model, policy, device, sample inputs,
+and engine directory. The pipeline layer adapts that state into ordered export
+stages, writes engines, and drives inference and benchmark through the same
+stage graph.
 
 .. mermaid::
 
    %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
    graph TB
-       RT["LLMEngineRuntime / orchestrator<br/>model, policy, inputs, device"]
+       RT["EdgeOrchestrator / EdgeContext<br/>model, policy, inputs, device"]
        CTX["EdgeContext<br/>shared run state"]
        EXP["ExportPipeline<br/>compile engines"]
-       LOAD["LoadPipeline<br/>deserialize engines"]
        INF["InferencePipeline<br/>run stage graph"]
        BENCH["BenchmarkPipeline<br/>compare backends"]
 
        RT --> CTX
        CTX --> EXP
        EXP --> CTX
-       CTX --> LOAD
-       LOAD --> CTX
        CTX --> BENCH
        BENCH --> INF
        INF --> CTX
@@ -33,7 +30,7 @@ engines back, and then drives inference through the same stage graph.
        classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
        classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
        class RT,CTX nvNode
-       class EXP,LOAD,INF,BENCH greyNode
+       class EXP,INF,BENCH greyNode
 
 
 Design pattern
@@ -43,15 +40,15 @@ GR00T keeps the generic pipeline mechanics separate from model-specific logic:
 
 - ``PipelineConfig`` describes the ordered graph.
 - ``StageConfig`` describes one engine boundary.
-- ``PipelineHooks`` run once before and after the full stage loop.
-- ``StageHooks`` contain model-specific export, glue, inference, metadata, and
-  artifact behavior.
+- Pipeline ``preprocess`` / ``postprocess`` run once around the stage loop.
+- Stage hooks contain model-specific export and inference behavior.
 - ``ExportRunner`` and ``InferenceRunner`` are generic. They resolve hook paths
   and call them in a fixed order.
 
-For a new model, first decide where the runtime model should be split into
-engines. Then write one stage per engine and use hook functions to isolate the
-model-specific details.
+Export and inference share the same top-level loop: merge pipeline inputs with
+upstream stage outputs, then run the stage runner. Cross-stage tensor wiring
+lives in each downstream stage's ``preprocess`` hook (not in a separate glue
+module).
 
 
 GR00T stages
@@ -109,54 +106,57 @@ reason about the same graph in both modes.
 Export data flow
 ----------------
 
-Export starts with a single ``EdgeContext`` built from the runtime. The context
-carries ``ctx.model``, ``ctx.policy``, ``ctx.model_inputs``, ``ctx.engine_root``,
-and mutable export state. Each export stage reads from that context, optionally
-reads upstream ``StageResult`` objects, and writes one new ``StageResult``.
+Export starts with a single ``EdgeContext`` built by the orchestrator. Pipeline
+``preprocess`` normalizes ``ctx.model_inputs`` into tokenized tensors, pixels,
+state, and embodiment id. Each export stage receives a merged input dict:
+
+.. code-block:: text
+
+   stage_inputs = {**pipeline_inputs, **upstream_stage_output}
 
 .. mermaid::
 
    %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
    graph TB
-       PRE["pipeline preprocess<br/>normalize runtime inputs"]
-       UP["upstream StageResult tensors"]
-       GLUE["process_inputs hook<br/>shape current stage inputs"]
-       PLAN["plan_export hook<br/>clone subgraph + ExportPlan"]
-       COMP["compile hook<br/>torch.export + TRT"]
-       SAVE["save_artifacts / metadata hooks"]
-       RESULT["StageResult<br/>engine_path, spec, tensors, metadata"]
-       ART["ctx.artifacts['stage_N']"]
+       PRE["pipeline preprocess<br/>tokenize + pack state"]
+       UP["upstream stage dict<br/>tensors + metadata"]
+       SPRE["stage preprocess<br/>shape bindings"]
+       EXP["export hook<br/>trace + TRT compile"]
+       SAVE["save_artifacts?<br/>language only"]
+       POST["stage postprocess"]
+       RESULT["ctx.stage_results stage_id"]
 
-       PRE --> GLUE
-       UP --> GLUE
-       GLUE --> PLAN --> COMP --> SAVE --> RESULT --> ART
+       PRE --> SPRE
+       UP --> SPRE
+       SPRE --> EXP --> SAVE --> POST --> RESULT
 
        classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
        classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
-       class PLAN,COMP,RESULT nvNode
-       class PRE,UP,GLUE,SAVE,ART greyNode
+       class EXP,RESULT nvNode
+       class PRE,UP,SPRE,SAVE,POST greyNode
 
 The fixed runner order is:
 
-1. Collect upstream results from ``ctx.artifacts`` using ``input_sources``.
-2. Start with ``ctx.model_inputs``.
-3. Call ``process_inputs`` when the stage needs glue from an upstream engine.
-4. Call ``plan_export`` to clone the correct submodule and build an
-   ``ExportPlan``.
-5. Call ``compile`` to trace and compile the subgraph to a TensorRT engine.
-6. Call optional ``metadata``, ``save_artifacts``, and ``after_stage`` hooks.
-7. Store ``StageResult`` at ``ctx.artifacts["stage_N"]``.
+1. Merge pipeline inputs with upstream ``ctx.stage_results[input_sources[0]]``.
+2. Call stage ``preprocess`` to shape tensors for this engine boundary.
+3. Call ``export`` to trace, compile, and write the engine under
+   ``ctx.engine_root/<engine_subdir>/``.
+4. Call ``save_artifacts`` when the stage needs Edge-LLM sidecars (language only).
+5. Call stage ``postprocess`` and store the returned dict at
+   ``ctx.stage_results[stage_id]``.
 
-The important rule is that each stage should export only the subgraph owned by
-that engine. Cross-stage reshaping, tensor selection, and bookkeeping belong in
-``process_inputs`` glue, not inside the generic runner.
+Each stage returns representative ``tensors`` for downstream stages (for example
+``image_embs`` after vision). Export does not re-run compiled TRT modules after
+compile — downstream tensors come from eager forwards or dummy tensors sized to
+the engine ABI.
 
 
 Hook map
 --------
 
-GR00T registers dotted hook paths under ``trt.executor.models.groot``. The paths
-are resolved at runtime, which keeps the pipeline config declarative.
+GR00T registers dotted hook paths under ``trt.executor.models.groot``. See the
+:doc:`../developer_guide/export_modules/overview` pages for how each export
+module is wired.
 
 .. list-table::
    :header-rows: 1
@@ -166,42 +166,42 @@ are resolved at runtime, which keeps the pipeline config declarative.
      - Export hooks
      - Inference hooks
    * - ``visual``
-     - ``export.vision:plan_export``, ``export.vision:compile``,
-       ``export.vision:metadata``
-     - ``inference.vision:run_eager``, ``run_serialized``, ``run_trt``
+     - ``export.vision:preprocess``, ``export``, ``postprocess``
+     - ``inference.vision:preprocess``, ``compile``, ``load``, ``execute``,
+       ``postprocess``
    * - ``language``
-     - ``export.glue:vision_to_language``, ``export.language:plan_export``,
-       ``export.language:compile``, ``save_artifacts``, ``metadata``
-     - ``inference.glue:vision_to_language``, ``inference.language:run_*``
+     - ``export.language:preprocess``, ``export``, ``save_artifacts``,
+       ``postprocess``
+     - ``inference.language:preprocess``, ``compile``, ``load``, ``execute``,
+       ``postprocess``
    * - ``action_context``
-     - ``export.glue:language_to_action_context``,
-       ``export.action_context:plan_export``, ``compile``, ``metadata``
-     - ``inference.glue:language_to_action_context``,
-       ``inference.action_context:run_*``
+     - ``export.action_context:preprocess``, ``export``, ``postprocess``
+     - ``inference.action_context:preprocess``, ``compile``, ``load``,
+       ``execute``, ``postprocess``
    * - ``action``
-     - ``export.glue:action_context_to_action``,
-       ``export.action:plan_export``, ``compile``, ``metadata``
-     - ``inference.action:run_*``
+     - ``export.diffusion:preprocess``, ``export``, ``postprocess``
+     - ``inference.diffusion:preprocess``, ``compile``, ``load``, ``execute``,
+       ``postprocess``
 
 
 Inference and engine flow
 -------------------------
 
-After export, ``LoadPipeline`` maps each engine directory back to a serialized
-handle: ``visual`` -> ``vision``, ``language`` -> ``language``,
-``action_context`` -> ``action_context``, and ``action`` -> ``action``. Those
-handles are stored on ``ctx.handles.serialized``.
+Serialized engines are loaded per stage by each inference stage's ``load`` hook
+when ``ctx.execution_mode`` is ``SERIALIZED``. Wrappers live in
+``trt/executor/models/groot/load/serialize.py`` (``SerializedGrootVision``,
+``SerializedGrootLanguage``, etc.).
 
-The inference pipeline runs the same stage graph and dispatches each stage by
-execution mode:
+The inference pipeline uses the same stage graph and dispatches each stage by
+execution mode inside the ``execute`` hook:
 
-- ``EAGER`` calls ``run_eager`` on the live runtime model or policy.
-- ``SERIALIZED`` calls ``run_serialized`` through loaded engine handles.
-- ``IN_MEMORY`` calls ``run_trt`` through in-process TRT modules.
+- ``EAGER`` runs live PyTorch (language uses stock HF ``language_model``).
+- ``SERIALIZED`` runs through the loaded engine wrapper from the ``load`` hook.
+- ``IN_MEMORY`` runs through an on-the-fly TRT module from the ``compile`` hook.
 
 Inference scratch tensors live in ``ctx.inference``. Stage outputs live in
-``ctx.stage_results``. When the final ``action`` stage completes, the pipeline
-copies ``ctx.stage_results[3].tensors["actions"]`` to ``ctx.actions``.
+``ctx.stage_results``. The final ``action`` stage writes ``actions`` to
+``ctx.actions`` via ``postprocess``.
 
 
 Edge LLM Runtime
@@ -460,21 +460,21 @@ Use GR00T as the reference shape:
 
 1. Choose stable engine boundaries and assign one ``stage_id`` per engine.
 2. Create export stage configs with ``runner="trt.runner.export:ExportRunner"``.
-3. Implement ``plan_export`` and ``compile`` for every engine.
-4. Implement ``process_inputs`` glue wherever a stage consumes upstream tensors.
-5. Add ``save_artifacts`` only for sidecars needed by load or inference.
-6. Mirror the same stage IDs in an inference pipeline with
+3. Implement ``preprocess``, ``export``, and ``postprocess`` for every engine.
+4. Add ``save_artifacts`` only for sidecars needed by the C++ runtime (language).
+5. Mirror the same stage IDs in an inference pipeline with
    ``runner="trt.runner.inference:InferenceRunner"``.
-7. Add a load pipeline that maps engine subdirectories to serialized handle
-   classes.
-8. Register export, load, and inference configs in the pipeline registry.
+6. Implement ``preprocess``, ``compile``, ``load``, ``execute``, and
+   ``postprocess`` per inference stage.
+7. Add serialized wrappers under ``load/serialize.py`` for ``SERIALIZED`` mode.
+8. Register export and inference configs in ``trt/config/pipeline_registry.py``.
 
-The pipeline should remain a thin wrapper around the runtime: the runtime creates
-the model state and sample inputs, while the pipeline declares how that state is
-sliced into engines, compiled, loaded, and replayed.
+The pipeline should remain a thin wrapper around the runtime: the orchestrator
+creates the model state and sample inputs, while the pipeline declares how that
+state is sliced into engines, compiled, loaded per stage, and replayed.
 
 *Files:* ``trt/executor/models/groot/export/pipeline.py``,
 ``trt/executor/models/groot/inference/pipeline.py``,
-``trt/executor/models/groot/load/pipeline.py``, ``trt/runner/export.py``,
+``trt/executor/models/groot/load/serialize.py``, ``trt/runner/export.py``,
 ``trt/runner/inference.py``, ``trt/context.py``,
 ``examples/llm/llm_inference.cpp``, ``cpp/runtime/llmInferenceRuntime.cpp``
