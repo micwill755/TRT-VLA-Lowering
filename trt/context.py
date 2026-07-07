@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from trt.config.execution_mode import ExecutionMode
+from trt.config.parity_mode import ParityMode
 from trt.profile import VLAProfile
 
 @dataclass
@@ -68,6 +69,10 @@ class BenchmarkResult:
     image_embs: dict[str, torch.Tensor] = field(default_factory=dict)
     # backend -> stage_name -> tensor_name -> tensor (parity across execution modes)
     stage_tensors: dict[str, dict[str, dict[str, torch.Tensor]]] = field(default_factory=dict)
+    # backend -> parity_mode -> stage_name -> tensor_name -> tensor
+    stage_tensors_by_mode: dict[str, dict[str, dict[str, dict[str, torch.Tensor]]]] = field(
+        default_factory=dict
+    )
 
     def record(self, backend: str, seconds: float) -> None:
         self.timings.setdefault(backend, []).append(seconds)
@@ -82,6 +87,22 @@ class BenchmarkResult:
         self.stage_tensors.setdefault(backend, {}).setdefault(stage_name, {}).update({
             k: v.detach() for k, v in tensors.items() if v is not None
         })
+
+    def record_stage_mode(
+        self,
+        backend: str,
+        parity_mode: str,
+        stage_name: str,
+        tensors: dict[str, torch.Tensor],
+    ) -> None:
+        """Snapshot stage outputs under a parity mode (``e2e`` or ``isolated``)."""
+        detached = {k: v.detach() for k, v in tensors.items() if v is not None}
+        self.stage_tensors_by_mode.setdefault(backend, {}).setdefault(
+            parity_mode, {}
+        ).setdefault(stage_name, {}).update(detached)
+        # Keep legacy flat store in sync for e2e runs.
+        if parity_mode == ParityMode.E2E.value:
+            self.record_stage(backend, stage_name, detached)
 
 
 @dataclass
@@ -125,3 +146,8 @@ class EdgeContext:
 
     execution_mode: ExecutionMode = ExecutionMode.EAGER
     stage_results: dict[int, Any] = field(default_factory=dict)
+
+    # Benchmark parity: mode selection and per-run override state.
+    parity_mode: ParityMode = ParityMode.BOTH
+    parity_active: str | None = None
+    parity_reference: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)

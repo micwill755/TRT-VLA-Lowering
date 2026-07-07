@@ -7,9 +7,12 @@ from trt.context import EdgeContext
 from trt.compile import compile_trt_module
 from trt.executor.models.groot.load.serialize import SerializedGrootActionContext
 from trt.modules.export.language import ContextProjectionExportModule
+from trt.pipelines.parity import maybe_override_upstream
 from trt.serialize import SerializedTRTEngine
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
+    inputs = maybe_override_upstream(ctx, "action_context", inputs)
+
     device, dtype = ctx.device, ctx.dtype
 
     # upstream language post: [B, S, 2048]

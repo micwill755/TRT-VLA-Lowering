@@ -1,10 +1,20 @@
+from __future__ import annotations
+
+import sys
+import logging
+import torch_tensorrt
 import torch
 import argparse
-import torch_tensorrt
 import logging
 import copy
 
-torch_tensorrt.logging.set_level(logging.ERROR)
+from pathlib import Path
+
+torch_tensorrt.logging.set_level(logging.WARNING)
+
+_TEST_ROOT = Path(__file__).resolve().parent
+if str(_TEST_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TEST_ROOT))
 
 from lerobot.policies.groot import GrootPolicy
 from lerobot.policies.groot.configuration_groot import GrootConfig
@@ -122,7 +132,8 @@ def main():
     eagle = model.backbone.eagle_model
     vision = model.backbone.eagle_model.vision_model
     language = model.backbone.eagle_model.language_model
-    select_layer = model.backbone.select_layer
+    # wrapper from creates layers from 0-11 so -1 is the last hidden state for both eager and trt compiled
+    select_layer = -1 #model.backbone.select_layer
 
     force_hf_attention(vision, "eager")
     force_hf_attention(language, "eager")
@@ -255,13 +266,30 @@ def main():
     flat_ids = input_ids.reshape(bsz * seq_len)
     image_token_mask = flat_ids == image_token_index
 
-    flat_image_embs = embs_eager.reshape(-1, hidden).to(
-        device=flat_embs.device,
-        dtype=flat_embs.dtype,   # match embedding dtype (bf16), not hardcoded fp16
+    # Eager language input: eager vision -> eager LM
+    num_slots = int(image_token_mask.sum().item())
+    flat_embs_eager = input_embs.clone().reshape(bsz * seq_len, hidden)
+    flat_image_embs_eager = embs_eager.reshape(-1, hidden).to(
+        device=flat_embs_eager.device,
+        dtype=flat_embs_eager.dtype,
     )
-    flat_embs[image_token_mask] = flat_image_embs[:int(image_token_mask.sum().item())]
-    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
-    inputs_embeds = inputs_embeds.to(device=device, dtype=dtype).contiguous()
+    flat_embs_eager[image_token_mask] = flat_image_embs_eager[:num_slots]
+    inputs_embeds_eager = flat_embs_eager.reshape(bsz, seq_len, hidden).to(
+        device=device,
+        dtype=dtype,
+    ).contiguous()
+
+    # TRT language input: TRT vision -> TRT LM
+    flat_embs_trt = input_embs.clone().reshape(bsz * seq_len, hidden)
+    flat_image_embs_trt = embs_trt.reshape(-1, hidden).to(
+        device=flat_embs_trt.device,
+        dtype=flat_embs_trt.dtype,
+    )
+    flat_embs_trt[image_token_mask] = flat_image_embs_trt[:num_slots]
+    inputs_embeds_trt = flat_embs_trt.reshape(bsz, seq_len, hidden).to(
+        device=device,
+        dtype=dtype,
+    ).contiguous()
     position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
 
     if attention_mask is None:
@@ -273,14 +301,14 @@ def main():
     # ---------------------------------------------------------------------------
     with torch.no_grad():
         eager_out = language(
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=inputs_embeds_trt,
             attention_mask=attention_mask,
             position_ids=position_ids,
             output_hidden_states=True,
             return_dict=True,
         )
 
-    lm_hidden_eager = eager_out.hidden_states[-1]
+    lm_hidden_eager = eager_out.hidden_states[select_layer]
 
     # ---------------------------------------------------------------------------
     # RUNG C: plugin + CausalLMExportModule — patch first, then flat ABI
@@ -296,10 +324,10 @@ def main():
     lm = CausalLMExportModule(
         decoder,
         language.lm_head,
-        select_layer=-1,
+        select_layer=select_layer,
     ).eval().to(device=device)
 
-    pad_mask = attention_mask.to(device=inputs_embeds.device, dtype=torch.bool)
+    #pad_mask = attention_mask.to(device=device, dtype=torch.bool)
     # build position_ids for the real sequence:
     rope_rotary_cos_sin = make_rope_rotary_cos_sin(
         cfg,
@@ -326,7 +354,7 @@ def main():
     ]
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)   # fresh prefill
     flat_tensors = (
-        input_embs,
+        inputs_embeds_trt,
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
@@ -364,7 +392,7 @@ def main():
     finally:
         restore_attention(patched)
 
-    parity("language A vs C", lm_hidden_eager, trt_out[1])
+    parity("language A vs C (TRT)", lm_hidden_eager, trt_out[1])
 
     # step 3 action context
     print("compiling action context")

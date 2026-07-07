@@ -7,6 +7,7 @@ from typing import Type
 import torch
 
 from trt.config.execution_mode import ExecutionMode
+from trt.config.parity_mode import ParityMode
 from trt.config.pipeline_registry import get_export_pipeline, get_inference_pipeline
 from trt.context import EdgeContext
 from trt.data import load_test_data
@@ -63,14 +64,15 @@ class EdgeOrchestrator:
             action="store_true",
             help="Run eager inference only; skip export and benchmark.",
         )
+        parser.add_argument(
+            "--parity-mode",
+            choices=[mode.value for mode in ParityMode],
+            default=ParityMode.BOTH.value,
+            help="Stage parity: e2e (compounded), isolated (per-engine), or both.",
+        )
         return parser
 
     def run(self) -> int:
-        if self.args.export_only and self.args.benchmark_only:
-            raise SystemExit("Use only one of --export-only or --benchmark-only")
-        if sum(bool(x) for x in (self.args.export_only, self.args.benchmark_only, self.args.inference_only)) > 1:
-            raise SystemExit("Use only one of --export-only, --benchmark-only, or --inference-only")
-
         if not self._should_inference():
             load_plugins_for_trt()
         ctx = self._build_context()
@@ -118,5 +120,7 @@ class EdgeOrchestrator:
             model_inputs=model_inputs,
             engine_root=Path(self.args.engine_dir),
             args=self.args,
-            trt_settings=TRT_SETTINGS
+            dtype=torch.float16,
+            trt_settings=TRT_SETTINGS,
+            parity_mode=ParityMode(self.args.parity_mode),
         )

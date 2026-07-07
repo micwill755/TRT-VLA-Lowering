@@ -8,20 +8,22 @@ from trt.rope import make_rope_rotary_cos_sin
 from trt.compile import compile_trt_module
 from trt.executor.models.groot.load.serialize import SerializedGrootLanguage
 from trt.modules.export.language import CausalLMExportModule
+from trt.pipelines.parity import maybe_override_upstream
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.serialize import SerializedTRTEngine
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
+    inputs = maybe_override_upstream(ctx, "language", inputs)
+
     eagle = ctx.model.backbone.eagle_model
     language = eagle.language_model
-    device, dtype = ctx.device, ctx.dtype
 
     # --- upstream vision output: [B * S_visual, H_lm] ---
     image_embs = inputs["tensors"]["image_embs"]
 
     # --- tokenized prompt (pipeline-level preprocess) ---
-    input_ids = inputs["input_ids"].to(device=device, dtype=torch.long)
-    attention_mask = inputs.get("attention_mask")
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
 
     image_token_index = getattr(
         eagle, "image_token_index", eagle.config.image_token_index
@@ -41,24 +43,20 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     )
     num_slots = int(image_token_mask.sum().item())
     flat_embs[image_token_mask] = flat_image_embs[:num_slots]
-
-    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden).to(device=device).contiguous()
-    lm_dtype = next(language.parameters()).dtype
-
-    position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
+    inputs_embeds = flat_embs.reshape(bsz, seq_len, hidden)
+    inputs_embeds = inputs_embeds.to(device=ctx.device, dtype=ctx.dtype).contiguous()
+    position_ids = torch.arange(seq_len, device=ctx.device, dtype=torch.long).unsqueeze(0)
 
     if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=ctx.device)
 
     # --- EAGER: stock HF path (match model weight dtype, test_vla rung A) ---
     eager_inputs = {
-        "inputs_embeds": inputs_embeds.to(dtype=lm_dtype).contiguous(),
-        "attention_mask": attention_mask.to(device=device),
+        "inputs_embeds": inputs_embeds,
+        "attention_mask": attention_mask,
         "position_ids": position_ids,
     }
 
-    # --- TRT/SERIALIZED: flat Edge-LLM bindings (ctx.dtype for engine ABI) ---
-    trt_inputs_embeds = inputs_embeds.to(dtype=dtype).contiguous()
     # --- config dims ---
     cfg = language.config
     hidden_size = int(cfg.hidden_size)
@@ -74,19 +72,19 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         decoder,
         language.lm_head,
         select_layer=-1,
-    ).eval().to(device=device)
+    ).eval().to(device=ctx.device)
 
     # --- flat Edge-LLM bindings ---
     rope_rotary_cos_sin = make_rope_rotary_cos_sin(
         cfg,
         seq_len,
-        device,
+        ctx.device,
         language_model=language,
         position_ids=position_ids,
     )
 
-    ctx_len = torch.full((bsz,), seq_len, device=device, dtype=torch.int32)
-    last_token_ids = torch.full((bsz, 1), seq_len - 1, device=device, dtype=torch.int64)
+    ctx_len = torch.full((bsz,), seq_len, device=ctx.device, dtype=torch.int32)
+    last_token_ids = torch.full((bsz, 1), seq_len - 1, device=ctx.device, dtype=torch.int64)
 
     kv_caches = [
         torch.zeros(
@@ -95,15 +93,15 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
             num_key_value_heads,
             seq_len,
             head_dim,
-            device=device,
-            dtype=dtype,
+            device=ctx.device,
+            dtype=ctx.dtype,
         )
         for _ in range(num_layers)
     ]
-    kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)  # fresh prefill
+    kvcache_start_index = torch.empty(0, device=ctx.device, dtype=torch.int32)  # fresh prefill
 
     lm_inputs = (
-        trt_inputs_embeds,      # spliced vision rows — NOT raw input_embs
+        input_embs,
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,

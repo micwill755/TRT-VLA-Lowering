@@ -27,13 +27,6 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     # Shape: [B, C, H, W], e.g. [1, 3, 224, 224].
     pixel_values = inputs["pixel_values"]
 
-    # Vision/TRT path uses fp16 pixels on the target device.
-    # Contiguous layout keeps both HF eager and TRT runtime input ABI stable.
-    pixel_values = pixel_values.to(
-        device=ctx.device,
-        dtype=ctx.dtype,
-    ).contiguous()
-
     # The eager backend needs a Python wrapper around:
     #   vision_model -> selected hidden state -> optional pixel shuffle -> projector.
     #

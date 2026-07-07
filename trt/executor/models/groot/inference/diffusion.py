@@ -11,10 +11,14 @@ from trt.modules.export.diffusion import (
     StaticActionVelocityStepExportModule,
     TRTDynamicCategorySpecificMLPExportModule,
 )
+from trt.pipelines.parity import maybe_override_action_side, maybe_override_upstream, parity_initial_actions
 from trt.serialize import SerializedTRTEngine
 
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
+    inputs = maybe_override_upstream(ctx, "action", inputs)
+    inputs = maybe_override_action_side(ctx, inputs)
+
     device, dtype = ctx.device, ctx.dtype
     action_head = ctx.model.action_head
     cfg = action_head.config
@@ -60,17 +64,23 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     )
 
     # seeded initial noise for rollout — test_vla.py:485-504
-    seed = getattr(ctx.inference, "seed", 42)
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
-    initial_actions = torch.randn(
-        batch_size,
-        action_horizon,
-        action_dim,
-        device=device,
-        dtype=dtype,
-        generator=generator,
-    )
+    ref_initial_actions = parity_initial_actions(ctx)
+    if ref_initial_actions is not None:
+        initial_actions = ref_initial_actions.to(device=device, dtype=dtype).contiguous()
+    else:
+        seed = getattr(ctx.inference, "seed", 42)
+        generator = torch.Generator(device=device)
+        generator.manual_seed(seed)
+        initial_actions = torch.randn(
+            batch_size,
+            action_horizon,
+            action_dim,
+            device=device,
+            dtype=dtype,
+            generator=generator,
+        )
+
+    ctx.inference.noise = initial_actions.detach()
 
     return {
         "diffusion_module": diffusion_module,
