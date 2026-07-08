@@ -25,13 +25,21 @@ from lerobot.utils.constants import ACTION, OBS_STATE
 from lerobot.policies.factory import make_pre_post_processors
 
 from trt.modules.export.vision import GridVisionExportModule, TokenPoolingExportModule
-from trt.modules.export.language import MolmoTextEncoderKVExportModule
+from trt.modules.export.language import (
+    MolmoTextEncoderKVExportModule,
+    MolmoTextCausalLMExportModule,
+    gather_last_token_hidden,
+)
 from trt.modules.export.diffusion import (
     GrootDiTStepEncoderExportModule,
     StaticActionVelocityStepExportModule,
     TRTDynamicCategorySpecificMLPExportModule,
 )
-from trt.plugin.plugin_utils import restore_attention, patch_molmo_language_attention
+from trt.plugin.plugin_utils import (
+    restore_attention,
+    patch_molmo_language_attention,
+    patch_molmo_vision_attention,
+)
 from trt.measure import parity
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
@@ -112,6 +120,7 @@ def main():
 
     force_hf_attention(vision, "eager")
     force_hf_attention(language, "eager")
+
     #if action_expert is not None:
     #    force_hf_attention(action_expert, "eager")
 
@@ -170,29 +179,34 @@ def main():
     with torch.no_grad():
         embs_eager = visual(media, pooling_indices)
 
-    # NOTE: no ViT plugin patch here. MolmoAct2 vision attention is
-    # ViTMultiHeadDotProductAttention (wq/wk/wv/wo) inside
-    # image_vit.transformer.resblocks[*].attention plus image_pooling_2d,
-    # which does NOT match patch_vision_attention's SigLIP encoder.layers /
-    # self_attn (q_proj/...) shape. Compile the token-pooling module directly
-    # (native TRT attention) for the A-vs-C parity rung.
-
-    # --- Rung C: TRT compiled ---
-    exported = torch.export.export(
-        visual, args=(media, pooling_indices), strict=False
+    # --- Rung C: TRT compiled with Molmo image_vit self-attention plugin ---
+    # image_pooling_2d is cross-attention with an attention mask, so keep it native
+    # until there is a dedicated cross-attention plugin path.
+    vision_batch = int(media.shape[0] * media.shape[1])
+    vision_seq_len = int(media.shape[2])
+    patched_vision = patch_molmo_vision_attention(
+        vision,
+        batch_size=vision_batch,
+        seq_len=vision_seq_len,
     )
-    input_specs = make_input_spec((media, pooling_indices))
-    trt_engine = torch_tensorrt.dynamo.compile(
-        exported,
-        inputs=input_specs,
-        **{**VISION_TRT_SETTINGS, "use_python_runtime": True},
-    )
-    with torch.no_grad():
-        embs_trt = trt_engine(media, pooling_indices)
+    try:
+        exported = torch.export.export(
+            visual, args=(media, pooling_indices), strict=False
+        )
+        input_specs = make_input_spec((media, pooling_indices))
+        trt_engine = torch_tensorrt.dynamo.compile(
+            exported,
+            inputs=input_specs,
+            **{**VISION_TRT_SETTINGS, "use_python_runtime": True},
+        )
+        with torch.no_grad():
+            embs_trt = trt_engine(media, pooling_indices)
+    finally:
+        restore_attention(patched_vision)
 
     parity("MolmoAct2 vision A vs C", embs_eager, embs_trt)
 
-    # STEP 2: backbone / language (encoder K/V prefill — not GR00T CausalLM splice)
+    # STEP 2a: backbone / language (encoder K/V prefill — not CausalLM splice)
     print("Compiling language")
 
     image_token_positions = (
@@ -310,126 +324,62 @@ def main():
     parity("MolmoAct2 encoder_k A vs C (TRT)", encoder_k_eager, encoder_k_trt)
     parity("MolmoAct2 encoder_v A vs C (TRT)", encoder_v_eager, encoder_v_trt)
 
-    '''if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
+    # STEP 2b: discrete language prefill (logits + prefix K/V — separate from action-expert K/V)
+    print("Compiling discrete language")
 
-    backbone_inputs = (
-        input_ids,
-        media,
-        pooling_indices,
-        attention_mask,
+    last_token_ids = torch.full((bsz, 1), seq_len - 1, device=device, dtype=torch.long)
+    discrete_flat_tensors = (
+        inputs_embeds,
+        rope_rotary_cos_sin,
+        ctx_len,
+        kvcache_start_index,
+        last_token_ids,
+        *kv_caches,
     )
 
-    image_token_positions = (
-        input_ids.reshape(-1) == int(backbone.config.image_patch_id)
-    ).nonzero(as_tuple=False).flatten()
+    with torch.no_grad():
+        logits_eager = model.lm_head(
+            gather_last_token_hidden(hidden_eager, last_token_ids)
+        ).float()
 
-    backbone_kv = MolmoAct2BackboneKVModule(
-        policy,
-        image_token_positions,
+    discrete_module = MolmoTextCausalLMExportModule(
+        language,
+        model.lm_head,
     ).eval().to(device=device)
 
-    # --- Rung A: eager backbone prefill (UNPATCHED) ---
-    with torch.no_grad():
-        encoder_k_eager, encoder_v_eager = backbone_kv(*backbone_inputs)
-
-    encoder_attention_mask = policy._encoder_attention_mask_for_action_expert(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
+    patched_discrete = patch_molmo_language_attention(
+        language,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=head_dim,
+        enable_bidirectional_prefill=0,
+        name="molmo-discrete-language",
     )
-    if encoder_attention_mask is None:
-        encoder_attention_mask = attention_mask.to(dtype=torch.bool)
+    try:
+        with torch.no_grad():
+            discrete_module(*discrete_flat_tensors)
 
-    # NOTE: MolmoAct2 transformer attention is fused att_proj + internal RoPE,
-    # not the separate q_proj/k_proj/v_proj layout that patch_language_attention
-    # expects. Compile the fused backbone module directly (native TRT attention).
+        discrete_exported = torch.export.export(
+            discrete_module, args=discrete_flat_tensors, strict=False
+        )
+        discrete_input_specs = make_input_spec(discrete_flat_tensors)
+        discrete_trt = torch_tensorrt.dynamo.compile(
+            discrete_exported,
+            inputs=discrete_input_specs,
+            **{**LANGUAGE_TRT_SETTINGS, "use_python_runtime": True},
+        )
+        with torch.no_grad():
+            logits_trt, hidden_discrete_trt, prefix_k_trt, prefix_v_trt = discrete_trt(
+                *discrete_flat_tensors
+            )
+    finally:
+        restore_attention(patched_discrete)
 
-    # --- Rung C: TRT compiled backbone ---
-    backbone_exported = torch.export.export(
-        backbone_kv, args=backbone_inputs, strict=False
-    )
-    backbone_input_specs = make_input_spec(backbone_inputs)
-    backbone_trt = torch_tensorrt.dynamo.compile(
-        backbone_exported,
-        inputs=backbone_input_specs,
-        **{**LANGUAGE_TRT_SETTINGS, "use_python_runtime": True},
-    )
-    with torch.no_grad():
-        encoder_k_trt, encoder_v_trt = backbone_trt(*backbone_inputs)
+    parity("MolmoAct2 discrete logits A vs C (TRT)", logits_eager, logits_trt)
+    parity("MolmoAct2 discrete hidden A vs C (TRT)", hidden_eager, hidden_discrete_trt)
 
-    parity("MolmoAct2 backbone encoder_k A vs C", encoder_k_eager, encoder_k_trt)
-    parity("MolmoAct2 backbone encoder_v A vs C", encoder_v_eager, encoder_v_trt)
-
-    # step 3: diffusion (continuous flow — single velocity step parity)
-    print("Compiling diffusion")
-
-    bsz = int(input_ids.shape[0])
-    action_horizon = policy._generation_action_horizon()
-    max_action_dim = int(backbone.config.max_action_dim)
-
-    # Use TRT backbone K/V for both rungs to isolate diffusion engine parity (PI05 pattern).
-    encoder_k = encoder_k_trt.to(device=device, dtype=dtype).contiguous()
-    encoder_v = encoder_v_trt.to(device=device, dtype=dtype).contiguous()
-    encoder_attn_for_action = encoder_attention_mask.to(device=device, dtype=dtype).contiguous()
-
-    action_module = MolmoAct2ActionFlowStepModule(policy).eval().to(device=device)
-
-    step_actions = torch.randn(
-        bsz,
-        action_horizon,
-        max_action_dim,
-        device=device,
-        dtype=dtype,
-    )
-    step_timestep = torch.zeros(bsz, device=device, dtype=dtype)
-
-    # Bake timestep-only modulation as engine inputs (see build_action_modulation).
-    block_mod, final_mod = build_action_modulation(
-        action_module.action_expert, step_timestep, action_horizon, dtype
-    )
-    context_k, context_v, cross_mask, self_mask, rope_cos, rope_sin = build_action_context(
-        action_module.action_expert,
-        encoder_k,
-        encoder_v,
-        encoder_attn_for_action,
-        action_horizon,
-        device,
-        dtype,
-    )
-
-    diffusion_input = (
-        step_actions,
-        block_mod,
-        final_mod,
-        context_k,
-        context_v,
-        cross_mask,
-        self_mask,
-        rope_cos,
-        rope_sin,
-    )
-
-    # --- Rung A: eager velocity (UNPATCHED) ---
-    with torch.no_grad():
-        eager_velocity = action_module(*diffusion_input)
-
-    # NOTE: action expert uses ActionExpertSelfAttention (fused qkv) and
-    # ActionExpertCrossAttention — not PluginAttention layout. Compile directly.
-
-    # --- Rung C: TRT compiled diffusion step ---
-    diffusion_exported = torch.export.export(
-        action_module, args=diffusion_input, strict=False
-    )
-    diffusion_input_specs = make_input_spec(diffusion_input)
-    diffusion_trt = torch_tensorrt.dynamo.compile(
-        diffusion_exported,
-        inputs=diffusion_input_specs,
-        **{**ACTION_TRT_SETTINGS, "use_python_runtime": True},
-    )
-    with torch.no_grad():
-        trt_velocity = diffusion_trt(*diffusion_input)
-
-    parity("MolmoAct2 diffusion A vs C", eager_velocity, trt_velocity)'''
+    print("COmpiling diffusion")
 
     return 0
 

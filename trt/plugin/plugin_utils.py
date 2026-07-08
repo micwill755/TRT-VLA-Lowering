@@ -12,7 +12,8 @@ from trt.plugin.attention import (
     PluginAttention, 
     ViTPluginAttention, 
     SiglipReferenceAttention,
-    MolmoPluginAttention
+    MolmoPluginAttention,
+    MolmoViTPluginAttention,
 )
 
 _PLUGIN_CONFIG: dict[str, Any] = {}
@@ -161,8 +162,13 @@ def load_plugins_for_trt():
 
 
 def restore_attention(patched):
-    for layer, original_attn in patched:
-        layer.self_attn = original_attn
+    for item in patched:
+        if len(item) == 2:
+            layer, original_attn = item
+            layer.self_attn = original_attn
+        else:
+            module, attr_name, original_attn = item
+            setattr(module, attr_name, original_attn)
 
 
 def patch_vision_attention(
@@ -186,6 +192,28 @@ def patch_vision_attention(
         ).eval()
 
     print(f"patched {name} attention modules: {len(patched)}")
+    return patched
+
+
+def patch_molmo_vision_attention(
+    vision_backbone,
+    *,
+    batch_size: int,
+    seq_len: int,
+    name: str = "molmo-vision",
+):
+    patched = []
+    resblocks = vision_backbone.image_vit.transformer.resblocks
+    for i, block in enumerate(resblocks):
+        patched.append((block, "attention", block.attention))
+        block.attention = MolmoViTPluginAttention(
+            block.attention,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            name=f"{name}.image_vit.block{i}",
+        ).eval()
+
+    print(f"patched {name} image_vit attention modules: {len(patched)}")
     return patched
 
 def patch_molmo_language_attention(

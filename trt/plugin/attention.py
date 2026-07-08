@@ -208,6 +208,86 @@ class ViTPluginAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
         return attn_output, None
 
+
+class MolmoViTPluginAttention(nn.Module):
+    """TRT ViT attention wrapper for MolmoAct2 vision self-attention.
+
+    Molmo vision uses ``wq/wk/wv/wo`` and returns a tensor directly, unlike the
+    SigLIP ``q_proj/k_proj/v_proj/out_proj`` modules wrapped by ViTPluginAttention.
+    """
+
+    def __init__(self, attn, *, batch_size: int, seq_len: int, name: str):
+        super().__init__()
+        self.wq = attn.wq
+        self.wk = attn.wk
+        self.wv = attn.wv
+        self.wo = attn.wo
+        self.residual_dropout = attn.residual_dropout
+
+        self.num_heads = int(attn.num_heads)
+        self.num_key_value_heads = int(attn.num_key_value_heads)
+        self.num_key_value_groups = int(attn.num_key_value_groups)
+        self.head_dim = int(attn.head_dim)
+        self.name = name
+
+        device = self.wq.weight.device
+        self.register_buffer(
+            "cu_seqlens",
+            torch.arange(
+                0,
+                (int(batch_size) + 1) * int(seq_len),
+                int(seq_len),
+                device=device,
+                dtype=torch.int32,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "max_seqlen_carrier",
+            torch.zeros(int(seq_len), device=device, dtype=torch.int32),
+            persistent=False,
+        )
+
+    def forward(
+        self,
+        inputs_q: torch.Tensor,
+        inputs_kv: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if inputs_kv is not None:
+            raise RuntimeError(f"{self.name} Molmo ViT plugin path only supports self-attention")
+        if attn_mask is not None:
+            raise RuntimeError(f"{self.name} Molmo ViT plugin path expects no attn_mask")
+
+        batch_size, seq_len, _ = inputs_q.shape
+        q = self.wq(inputs_q).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = self.wk(inputs_q).reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
+        v = self.wv(inputs_q).reshape(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
+
+        if self.num_heads != self.num_key_value_heads:
+            k = k.repeat_interleave(self.num_key_value_groups, dim=2)
+            v = v.repeat_interleave(self.num_key_value_groups, dim=2)
+
+        q = q.reshape(batch_size * seq_len, self.num_heads, self.head_dim).to(torch.float16).contiguous()
+        k = k.reshape(batch_size * seq_len, self.num_heads, self.head_dim).to(torch.float16).contiguous()
+        v = v.reshape(batch_size * seq_len, self.num_heads, self.head_dim).to(torch.float16).contiguous()
+
+        attn_output = torch.ops.trt.vit_attention_plugin.default(
+            q,
+            k,
+            v,
+            self.cu_seqlens,
+            self.max_seqlen_carrier,
+            self.num_heads,
+            self.head_dim,
+        )
+
+        attn_output = attn_output.reshape(batch_size, seq_len, self.num_heads * self.head_dim)
+        attn_output = attn_output.to(dtype=self.wo.weight.dtype)
+        attn_output = self.wo(attn_output)
+        return self.residual_dropout(attn_output)
+
+
 class MolmoPluginAttention(nn.Module):
     """Plugin wrapper for MolmoAct2 fused attention (att_proj + attn_out).
 

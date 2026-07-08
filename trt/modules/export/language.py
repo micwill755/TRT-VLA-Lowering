@@ -122,8 +122,8 @@ class ContextProjectionExportModule(nn.Module):
         return context_embs
 
 
-class MolmoTextEncoderKVExportModule(nn.Module):
-    """Molmo manual decoder loop with MolmoPluginAttention + encoder K/V export."""
+class _MolmoTextDecoderLoopMixin(nn.Module):
+    """Shared manual Molmo transformer block loop for export modules."""
 
     def __init__(self, transformer: nn.Module):
         super().__init__()
@@ -179,14 +179,14 @@ class MolmoTextEncoderKVExportModule(nn.Module):
         hidden = residual + block.dropout(hidden)
         return hidden, kv
 
-    def forward(
+    def _decode_layers(
         self,
-        inputs_embeds: torch.Tensor,          # [B, S, H], vision already spliced
-        rope_rotary_cos_sin: torch.Tensor,    # external RoPE table
-        context_lengths: torch.Tensor,        # [B]
-        kvcache_start_index: torch.Tensor,    # [] for fresh prefill
-        *past_key_values: torch.Tensor,       # one [B,2,KvH,cap,D] per layer
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        inputs_embeds: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
+        context_lengths: torch.Tensor,
+        kvcache_start_index: torch.Tensor,
+        past_key_values: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, list[torch.Tensor], int]:
         transformer = self.transformer
         hidden = transformer.emb_drop(
             inputs_embeds.to(dtype=next(transformer.parameters()).dtype)
@@ -206,6 +206,27 @@ class MolmoTextEncoderKVExportModule(nn.Module):
             new_kvs.append(kv)
 
         hidden = transformer.ln_f(hidden)
+        return hidden, new_kvs, seq_len
+
+
+class MolmoTextEncoderKVExportModule(_MolmoTextDecoderLoopMixin):
+    """Molmo manual decoder loop with MolmoPluginAttention + encoder K/V export."""
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,          # [B, S, H], vision already spliced
+        rope_rotary_cos_sin: torch.Tensor,    # external RoPE table
+        context_lengths: torch.Tensor,        # [B]
+        kvcache_start_index: torch.Tensor,    # [] for fresh prefill
+        *past_key_values: torch.Tensor,       # one [B,2,KvH,cap,D] per layer
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden, new_kvs, seq_len = self._decode_layers(
+            inputs_embeds,
+            rope_rotary_cos_sin,
+            context_lengths,
+            kvcache_start_index,
+            past_key_values,
+        )
 
         kv_dim = self.num_kv_heads * self.head_dim
         encoder_k_layers: list[torch.Tensor] = []
@@ -226,6 +247,48 @@ class MolmoTextEncoderKVExportModule(nn.Module):
         encoder_k = torch.stack(encoder_k_layers, dim=0).contiguous()
         encoder_v = torch.stack(encoder_v_layers, dim=0).contiguous()
         return hidden, encoder_k, encoder_v
+
+
+class MolmoTextCausalLMExportModule(_MolmoTextDecoderLoopMixin):
+    """Molmo discrete/AR prefill: logits + prefix K/V in plugin cache layout.
+
+    Mirrors ``CausalLMExportModule`` outputs for investigating the discrete path
+    separately from ``MolmoTextEncoderKVExportModule`` (action-expert K/V).
+    """
+
+    def __init__(self, transformer: nn.Module, lm_head: nn.Module):
+        super().__init__(transformer)
+        self.lm_head = lm_head
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
+        context_lengths: torch.Tensor,
+        kvcache_start_index: torch.Tensor,
+        last_token_ids: torch.Tensor,
+        *past_key_values: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden, new_kvs, seq_len = self._decode_layers(
+            inputs_embeds,
+            rope_rotary_cos_sin,
+            context_lengths,
+            kvcache_start_index,
+            past_key_values,
+        )
+
+        last_hidden = gather_last_token_hidden(hidden, last_token_ids)
+        logits = self.lm_head(last_hidden).float()
+
+        prefix_k = torch.stack(
+            [kv[:, 0, :, :seq_len, :] for kv in new_kvs],
+            dim=0,
+        ).contiguous()
+        prefix_v = torch.stack(
+            [kv[:, 1, :, :seq_len, :] for kv in new_kvs],
+            dim=0,
+        ).contiguous()
+        return logits, hidden, prefix_k, prefix_v
 
 
 class MolmoMultimodalEncoderKVExportModule(nn.Module):
