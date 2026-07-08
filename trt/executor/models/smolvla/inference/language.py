@@ -2,45 +2,47 @@ from __future__ import annotations
 
 import torch
 
+from trt.compile import compile_trt_module
 from trt.config.execution_mode import ExecutionMode
 from trt.context import EdgeContext
-from trt.rope import make_rope_rotary_cos_sin
-from trt.compile import compile_trt_module
-from trt.executor.models.pi05.load.serialize import SerializedPi05Language
-from trt.executor.models.pi05.helpers import build_pi05_prefix_embs
+from trt.executor.models.smolvla.helpers import build_smolvla_prefix_embs
+from trt.executor.models.smolvla.load.serialize import SerializedSmolVLALanguage
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
-from trt.prefix_cache import stack_prefix_kv_from_cache
+from trt.prefix_cache import extract_stacked_kv_from_cache
+from trt.rope import make_rope_rotary_cos_sin
 from trt.serialize import SerializedTRTEngine
 
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     inputs = maybe_override_upstream(ctx, "language", inputs)
 
-    paligemma = ctx.model.paligemma_with_expert.paligemma.model
-    language = paligemma.language_model
-    language = language.to(device=ctx.device, dtype=ctx.dtype).eval()
-    lm_head = ctx.model.paligemma_with_expert.paligemma.lm_head
+    vlm = ctx.model.vlm_with_expert.get_vlm_model()
+    language = vlm.text_model.to(device=ctx.device, dtype=ctx.dtype).eval()
+    lm_head = ctx.model.vlm_with_expert.vlm.lm_head
 
     image_embs = inputs["tensors"]["image_embs"]
 
     inputs_embeds, prefix_pad_mask, prefix_attention_mask, prefix_position_ids = (
-        build_pi05_prefix_embs(
+        build_smolvla_prefix_embs(
             ctx.model,
             inputs["img_masks"],
             inputs["tokens"],
             inputs["masks"],
             image_embs,
             inputs["images"],
+            inputs["state"],
         )
     )
 
     bsz, seq_len, hidden = inputs_embeds.shape
     inputs_embeds = inputs_embeds.to(device=ctx.device, dtype=ctx.dtype).contiguous()
+    lm_dtype = next(language.parameters()).dtype
+    prefix_attention_mask = prefix_attention_mask.to(device=ctx.device, dtype=lm_dtype)
 
     eager_inputs = {
-        "inputs_embeds": inputs_embeds,
+        "inputs_embeds": inputs_embeds.to(dtype=lm_dtype),
         "attention_mask": prefix_attention_mask,
         "position_ids": prefix_position_ids,
     }
@@ -103,6 +105,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         "lm_module": lm_module,
         "decoder": decoder,
         "hidden_size": hidden_size,
+        "num_layers": num_layers,
         "num_attention_heads": num_attention_heads,
         "num_key_value_heads": num_key_value_heads,
         "head_dim": head_dim,
@@ -138,7 +141,7 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
 
 
 def load(ctx: EdgeContext, inputs: dict) -> dict:
-    serialized_language = SerializedPi05Language(
+    serialized_language = SerializedSmolVLALanguage(
         SerializedTRTEngine(ctx.engine_root / "language")
     )
     return {
@@ -173,7 +176,15 @@ def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
             use_cache=True,
         )
         lm_hidden = out.last_hidden_state
-        prefix_k, prefix_v = stack_prefix_kv_from_cache(out.past_key_values)
+        prefix_k, prefix_v = extract_stacked_kv_from_cache(
+            out.past_key_values,
+            num_layers=inputs["num_layers"],
+            batch_size=int(eager_embs.shape[0]),
+            num_kv_heads=inputs["num_key_value_heads"],
+            head_dim=inputs["head_dim"],
+            device=ctx.device,
+            dtype=ctx.dtype,
+        )
 
     return {
         "tensors": {

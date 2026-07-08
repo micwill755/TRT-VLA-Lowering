@@ -16,6 +16,8 @@ from trt.executor.models.groot.export.pipeline import GROOT_PIPELINE
 from trt.executor.models.groot.inference.pipeline import GROOT_INFERENCE_PIPELINE
 from trt.executor.models.pi05.export.pipeline import PI05_PIPELINE
 from trt.executor.models.pi05.inference.pipeline import PI05_INFERENCE_PIPELINE
+from trt.executor.models.smolvla.export.pipeline import SMOLVLA_PIPELINE
+from trt.executor.models.smolvla.inference.pipeline import SMOLVLA_INFERENCE_PIPELINE
 
 PipelineEntry: TypeAlias = PipelineConfig | Callable[[], PipelineConfig]
 
@@ -75,6 +77,8 @@ def _register_builtin() -> None:
     register_inference_pipeline("gr00t", GROOT_INFERENCE_PIPELINE)
     register_export_pipeline("pi05", PI05_PIPELINE)
     register_inference_pipeline("pi05", PI05_INFERENCE_PIPELINE)
+    register_export_pipeline("smolvla", SMOLVLA_PIPELINE)
+    register_inference_pipeline("smolvla", SMOLVLA_INFERENCE_PIPELINE)
 
 
 _register_builtin()

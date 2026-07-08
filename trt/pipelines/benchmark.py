@@ -15,6 +15,10 @@ def _stage_parity_tensors(profile_name: str) -> dict[str, str]:
         from trt.executor.models.pi05.inference.pipeline import STAGE_PARITY_TENSORS
 
         return STAGE_PARITY_TENSORS
+    if profile_name == "smolvla":
+        from trt.executor.models.smolvla.inference.pipeline import STAGE_PARITY_TENSORS
+
+        return STAGE_PARITY_TENSORS
     from trt.executor.models.groot.inference.pipeline import STAGE_PARITY_TENSORS
 
     return STAGE_PARITY_TENSORS

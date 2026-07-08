@@ -463,30 +463,20 @@ def main():
 
     parity("MolmoAct2 diffusion export vs HF", eager_hf_velocity, eager_velocity)
 
-    # Action expert uses fused qkv self-attention with RoPE plus cross-attention.
-    # Cross-attention alone lowers to TRT; the full block currently hits a TensorRT
-    # Myelin internal error on the RoPE self-attention path (seq_len=action_horizon).
+    # --- Rung C: TRT compiled diffusion step ---
     diffusion_exported = torch.export.export(
         action_module, args=diffusion_input, strict=False
     )
     diffusion_input_specs = make_input_spec(diffusion_input)
-    diffusion_trt_settings = {
-        k: v for k, v in ACTION_TRT_SETTINGS.items() if k != "offload_module_to_cpu"
-    }
-    try:
-        diffusion_trt = torch_tensorrt.dynamo.compile(
-            diffusion_exported,
-            inputs=diffusion_input_specs,
-            **{**diffusion_trt_settings, "use_python_runtime": True},
-        )
-        with torch.no_grad():
-            trt_velocity = diffusion_trt(*diffusion_input)
-        parity("MolmoAct2 diffusion A vs C", eager_velocity, trt_velocity)
-    except Exception as exc:
-        print(
-            "MolmoAct2 diffusion TRT compile failed (known ActionExpert RoPE self-attn issue):",
-            exc,
-        )
+    diffusion_trt = torch_tensorrt.dynamo.compile(
+        diffusion_exported,
+        inputs=diffusion_input_specs,
+        **{**ACTION_TRT_SETTINGS, "use_python_runtime": True},
+    )
+    with torch.no_grad():
+        trt_velocity = diffusion_trt(*diffusion_input)
+
+    parity("MolmoAct2 diffusion A vs C", eager_velocity, trt_velocity)
 
     return 0
 

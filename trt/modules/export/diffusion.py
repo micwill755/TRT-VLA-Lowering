@@ -408,6 +408,141 @@ class SmolVLAExpertExportModule(nn.Module):
         return outputs_embeds[1]
 
 
+def _molmo_modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
+def apply_action_expert_rope_export(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """TRT-friendly RoPE for ActionExpert self-attention.
+
+    ``q`` and ``k`` are ``[B, H, S, D]`` (same layout as eager ``ActionExpertSelfAttention``).
+    ``cos`` / ``sin`` are ``[1, 1, S, D//2]`` from ``ActionExpertRotaryEmbedding.build_cache``.
+    Uses ``split`` + explicit ``expand`` instead of dynamic slices to keep Myelin happy.
+    """
+    half = int(cos.shape[-1])
+    cos_e = cos.reshape(1, 1, cos.shape[2], half).expand(
+        q.shape[0], q.shape[1], q.shape[2], half
+    )
+    sin_e = sin.reshape(1, 1, sin.shape[2], half).expand(
+        q.shape[0], q.shape[1], q.shape[2], half
+    )
+    q1, q2 = torch.split(q, half, dim=-1)
+    k1, k2 = torch.split(k, half, dim=-1)
+    q = torch.cat([q1 * cos_e - q2 * sin_e, q1 * sin_e + q2 * cos_e], dim=-1)
+    k = torch.cat([k1 * cos_e - k2 * sin_e, k1 * sin_e + k2 * cos_e], dim=-1)
+    return q, k
+
+
+class ActionExpertSelfAttentionExportModule(nn.Module):
+    """Export wrapper for Molmo ActionExpert self-attention (qkv + RoPE + SDPA)."""
+
+    def __init__(self, self_attn: nn.Module):
+        super().__init__()
+        self.qkv = self_attn.qkv
+        self.q_norm = self_attn.q_norm
+        self.k_norm = self_attn.k_norm
+        self.out_proj = self_attn.out_proj
+        self.num_heads = int(self_attn.num_heads)
+        self.head_dim = int(self_attn.head_dim)
+        self.hidden_size = int(self_attn.hidden_size)
+        self.use_rope = self_attn.rope is not None
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: torch.Tensor | None,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        is_causal: bool,
+    ) -> torch.Tensor:
+        bsz, seq_len, _ = x.shape
+        qkv = self.qkv(x).view(bsz, seq_len, 3, self.num_heads, self.head_dim)
+        q = qkv[:, :, 0].transpose(1, 2).contiguous()
+        k = qkv[:, :, 1].transpose(1, 2).contiguous()
+        v = qkv[:, :, 2].contiguous()
+
+        if self.q_norm is not None and self.k_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        if self.use_rope and rope_cos.numel() > 0:
+            q, k = apply_action_expert_rope_export(q, k, rope_cos, rope_sin)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+
+        mask = attn_mask if attn_mask is not None and attn_mask.numel() > 0 else None
+        out = F.scaled_dot_product_attention(
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            attn_mask=mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+        )
+        out = out.transpose(1, 2).reshape(bsz, seq_len, self.hidden_size)
+        return self.out_proj(out)
+
+
+class ActionExpertBlockExportModule(nn.Module):
+    """One ActionExpert block with TRT-friendly self-attention."""
+
+    def __init__(self, block: nn.Module):
+        super().__init__()
+        self.self_norm = block.self_norm
+        self.cross_norm = block.cross_norm
+        self.ff_norm = block.ff_norm
+        self.self_attn = ActionExpertSelfAttentionExportModule(block.self_attn)
+        self.cross_attn = block.cross_attn
+        self.mlp = block.mlp
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        block_modulation: tuple[torch.Tensor, ...],
+        cross_kv: tuple[torch.Tensor, torch.Tensor],
+        self_attn_mask: torch.Tensor | None,
+        cross_attn_mask: torch.Tensor | None,
+        is_causal: bool,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+    ) -> torch.Tensor:
+        (
+            shift_msa,
+            scale_msa,
+            gate_msa,
+            shift_mca,
+            scale_mca,
+            gate_mca,
+            shift_mlp,
+            scale_mlp,
+            gate_mlp,
+        ) = block_modulation
+
+        x = x + gate_msa.unsqueeze(1) * self.self_attn(
+            _molmo_modulate(self.self_norm(x), shift_msa, scale_msa),
+            self_attn_mask,
+            rope_cos,
+            rope_sin,
+            is_causal,
+        )
+        x = x + gate_mca.unsqueeze(1) * self.cross_attn(
+            _molmo_modulate(self.cross_norm(x), shift_mca, scale_mca),
+            kv_k=cross_kv[0],
+            kv_v=cross_kv[1],
+            attn_mask=cross_attn_mask,
+        )
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(
+            _molmo_modulate(self.ff_norm(x), shift_mlp, scale_mlp)
+        )
+        return x
+
+
 def build_molmo_action_modulation(
     action_expert: nn.Module,
     timestep: torch.Tensor,
@@ -497,6 +632,10 @@ class MolmoAct2ActionFlowStepExportModule(nn.Module):
     def __init__(self, action_expert: nn.Module):
         super().__init__()
         self.action_expert = action_expert
+        self.block_exports = nn.ModuleList(
+            ActionExpertBlockExportModule(block) for block in action_expert.blocks
+        )
+        self.causal_attn = bool(action_expert.config.causal_attn)
 
     def forward(
         self,
@@ -513,11 +652,10 @@ class MolmoAct2ActionFlowStepExportModule(nn.Module):
         expert = self.action_expert
         x = expert.action_embed(actions)
 
-        rope_cache = (rope_cos, rope_sin) if rope_cos.numel() > 0 else None
         cross_attn_mask = cross_mask if cross_mask.numel() > 0 else None
         self_attn_mask = self_mask if self_mask.numel() > 0 else None
 
-        for idx, block in enumerate(expert.blocks):
+        for idx, block in enumerate(self.block_exports):
             block_modulation = (
                 block_mod[idx, 0],
                 block_mod[idx, 1],
@@ -531,13 +669,13 @@ class MolmoAct2ActionFlowStepExportModule(nn.Module):
             )
             x = block(
                 x,
-                block_mod[idx, 0],
+                block_modulation,
                 cross_kv=(context_k[idx], context_v[idx]),
                 self_attn_mask=self_attn_mask,
-                attn_mask=cross_attn_mask,
-                is_causal=expert.config.causal_attn,
-                modulation=block_modulation,
-                rope_cache=rope_cache,
+                cross_attn_mask=cross_attn_mask,
+                is_causal=self.causal_attn,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
             )
 
         final_modulation = (final_mod[0], final_mod[1])

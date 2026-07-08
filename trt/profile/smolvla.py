@@ -6,22 +6,16 @@ import argparse
 from typing import Any
 
 import torch
-import torch.nn as nn
-from transformers import AutoTokenizer
 
+from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.smolvla import SmolVLAPolicy
+from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 from trt.data import prepare_policy_batch
-from trt.export.smolvla import SmolVLAExportHooks
-from trt.vision import DEFAULT_VISION_TRT_SETTINGS as VISION_TRT_SETTINGS
-from trt.inference.smolvla import (
-    run_inference_pytorch_smolvla,
-    run_inference_smolvla_engines,
-)
-
 from trt.io_spec import PI05_EDGE_IO
-from trt.measure import compute_action_parity_metrics
-from trt.profile import InMemoryHandles, SerializedHandles, VLAProfile
+from trt.profile import VLAProfile
+from trt.utils import force_hf_attention
 
 
 class SmolVLAProfile(VLAProfile):
@@ -30,11 +24,9 @@ class SmolVLAProfile(VLAProfile):
     engine_dir_default = "/tmp/smolvla_edge_llm"
     display_name = "PyTorch SmolVLA"
 
-    policy_cls = SmolVLAPolicy
     io = PI05_EDGE_IO
     fill_missing_cameras = True
 
-    vision_trt_settings = dict(VISION_TRT_SETTINGS)
     action_trt_settings = {
         "disable_tf32": True,
         "use_explicit_typing": True,
@@ -47,18 +39,42 @@ class SmolVLAProfile(VLAProfile):
     }
 
     def _init_policy(self) -> None:
-        self.policy = self.policy_cls.from_pretrained(self.model_id).to(self.device).eval()
+        self.config = SmolVLAConfig(
+            device=str(self.device),
+            chunk_size=50,
+            n_action_steps=50,
+            max_state_dim=32,
+            max_action_dim=32,
+            resize_imgs_with_padding=(512, 512),
+            load_vlm_weights=True,
+            vlm_model_name="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+            input_features={
+                f"{OBS_IMAGES}.image": PolicyFeature(
+                    type=FeatureType.VISUAL, shape=(3, 224, 224)
+                ),
+                f"{OBS_IMAGES}.image2": PolicyFeature(
+                    type=FeatureType.VISUAL, shape=(3, 224, 224)
+                ),
+                OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(7,)),
+            },
+            output_features={
+                ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(32,)),
+            },
+        )
+        self.config.validate_features()
+        self.policy = SmolVLAPolicy(self.config).to(self.device).eval()
 
     def _init_models(self) -> None:
-        self.model = self.policy.model.to(self.device).eval()
+        self.model = self.policy.model.to(device=self.device, dtype=torch.float16).eval()
 
-    def _processor_pretrained_path(self) -> str | None:
-        return self.model_id
+        vlm = self.model.vlm_with_expert.get_vlm_model()
+        force_hf_attention(vlm.vision_model, "eager")
+        force_hf_attention(vlm.text_model, "eager")
+        force_hf_attention(self.model.vlm_with_expert.lm_expert, "eager")
 
     def _init_tokenizers(self) -> None:
-        super()._init_tokenizers()
-        if self.text_tok is None:
-            self.text_tok = AutoTokenizer.from_pretrained(self.policy.model.config.vlm_model_name)
+        self.text_tok = self.policy.model.vlm_with_expert.processor.tokenizer
+        self.text_tokenizer = self.text_tok
 
     def prepare_compile_inputs(
         self,
@@ -74,66 +90,3 @@ class SmolVLAProfile(VLAProfile):
             args.model_id,
             fill_missing=self.fill_missing_cameras,
         )
-
-    def make_export_hooks(self, *, tokenizer: Any, args: argparse.Namespace) -> SmolVLAExportHooks:
-        del args
-        return SmolVLAExportHooks(
-            io=self.io,
-            tokenizer=tokenizer,
-            vision_trt_settings=self.vision_trt_settings,
-            action_trt_settings=self.action_trt_settings,
-            max_generate_length=0,
-        )
-
-    def run_inference_eager(
-        self,
-        model: nn.Module,
-        policy: Any,
-        compile_inputs: dict[str, Any],
-        *,
-        seed: int,
-        device: torch.device,
-        vision_module=None,
-    ) -> tuple[torch.Tensor, dict, float]:
-        del vision_module
-        return run_inference_pytorch_smolvla(
-            model,
-            policy,
-            compile_inputs,
-            seed=seed,
-            device=device,
-            io=self.io,
-        )
-
-    def run_inference_trt(
-        self,
-        model: nn.Module,
-        policy: Any,
-        compile_inputs: dict[str, Any],
-        *,
-        handles: InMemoryHandles | SerializedHandles,
-        seed: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, dict, float]:
-        if handles.vision is None:
-            raise RuntimeError("SmolVLA serialized inference requires loaded vision handles")
-        return run_inference_smolvla_engines(
-            model,
-            policy,
-            compile_inputs,
-            vision_runner=handles.vision,
-            language_runner=handles.language,
-            diffusion_runner=handles.action,
-            seed=seed,
-            device=device,
-            io=self.io,
-        )
-
-    def compute_action_metrics(
-        self,
-        pred_actions: torch.Tensor,
-        target_actions: torch.Tensor,
-        policy: Any,
-    ) -> dict[str, float]:
-        del policy
-        return compute_action_parity_metrics(pred_actions, target_actions)
