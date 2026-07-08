@@ -334,6 +334,47 @@ class PI05PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
         return (), expert_kwargs, (), {}
 
 
+class AlpamayoPrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
+    """Alpamayo suffix embed + prefix KV, consumed by the Qwen3-VL expert."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.action_in_proj = model.action_in_proj
+        self.action_space_dims = tuple(int(x) for x in model.action_space.get_action_space_dims())
+        self.n_diffusion_tokens = int(self.action_space_dims[0])
+
+    def forward(
+        self,
+        x_t,
+        timestep,
+        prefix_k,
+        prefix_v,
+        position_ids,
+        attention_mask,
+    ):
+        batch_size = x_t.shape[0]
+        if timestep.ndim == 1:
+            t = timestep.view(batch_size, 1, 1).to(dtype=x_t.dtype, device=x_t.device)
+        else:
+            t = timestep.to(dtype=x_t.dtype, device=x_t.device)
+
+        suffix_embs = self.action_in_proj(x_t, t)
+        if suffix_embs.dim() == 2:
+            suffix_embs = suffix_embs.view(batch_size, self.n_diffusion_tokens, -1)
+
+        expert_kwargs = {
+            "inputs_embeds": suffix_embs,
+            "position_ids": position_ids,
+            "past_key_values": PrefixKVCache(prefix_k, prefix_v),
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        return (), expert_kwargs, (), {}
+
+    def process_velocity(self, velocity):
+        return velocity.view(-1, *self.action_space_dims)
+
+
 class SmolVLAPrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
     """SmolVLA suffix embed + prefix KV, consumed by ``vlm_with_expert`` expert path."""
 
@@ -418,30 +459,19 @@ def apply_action_expert_rope_export(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """TRT-friendly RoPE for ActionExpert self-attention.
-
-    ``q`` and ``k`` are ``[B, H, S, D]`` (same layout as eager ``ActionExpertSelfAttention``).
-    ``cos`` / ``sin`` are ``[1, 1, S, D//2]`` from ``ActionExpertRotaryEmbedding.build_cache``.
-    Uses ``split`` + explicit ``expand`` instead of dynamic slices to keep Myelin happy.
-    """
+    """Apply RoPE when ``cos`` / ``sin`` are already ``[B, H, S, D//2]``."""
     half = int(cos.shape[-1])
-    cos_e = cos.reshape(1, 1, cos.shape[2], half).expand(
-        q.shape[0], q.shape[1], q.shape[2], half
-    )
-    sin_e = sin.reshape(1, 1, sin.shape[2], half).expand(
-        q.shape[0], q.shape[1], q.shape[2], half
-    )
     q1, q2 = torch.split(q, half, dim=-1)
     k1, k2 = torch.split(k, half, dim=-1)
-    q = torch.cat([q1 * cos_e - q2 * sin_e, q1 * sin_e + q2 * cos_e], dim=-1)
-    k = torch.cat([k1 * cos_e - k2 * sin_e, k1 * sin_e + k2 * cos_e], dim=-1)
+    q = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+    k = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
     return q, k
 
 
 class ActionExpertSelfAttentionExportModule(nn.Module):
     """Export wrapper for Molmo ActionExpert self-attention (qkv + RoPE + SDPA)."""
 
-    def __init__(self, self_attn: nn.Module):
+    def __init__(self, self_attn: nn.Module, *, is_causal: bool = False):
         super().__init__()
         self.qkv = self_attn.qkv
         self.q_norm = self_attn.q_norm
@@ -450,7 +480,7 @@ class ActionExpertSelfAttentionExportModule(nn.Module):
         self.num_heads = int(self_attn.num_heads)
         self.head_dim = int(self_attn.head_dim)
         self.hidden_size = int(self_attn.hidden_size)
-        self.use_rope = self_attn.rope is not None
+        self.is_causal = bool(is_causal)
 
     def forward(
         self,
@@ -458,7 +488,6 @@ class ActionExpertSelfAttentionExportModule(nn.Module):
         attn_mask: torch.Tensor | None,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
-        is_causal: bool,
     ) -> torch.Tensor:
         bsz, seq_len, _ = x.shape
         qkv = self.qkv(x).view(bsz, seq_len, 3, self.num_heads, self.head_dim)
@@ -470,7 +499,7 @@ class ActionExpertSelfAttentionExportModule(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        if self.use_rope and rope_cos.numel() > 0:
+        if rope_cos.numel() > 0:
             q, k = apply_action_expert_rope_export(q, k, rope_cos, rope_sin)
 
         q = q.transpose(1, 2)
@@ -483,7 +512,7 @@ class ActionExpertSelfAttentionExportModule(nn.Module):
             v.transpose(1, 2),
             attn_mask=mask,
             dropout_p=0.0,
-            is_causal=is_causal,
+            is_causal=self.is_causal,
         )
         out = out.transpose(1, 2).reshape(bsz, seq_len, self.hidden_size)
         return self.out_proj(out)
@@ -492,12 +521,15 @@ class ActionExpertSelfAttentionExportModule(nn.Module):
 class ActionExpertBlockExportModule(nn.Module):
     """One ActionExpert block with TRT-friendly self-attention."""
 
-    def __init__(self, block: nn.Module):
+    def __init__(self, block: nn.Module, *, is_causal: bool = False):
         super().__init__()
         self.self_norm = block.self_norm
         self.cross_norm = block.cross_norm
         self.ff_norm = block.ff_norm
-        self.self_attn = ActionExpertSelfAttentionExportModule(block.self_attn)
+        self.self_attn = ActionExpertSelfAttentionExportModule(
+            block.self_attn,
+            is_causal=is_causal,
+        )
         self.cross_attn = block.cross_attn
         self.mlp = block.mlp
 
@@ -508,7 +540,6 @@ class ActionExpertBlockExportModule(nn.Module):
         cross_kv: tuple[torch.Tensor, torch.Tensor],
         self_attn_mask: torch.Tensor | None,
         cross_attn_mask: torch.Tensor | None,
-        is_causal: bool,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
     ) -> torch.Tensor:
@@ -526,16 +557,15 @@ class ActionExpertBlockExportModule(nn.Module):
 
         x = x + gate_msa.unsqueeze(1) * self.self_attn(
             _molmo_modulate(self.self_norm(x), shift_msa, scale_msa),
-            self_attn_mask,
+            self_attn_mask if self_attn_mask is not None and self_attn_mask.numel() > 0 else None,
             rope_cos,
             rope_sin,
-            is_causal,
         )
         x = x + gate_mca.unsqueeze(1) * self.cross_attn(
             _molmo_modulate(self.cross_norm(x), shift_mca, scale_mca),
             kv_k=cross_kv[0],
             kv_v=cross_kv[1],
-            attn_mask=cross_attn_mask,
+            attn_mask=cross_attn_mask if cross_attn_mask is not None and cross_attn_mask.numel() > 0 else None,
         )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
             _molmo_modulate(self.ff_norm(x), shift_mlp, scale_mlp)
@@ -616,7 +646,19 @@ def build_molmo_action_context(
         rope_cos = torch.empty(0, device=device, dtype=dtype)
         rope_sin = torch.empty(0, device=device, dtype=dtype)
     else:
-        rope_cos, rope_sin = rope_cache
+        cos, sin = rope_cache
+        half = int(cos.shape[-1])
+        num_heads = int(action_expert.blocks[0].self_attn.num_heads)
+        rope_cos = (
+            cos.reshape(1, 1, int(action_horizon), half)
+            .expand(batch_size, num_heads, int(action_horizon), half)
+            .contiguous()
+        )
+        rope_sin = (
+            sin.reshape(1, 1, int(action_horizon), half)
+            .expand(batch_size, num_heads, int(action_horizon), half)
+            .contiguous()
+        )
 
     if cross_mask is None:
         cross_mask = torch.empty(0, device=device, dtype=dtype)
@@ -633,9 +675,9 @@ class MolmoAct2ActionFlowStepExportModule(nn.Module):
         super().__init__()
         self.action_expert = action_expert
         self.block_exports = nn.ModuleList(
-            ActionExpertBlockExportModule(block) for block in action_expert.blocks
+            ActionExpertBlockExportModule(block, is_causal=bool(action_expert.config.causal_attn))
+            for block in action_expert.blocks
         )
-        self.causal_attn = bool(action_expert.config.causal_attn)
 
     def forward(
         self,
@@ -673,7 +715,6 @@ class MolmoAct2ActionFlowStepExportModule(nn.Module):
                 cross_kv=(context_k[idx], context_v[idx]),
                 self_attn_mask=self_attn_mask,
                 cross_attn_mask=cross_attn_mask,
-                is_causal=self.causal_attn,
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
             )

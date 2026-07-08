@@ -73,6 +73,10 @@ class BenchmarkResult:
     stage_tensors_by_mode: dict[str, dict[str, dict[str, dict[str, torch.Tensor]]]] = field(
         default_factory=dict
     )
+    # backend -> stage_name -> execute times in seconds
+    stage_execute_times: dict[str, dict[str, list[float]]] = field(default_factory=dict)
+    # backend -> end-to-end pipeline times in seconds
+    e2e_times: dict[str, list[float]] = field(default_factory=dict)
 
     def record(self, backend: str, seconds: float) -> None:
         self.timings.setdefault(backend, []).append(seconds)
@@ -103,6 +107,12 @@ class BenchmarkResult:
         # Keep legacy flat store in sync for e2e runs.
         if parity_mode == ParityMode.E2E.value:
             self.record_stage(backend, stage_name, detached)
+
+    def record_stage_execute(self, backend: str, stage_name: str, seconds: float) -> None:
+        self.stage_execute_times.setdefault(backend, {}).setdefault(stage_name, []).append(seconds)
+
+    def record_e2e(self, backend: str, seconds: float) -> None:
+        self.e2e_times.setdefault(backend, []).append(seconds)
 
 
 @dataclass
@@ -151,3 +161,5 @@ class EdgeContext:
     parity_mode: ParityMode = ParityMode.BOTH
     parity_active: str | None = None
     parity_reference: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
+    stage_execute_cache: dict[str, dict] = field(default_factory=dict)
+    benchmark_timing: bool = False

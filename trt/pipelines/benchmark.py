@@ -82,6 +82,145 @@ def _run_inference(ctx: EdgeContext, mode: ExecutionMode, *, parity_active: str)
     ctx.parity_active = None
 
 
+def _run_timing(ctx: EdgeContext, mode: ExecutionMode, pipeline_cfg) -> None:
+    ctx.execution_mode = mode
+    ctx.inference.seed = SEED
+    ctx.stage_execute_cache.clear()
+    pipeline = InferencePipeline(pipeline_cfg)
+
+    ctx.benchmark_timing = False
+    for _ in range(int(ctx.args.warmup)):
+        ctx.stage_results.clear()
+        pipeline.run(ctx)
+
+    ctx.benchmark_timing = True
+    for _ in range(int(ctx.args.num_iterations)):
+        ctx.stage_results.clear()
+        pipeline.run(ctx)
+
+
+def _mean_seconds(samples: list[float]) -> float | None:
+    if not samples:
+        return None
+    return sum(samples) / len(samples)
+
+
+def _print_timing_report(ctx: EdgeContext, stage_names: tuple[str, ...]) -> None:
+    benchmark = ctx.benchmark
+    if benchmark is None:
+        return
+
+    header = f"{'Backend':<14} {'Stage':<16} {'Mean (ms)':>12} {'Iters':>6}"
+    rule = "-" * len(header)
+
+    print()
+    print("Timing (execute-only per engine; e2e includes pipeline overhead)")
+    print(rule)
+    print(header)
+    print(rule)
+
+    eager_model_ms: float | None = None
+    eager_e2e_ms: float | None = None
+    backend_model_ms: dict[str, float] = {}
+    backend_e2e_ms: dict[str, float] = {}
+
+    for backend in (ExecutionMode.EAGER.value, ExecutionMode.IN_MEMORY.value, ExecutionMode.SERIALIZED.value):
+        stage_map = benchmark.stage_execute_times.get(backend, {})
+        e2e_samples = benchmark.e2e_times.get(backend, [])
+        if not stage_map and not e2e_samples:
+            continue
+
+        model_ms = 0.0
+        has_all_stage_times = True
+        for stage_name in stage_names:
+            mean_s = _mean_seconds(stage_map.get(stage_name, []))
+            if mean_s is None:
+                has_all_stage_times = False
+                continue
+            count = len(stage_map.get(stage_name, []))
+            mean_ms = mean_s * 1000.0
+            model_ms += mean_ms
+            print(f"{backend:<14} {stage_name:<16} {mean_ms:>12.3f} {count:>6d}")
+
+        if has_all_stage_times and stage_names:
+            backend_model_ms[backend] = model_ms
+            if backend == ExecutionMode.EAGER.value:
+                eager_model_ms = model_ms
+
+        e2e_mean_s = _mean_seconds(e2e_samples)
+        if e2e_mean_s is not None:
+            count = len(e2e_samples)
+            print(f"{backend:<14} {'e2e':<16} {e2e_mean_s * 1000.0:>12.3f} {count:>6d}")
+            backend_e2e_ms[backend] = e2e_mean_s * 1000.0
+            if backend == ExecutionMode.EAGER.value:
+                eager_e2e_ms = e2e_mean_s * 1000.0
+
+    print(rule)
+
+    if (eager_model_ms is None or eager_model_ms <= 0) and (
+        eager_e2e_ms is None or eager_e2e_ms <= 0
+    ):
+        return
+
+    speedup_header = (
+        f"{'Backend':<14} {'Model (ms)':>12} {'Model Speed':>12} "
+        f"{'E2E (ms)':>12} {'E2E Speed':>11}"
+    )
+    speedup_rule = "-" * len(speedup_header)
+    print()
+    print("Speedup vs eager")
+    print(speedup_rule)
+    print(speedup_header)
+    print(speedup_rule)
+
+    eager_model_text = f"{eager_model_ms:.3f}" if eager_model_ms is not None else "-"
+    eager_e2e_text = f"{eager_e2e_ms:.3f}" if eager_e2e_ms is not None else "-"
+    print(
+        f"{ExecutionMode.EAGER.value:<14} {eager_model_text:>12} {'1.00x':>12} "
+        f"{eager_e2e_text:>12} {'1.00x':>11}"
+    )
+
+    for backend in (ExecutionMode.IN_MEMORY.value, ExecutionMode.SERIALIZED.value):
+        model_ms = backend_model_ms.get(backend)
+        e2e_ms = backend_e2e_ms.get(backend)
+        if model_ms is None and e2e_ms is None:
+            continue
+        if model_ms is not None and eager_model_ms is not None:
+            model_speed = eager_model_ms / model_ms if model_ms > 0 else float("inf")
+            model_ms_text = f"{model_ms:.3f}"
+            model_speed_text = f"{model_speed:.2f}x"
+        else:
+            model_ms_text = "-"
+            model_speed_text = "-"
+        if e2e_ms is not None and eager_e2e_ms is not None:
+            e2e_speed = eager_e2e_ms / e2e_ms if e2e_ms > 0 else float("inf")
+            e2e_ms_text = f"{e2e_ms:.3f}"
+            e2e_speed_text = f"{e2e_speed:.2f}x"
+        else:
+            e2e_ms_text = "-"
+            e2e_speed_text = "-"
+        print(
+            f"{backend:<14} {model_ms_text:>12} {model_speed_text:>12} "
+            f"{e2e_ms_text:>12} {e2e_speed_text:>11}"
+        )
+
+    print(speedup_rule)
+
+
+def _run_timing_benchmark(ctx: EdgeContext, pipeline_cfg) -> None:
+    stage_names = tuple(stage.stage_name for stage in pipeline_cfg.stages)
+    ctx.benchmark.stage_execute_times.clear()
+    ctx.benchmark.e2e_times.clear()
+
+    for mode in (ExecutionMode.EAGER, ExecutionMode.IN_MEMORY, ExecutionMode.SERIALIZED):
+        if mode is ExecutionMode.SERIALIZED and not _has_serialized(ctx):
+            continue
+        _run_timing(ctx, mode, pipeline_cfg)
+
+    ctx.benchmark_timing = False
+    _print_timing_report(ctx, stage_names)
+
+
 def _collect_stage_tensors(
     ctx: EdgeContext,
     pipeline_cfg,
@@ -201,4 +340,5 @@ class BenchmarkPipeline:
                 _collect_stage_tensors(ctx, pipeline_cfg, backend, ParityMode.ISOLATED.value)
 
         report_stage_parity(ctx)
+        _run_timing_benchmark(ctx, pipeline_cfg)
         return ctx.benchmark
