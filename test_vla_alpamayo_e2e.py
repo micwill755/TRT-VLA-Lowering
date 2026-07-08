@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 
 import torch
 import torch_tensorrt
@@ -147,6 +148,20 @@ def main():
     with torch.no_grad():
         embs_eager, _deepstack_eager = visual(pixel_values, None)
 
+    for _ in range(5):
+        visual(pixel_values, None)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        visual(pixel_values, None)
+    end.record()
+    torch.cuda.synchronize()
+    vision_eager_elapsed_ms = start.elapsed_time(end) / 100
+
     if not patch_qwen3vl_vision_attention():
         raise RuntimeError("Failed to patch Qwen3-VL vision attention for TRT export")
 
@@ -160,6 +175,20 @@ def main():
             **{**VISION_TRT_SETTINGS, "use_python_runtime": True},
         )
         embs_trt, _ = trt_engine(*vision_inputs)
+
+    for _ in range(5):
+        trt_engine(*vision_inputs)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        trt_engine(*vision_inputs)
+    end.record()
+    torch.cuda.synchronize()
+    vision_trt_elapsed_ms = start.elapsed_time(end) / 100
 
     parity("vision A vs C (TRT)", embs_eager, embs_trt)
 
@@ -213,6 +242,20 @@ def main():
     with torch.no_grad():
         lm_hidden_eager, prefix_k, prefix_v = prefill(*prefill_inputs)
 
+    for _ in range(5):
+        prefill(*prefill_inputs)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        lm_hidden_eager, prefix_k, prefix_v = prefill(*prefill_inputs)
+    end.record()
+    torch.cuda.synchronize()
+    eager_elapsed_ms = start.elapsed_time(end) / 100
+
     prefill_exported = torch.export.export(prefill, args=prefill_inputs, strict=False)
     prefill_input_specs = make_input_spec(prefill_inputs)
     prefill_trt_engine = torch_tensorrt.dynamo.compile(
@@ -223,6 +266,24 @@ def main():
 
     with torch.no_grad():
         lm_hidden_trt, _prefix_k_trt, _prefix_v_trt = prefill_trt_engine(*prefill_inputs)
+
+    for _ in range(5):
+        prefill_trt_engine(*prefill_inputs)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        lm_hidden_trt, _prefix_k_trt, _prefix_v_trt = prefill_trt_engine(*prefill_inputs)
+    end.record()
+    torch.cuda.synchronize()
+    trt_elapsed_ms = start.elapsed_time(end) / 100
+
+    print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
+    print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
+    print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
 
     parity("language A vs C (TRT)", lm_hidden_eager, lm_hidden_trt)
 
@@ -281,6 +342,20 @@ def main():
     with torch.no_grad():
         eager_velocity = diffusion_model(*diffusion_input)
 
+    for _ in range(5):
+        diffusion_model(*diffusion_input)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        diffusion_model(*diffusion_input)
+    end.record()
+    torch.cuda.synchronize()
+    diffusion_eager_elapsed_ms = start.elapsed_time(end) / 100
+
     diffusion_exported = torch.export.export(diffusion_model, args=diffusion_input, strict=False)
     diffusion_input_specs = make_input_spec(diffusion_input)
     diffusion_trt_engine = torch_tensorrt.dynamo.compile(
@@ -292,7 +367,34 @@ def main():
     with torch.no_grad():
         trt_velocity = diffusion_trt_engine(*diffusion_input)
 
+    for _ in range(5):
+        diffusion_trt_engine(*diffusion_input)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        diffusion_trt_engine(*diffusion_input)
+    end.record()
+    torch.cuda.synchronize()
+    diffusion_trt_elapsed_ms = start.elapsed_time(end) / 100
+
     parity("diffusion step A vs C (TRT)", eager_velocity, trt_velocity)
+
+    eager_total_ms = vision_eager_elapsed_ms + eager_elapsed_ms + diffusion_eager_elapsed_ms
+    trt_total_ms = vision_trt_elapsed_ms + trt_elapsed_ms + diffusion_trt_elapsed_ms
+
+    print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
+    print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
+    print(f"vision speedup: {(vision_eager_elapsed_ms / vision_trt_elapsed_ms):.3f}x")
+    print(f"diffusion eager execute: {diffusion_eager_elapsed_ms:.3f} ms")
+    print(f"diffusion trt execute: {diffusion_trt_elapsed_ms:.3f} ms")
+    print(f"diffusion speedup: {(diffusion_eager_elapsed_ms / diffusion_trt_elapsed_ms):.3f}x")
+    print(f"total eager execute: {eager_total_ms:.3f} ms")
+    print(f"total trt execute: {trt_total_ms:.3f} ms")
+    print(f"total speedup: {(eager_total_ms / trt_total_ms):.3f}x")
     return 0
 
 
