@@ -286,7 +286,7 @@ def main():
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=1,   # Molmo prefill is bidirectional over prompt
+        enable_bidirectional_prefill=0,
     )
     try:
         with torch.no_grad():
