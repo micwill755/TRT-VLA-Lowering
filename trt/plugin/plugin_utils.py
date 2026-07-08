@@ -4,9 +4,16 @@ import ctypes
 from typing import Any, Optional, Sequence, Tuple
 
 import tensorrt as trt
-import torch
 
-from trt.plugin.attention import PluginAttention, ViTPluginAttention, SiglipReferenceAttention
+import torch
+import torch.nn as nn
+
+from trt.plugin.attention import (
+    PluginAttention, 
+    ViTPluginAttention, 
+    SiglipReferenceAttention,
+    MolmoPluginAttention
+)
 
 _PLUGIN_CONFIG: dict[str, Any] = {}
 
@@ -88,7 +95,6 @@ def _register_attention_plugin_op() -> None:
             device=q.device,
         )
         return attn_output, torch.empty_like(past_key_value)
-
 
 def _register_vit_attention_plugin_op() -> None:
     if _has_torch_op("trt", "vit_attention_plugin"):
@@ -179,6 +185,31 @@ def patch_vision_attention(
             allow_attention_mask=allow_attention_mask,
         ).eval()
 
+    print(f"patched {name} attention modules: {len(patched)}")
+    return patched
+
+def patch_molmo_language_attention(
+    transformer: nn.Module,
+    *,
+    hidden_size: int,
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    enable_bidirectional_prefill: int = 1,
+    name: str = "molmo-language",
+):
+    patched = []
+    for i, block in enumerate(transformer.blocks):
+        patched.append((block, block.self_attn))
+        block.self_attn = MolmoPluginAttention(
+            block.self_attn,
+            num_attention_heads=int(num_attention_heads),
+            num_key_value_heads=int(num_key_value_heads),
+            head_dim=int(head_dim),
+            hidden_size=int(hidden_size),
+            layer_idx=i,
+            enable_bidirectional_prefill=enable_bidirectional_prefill,
+        ).eval()
     print(f"patched {name} attention modules: {len(patched)}")
     return patched
 

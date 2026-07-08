@@ -208,6 +208,112 @@ class ViTPluginAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
         return attn_output, None
 
+class MolmoPluginAttention(nn.Module):
+    """Plugin wrapper for MolmoAct2 fused attention (att_proj + attn_out).
+
+    Exposes the same runtime ABI as PluginAttention:
+      (hidden_states, rope_rotary_cos_sin, past_key_value, ctx_len, kvcache_start_index)
+      -> (attn_output, updated_kv)
+    """
+
+    def __init__(
+        self,
+        original_attn: nn.Module,
+        *,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        hidden_size: int,
+        layer_idx: int,
+        enable_bidirectional_prefill: int = 1,
+    ):
+        super().__init__()
+        self.att_proj = original_attn.att_proj
+        self.attn_out = original_attn.attn_out
+        self.q_norm = getattr(original_attn, "q_norm", None)
+        self.k_norm = getattr(original_attn, "k_norm", None)
+        self.qk_norm_type = getattr(original_attn, "qk_norm_type", None)
+
+        self.num_heads = int(num_attention_heads)
+        self.num_kv_heads = int(num_key_value_heads)
+        self.head_dim = int(head_dim)
+        self.attn_hidden_size = self.num_heads * self.head_dim
+        self.hidden_size = int(hidden_size)
+        self.layer_idx = int(layer_idx)
+        self.enable_bidirectional_prefill = int(enable_bidirectional_prefill)
+
+        self.q_dim = self.num_heads * self.head_dim
+        self.k_dim = self.num_kv_heads * self.head_dim
+        self.v_dim = self.num_kv_heads * self.head_dim
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rope_rotary_cos_sin: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        past_key_value: torch.Tensor | None = None,
+        ctx_len: torch.Tensor | None = None,
+        kvcache_start_index: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_len, _ = hidden_states.shape
+        del attention_mask, position_ids, kwargs
+        assert rope_rotary_cos_sin.dtype == torch.float32
+
+        qkv = self.att_proj(hidden_states)
+        q, k, v = qkv.split([self.q_dim, self.k_dim, self.v_dim], dim=-1)
+
+        # Match MolmoAct2Attention norm ordering.
+        if self.q_norm is not None and self.k_norm is not None and self.qk_norm_type != "qwen3":
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+            k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        else:
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+            k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+
+        if self.q_norm is not None and self.k_norm is not None and self.qk_norm_type == "qwen3":
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        q = q.reshape(batch_size, seq_len, -1)
+        k = k.reshape(batch_size, seq_len, -1)
+        v = v.reshape(batch_size, seq_len, -1)
+
+        if ctx_len is None:
+            ctx_len = torch.full((batch_size,), seq_len, device=hidden_states.device, dtype=torch.int32)
+        if past_key_value is None:
+            raise ValueError("past_key_value must be provided")
+        if kvcache_start_index is None:
+            raise ValueError("kvcache_start_index must be provided")
+
+        dtype = q.dtype
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
+
+        attn_out, updated_kv = torch.ops.trt.attention_plugin.default(
+            q,
+            k,
+            v,
+            past_key_value,
+            ctx_len,
+            rope_rotary_cos_sin,
+            kvcache_start_index,
+            self.num_heads,
+            self.num_kv_heads,
+            False,                  # is_cross_attention
+            self.head_dim,
+            False,                  # do_rotary_embedding (RoPE supplied externally)
+            -1,
+            bool(self.enable_bidirectional_prefill),
+        )
+
+        attn_out = attn_out.reshape(batch_size, seq_len, self.attn_hidden_size).to(dtype)
+        return self.attn_out(attn_out), updated_kv
+        
 '''
 Below are reference attention implementations to compare math
 with plugin stack and kernel implementations
