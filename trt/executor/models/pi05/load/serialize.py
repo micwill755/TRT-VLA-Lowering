@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from trt.serialize import SerializedPositionalEngine
 
-
 class SerializedPi05Vision:
     def __init__(self, engine):
         self.engine = engine
@@ -15,7 +14,6 @@ class SerializedPi05Vision:
         if input_name not in self.engine.config_input_names:
             input_name = self.engine.config_input_names[0]
         return self.engine({input_name: images})[0]
-
 
 class SerializedPi05Language:
     bundles_kv_caches = True
@@ -54,7 +52,6 @@ class SerializedPi05Language:
                 f"SerializedPi05Language expected 4 outputs, got {len(outputs)}"
             )
         return outputs[0], outputs[1], outputs[2], outputs[3]
-
 
 class SerializedPi05Action(SerializedPositionalEngine):
     def __call__(
