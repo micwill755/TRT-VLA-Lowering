@@ -468,8 +468,48 @@ def apply_action_expert_rope_export(
     return q, k
 
 
+def _action_expert_rms_norm_export(x: torch.Tensor, norm: nn.Module | None) -> torch.Tensor:
+    if norm is None:
+        return x
+    variance = x.pow(2).mean(dim=-1, keepdim=True)
+    out = x * torch.rsqrt(variance + float(norm.eps))
+    weight = getattr(norm, "weight", None)
+    if weight is not None:
+        out = out * weight
+    return out
+
+
+def _action_expert_self_attention_export(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    attn_mask: torch.Tensor | None,
+    head_dim: int,
+    is_causal: bool,
+) -> torch.Tensor:
+    """Explicit attention matmul (avoids SDPA decomposition Myelin bugs)."""
+    # q, k, v: [B, S, H, D]
+    q_h = q.transpose(1, 2)
+    k_h = k.transpose(1, 2)
+    v_h = v.transpose(1, 2)
+    scale = 1.0 / (float(head_dim) ** 0.5)
+    scores = torch.matmul(q_h, k_h.transpose(-2, -1)) * scale
+    if attn_mask is not None:
+        scores = scores + attn_mask
+    elif is_causal:
+        seq_len = int(q.shape[1])
+        causal = torch.triu(
+            torch.full((seq_len, seq_len), float("-inf"), device=q.device, dtype=scores.dtype),
+            diagonal=1,
+        )
+        scores = scores + causal.unsqueeze(0).unsqueeze(0)
+    attn = torch.softmax(scores, dim=-1)
+    return torch.matmul(attn, v_h).transpose(1, 2)
+
+
 class ActionExpertSelfAttentionExportModule(nn.Module):
-    """Export wrapper for Molmo ActionExpert self-attention (qkv + RoPE + SDPA)."""
+    """Export wrapper for Molmo ActionExpert self-attention (qkv + RoPE + matmul)."""
 
     def __init__(self, self_attn: nn.Module, *, is_causal: bool = False):
         super().__init__()
@@ -495,9 +535,8 @@ class ActionExpertSelfAttentionExportModule(nn.Module):
         k = qkv[:, :, 1].transpose(1, 2).contiguous()
         v = qkv[:, :, 2].contiguous()
 
-        if self.q_norm is not None and self.k_norm is not None:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
+        q = _action_expert_rms_norm_export(q, self.q_norm)
+        k = _action_expert_rms_norm_export(k, self.k_norm)
 
         if rope_cos.numel() > 0:
             q, k = apply_action_expert_rope_export(q, k, rope_cos, rope_sin)
@@ -506,16 +545,15 @@ class ActionExpertSelfAttentionExportModule(nn.Module):
         k = k.transpose(1, 2)
 
         mask = attn_mask if attn_mask is not None and attn_mask.numel() > 0 else None
-        out = F.scaled_dot_product_attention(
-            q.transpose(1, 2),
-            k.transpose(1, 2),
-            v.transpose(1, 2),
+        out = _action_expert_self_attention_export(
+            q,
+            k,
+            v,
             attn_mask=mask,
-            dropout_p=0.0,
+            head_dim=self.head_dim,
             is_causal=self.is_causal,
         )
-        out = out.transpose(1, 2).reshape(bsz, seq_len, self.hidden_size)
-        return self.out_proj(out)
+        return self.out_proj(out.reshape(bsz, seq_len, self.hidden_size))
 
 
 class ActionExpertBlockExportModule(nn.Module):

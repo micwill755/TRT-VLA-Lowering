@@ -8,6 +8,7 @@ import torch
 import argparse
 import logging
 import copy
+import time
 
 from pathlib import Path
 
@@ -58,7 +59,6 @@ TRT_SETTINGS = {
     "use_fp32_acc": True,
     "truncate_double": True,
     "immutable_weights": True,
-    "decompose_attention": True,
     "require_full_compilation": True,
 }
 
@@ -255,6 +255,20 @@ def main():
     with torch.no_grad():
         embs_eager = visual(pixel_values)
 
+    for _ in range(5):
+        visual(pixel_values)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        visual(pixel_values)
+    end.record()
+    torch.cuda.synchronize()
+    vision_eager_elapsed_ms = start.elapsed_time(end) / 100
+
     # --- Patch SigLIP attention -> ViTPluginAttention ---
     # SmolVLM vision transformer exposes .embeddings/.encoder directly (no nested
     # .vision_model like Eagle); embeddings needs a patch_attention_mask.
@@ -283,10 +297,24 @@ def main():
         trt_engine = torch_tensorrt.dynamo.compile(
             exported,
             inputs=input_specs,
-            **{**VISION_TRT_SETTINGS, "use_python_runtime": True},
+            **VISION_TRT_SETTINGS,
         )
         with torch.no_grad():
             embs_trt = trt_engine(pixel_values)
+
+        for _ in range(5):
+            trt_engine(pixel_values)
+
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(100):
+            trt_engine(pixel_values)
+        end.record()
+        torch.cuda.synchronize()
+        vision_trt_elapsed_ms = start.elapsed_time(end) / 100
     finally:
         restore_attention(patched)
 
@@ -320,7 +348,22 @@ def main():
     # ---------------------------------------------------------------------------
     # RUNG A: eager language — HF text_model on compact prefix embeddings
     # ---------------------------------------------------------------------------
-    with torch.no_grad():
+    # warmup (compile/caches/autotune settle) — do a few before timing
+    for _ in range(5):
+        language(
+            inputs_embeds=inputs_embeds.to(dtype=lm_dtype),
+            attention_mask=prefix_attention_mask,
+            position_ids=prefix_position_ids,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
         eager_out = language(
             inputs_embeds=inputs_embeds.to(dtype=lm_dtype),
             attention_mask=prefix_attention_mask,
@@ -328,6 +371,9 @@ def main():
             output_hidden_states=True,
             return_dict=True,
         )
+    end.record()
+    torch.cuda.synchronize()
+    eager_elapsed_ms = start.elapsed_time(end) / 100
 
     lm_hidden_eager = eager_out.last_hidden_state
 
@@ -400,11 +446,28 @@ def main():
         lm_trt_engine = torch_tensorrt.dynamo.compile(
             lm_exported,
             inputs=lm_input_specs,
-            **{**LANGUAGE_TRT_SETTINGS, "use_python_runtime": True},
+            **LANGUAGE_TRT_SETTINGS,
         )
 
-        with torch.no_grad():
+        for _ in range(5):
+            with torch.no_grad():
+                lm_trt_engine(*flat_tensors)
+
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(100):
             trt_out = lm_trt_engine(*flat_tensors)
+        end.record()
+        torch.cuda.synchronize()
+        #print(f"Avg latency: {start.elapsed_time(end) / 100:.3f} ms")
+        trt_elapsed_ms = start.elapsed_time(end) / 100
+
+        print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
+        print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
+        print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
 
     finally:
         restore_attention(patched)
@@ -456,17 +519,58 @@ def main():
     with torch.no_grad():
         eager_velocity = diffusion_model(*diffusion_input)
 
+    for _ in range(5):
+        diffusion_model(*diffusion_input)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        diffusion_model(*diffusion_input)
+    end.record()
+    torch.cuda.synchronize()
+    diffusion_eager_elapsed_ms = start.elapsed_time(end) / 100
+
     diffusion_exported = torch.export.export(diffusion_model, args=diffusion_input, strict=False)
     diffusion_input_specs = make_input_spec(diffusion_input)
     diffusion_trt_engine = torch_tensorrt.dynamo.compile(
         diffusion_exported,
         inputs=diffusion_input_specs,
-        **{**ACTION_TRT_SETTINGS, "use_python_runtime": True},
+        **ACTION_TRT_SETTINGS,
     )
     with torch.no_grad():
         trt_velocity = diffusion_trt_engine(*diffusion_input)
 
+    for _ in range(5):
+        diffusion_trt_engine(*diffusion_input)
+
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(100):
+        diffusion_trt_engine(*diffusion_input)
+    end.record()
+    torch.cuda.synchronize()
+    diffusion_trt_elapsed_ms = start.elapsed_time(end) / 100
+
     parity("diffusion step A vs C", eager_velocity, trt_velocity)
+
+    eager_total_ms = vision_eager_elapsed_ms + eager_elapsed_ms + diffusion_eager_elapsed_ms
+    trt_total_ms = vision_trt_elapsed_ms + trt_elapsed_ms + diffusion_trt_elapsed_ms
+
+    print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
+    print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
+    print(f"vision speedup: {(vision_eager_elapsed_ms / vision_trt_elapsed_ms):.3f}x")
+    print(f"diffusion eager execute: {diffusion_eager_elapsed_ms:.3f} ms")
+    print(f"diffusion trt execute: {diffusion_trt_elapsed_ms:.3f} ms")
+    print(f"diffusion speedup: {(diffusion_eager_elapsed_ms / diffusion_trt_elapsed_ms):.3f}x")
+    print(f"total eager execute: {eager_total_ms:.3f} ms")
+    print(f"total trt execute: {trt_total_ms:.3f} ms")
+    print(f"total speedup: {(eager_total_ms / trt_total_ms):.3f}x")
     return 0
 
 if __name__ == "__main__":

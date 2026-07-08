@@ -11,7 +11,7 @@ from trt.executor.models.pi05.helpers import build_pi05_prefix_embs
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
-from trt.prefix_cache import stack_prefix_kv_from_cache
+from trt.prefix_cache import PrefixKVCache
 from trt.serialize import SerializedTRTEngine
 
 
@@ -173,7 +173,31 @@ def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
             use_cache=True,
         )
         lm_hidden = out.last_hidden_state
-        prefix_k, prefix_v = stack_prefix_kv_from_cache(out.past_key_values)
+        past_key_values = out.past_key_values
+
+        # TODO: need to improve this
+        if isinstance(past_key_values, PrefixKVCache):
+            prefix_k = past_key_values.key_cache
+            prefix_v = past_key_values.value_cache
+        elif isinstance(past_key_values, tuple) and len(past_key_values) == 2:
+            if past_key_values[0] is None or past_key_values[1] is None:
+                raise ValueError("Expected concrete stacked KV tensors; got (None, None)")
+            prefix_k = past_key_values[0]
+            prefix_v = past_key_values[1]
+        elif hasattr(past_key_values, "layers"):
+            layers = list(past_key_values.layers)
+            if len(layers) == 0:
+                raise ValueError("Cache has no initialized layers")
+            k_tensors = [getattr(layer, "keys", None) for layer in layers]
+            v_tensors = [getattr(layer, "values", None) for layer in layers]
+            if any((k is None) != (v is None) for k, v in zip(k_tensors, v_tensors)):
+                raise ValueError("Inconsistent cache state: one of keys/values is None")
+            if any(k is None for k in k_tensors):
+                raise ValueError("Cache contains uninitialized layers; cannot infer stacked tensors")
+            prefix_k = torch.stack(k_tensors, dim=0)
+            prefix_v = torch.stack(v_tensors, dim=0)
+        else:
+            raise ValueError("Unsupported cache type for prefix KV extraction")
 
     return {
         "tensors": {

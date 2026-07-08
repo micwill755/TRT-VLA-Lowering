@@ -10,7 +10,7 @@ from trt.executor.models.smolvla.load.serialize import SerializedSmolVLALanguage
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
-from trt.prefix_cache import extract_stacked_kv_from_cache
+from trt.prefix_cache import PrefixKVCache
 from trt.rope import make_rope_rotary_cos_sin
 from trt.serialize import SerializedTRTEngine
 
@@ -164,10 +164,16 @@ def execute(ctx: EdgeContext, inputs: dict) -> dict:
 def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
     language = inputs["language_model"]
     eager = inputs["eager_inputs"]
+    num_layers = inputs["num_layers"]
+    num_kv_heads = inputs["num_key_value_heads"]
+    head_dim = inputs["head_dim"]
+    device = ctx.device
+    dtype = ctx.dtype
 
     with torch.no_grad():
         lm_dtype = next(language.parameters()).dtype
-        eager_embs = eager["inputs_embeds"].to(device=ctx.device, dtype=lm_dtype)
+        eager_embs = eager["inputs_embeds"].to(device=device, dtype=lm_dtype)
+        batch_size = int(eager_embs.shape[0])
         out = language(
             inputs_embeds=eager_embs,
             attention_mask=eager["attention_mask"],
@@ -176,15 +182,87 @@ def _run_eager(ctx: EdgeContext, inputs: dict) -> dict:
             use_cache=True,
         )
         lm_hidden = out.last_hidden_state
-        prefix_k, prefix_v = extract_stacked_kv_from_cache(
-            out.past_key_values,
-            num_layers=inputs["num_layers"],
-            batch_size=int(eager_embs.shape[0]),
-            num_kv_heads=inputs["num_key_value_heads"],
-            head_dim=inputs["head_dim"],
-            device=ctx.device,
-            dtype=ctx.dtype,
-        )
+        past_key_values = out.past_key_values
+
+        # TODO: need to improve this
+        if isinstance(past_key_values, PrefixKVCache):
+            prefix_k = past_key_values.key_cache.to(device=device, dtype=dtype)
+            prefix_v = past_key_values.value_cache.to(device=device, dtype=dtype)
+        elif isinstance(past_key_values, tuple) and len(past_key_values) == 2:
+            if past_key_values[0] is None or past_key_values[1] is None:
+                prefix_k = torch.zeros(
+                    num_layers, batch_size, num_kv_heads, 0, head_dim, dtype=dtype, device=device
+                )
+                prefix_v = torch.zeros_like(prefix_k)
+            else:
+                prefix_k = past_key_values[0].to(device=device, dtype=dtype)
+                prefix_v = past_key_values[1].to(device=device, dtype=dtype)
+        elif past_key_values is None or (
+            hasattr(past_key_values, "layers") and len(past_key_values.layers) == 0
+        ):
+            prefix_k = torch.zeros(
+                num_layers, batch_size, num_kv_heads, 0, head_dim, dtype=dtype, device=device
+            )
+            prefix_v = torch.zeros_like(prefix_k)
+        elif hasattr(past_key_values, "layers"):
+            layers = list(past_key_values.layers)
+            layer_k: list[torch.Tensor | None] = []
+            layer_v: list[torch.Tensor | None] = []
+            any_initialized = False
+            for idx in range(num_layers):
+                if idx >= len(layers):
+                    layer_k.append(None)
+                    layer_v.append(None)
+                    continue
+                k = getattr(layers[idx], "keys", None)
+                v = getattr(layers[idx], "values", None)
+                if (k is None) != (v is None):
+                    raise ValueError(
+                        f"Inconsistent cache state at layer {idx}: one of keys/values is None"
+                    )
+                if k is not None:
+                    any_initialized = True
+                layer_k.append(k)
+                layer_v.append(v)
+
+            if not any_initialized:
+                prefix_k = torch.zeros(
+                    num_layers, batch_size, num_kv_heads, 0, head_dim, dtype=dtype, device=device
+                )
+                prefix_v = torch.zeros_like(prefix_k)
+            else:
+                first_k = next(k for k in layer_k if k is not None)
+                prefix_len = int(first_k.shape[-2])
+                filled_k: list[torch.Tensor] = []
+                filled_v: list[torch.Tensor] = []
+                for idx, (k, v) in enumerate(zip(layer_k, layer_v)):
+                    if k is None:
+                        k = torch.zeros(
+                            batch_size,
+                            num_kv_heads,
+                            prefix_len,
+                            head_dim,
+                            dtype=dtype,
+                            device=device,
+                        )
+                        v = torch.zeros_like(k)
+                    else:
+                        if int(k.shape[-2]) != prefix_len:
+                            raise ValueError(
+                                "Cache sequence length mismatch across layers; "
+                                f"layer0={prefix_len}, layer{idx}={int(k.shape[-2])}"
+                            )
+                        k = k.to(device=device, dtype=dtype)
+                        v = v.to(device=device, dtype=dtype)
+                    filled_k.append(k)
+                    filled_v.append(v)
+                prefix_k = torch.stack(filled_k, dim=0)
+                prefix_v = torch.stack(filled_v, dim=0)
+        else:
+            raise ValueError(
+                "past_key_values must be None, (prefix_k, prefix_v), PrefixKVCache, "
+                "or an object with .layers"
+            )
 
     return {
         "tensors": {
