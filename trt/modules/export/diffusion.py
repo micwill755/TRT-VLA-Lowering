@@ -332,3 +332,139 @@ class PI05PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
             "adarms_cond": adarms_cond,
         }
         return (), expert_kwargs, (), {}
+
+
+def build_molmo_action_modulation(
+    action_expert: nn.Module,
+    timestep: torch.Tensor,
+    *,
+    dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bake per-block and final AdaLN modulation tensors for one flow step."""
+    if timestep.dim() == 0:
+        timestep = timestep.unsqueeze(0)
+    timestep = timestep.to(dtype=torch.float32)
+    conditioning = action_expert._time_conditioning(timestep)
+    if dtype is not None:
+        conditioning = conditioning.to(dtype=dtype)
+
+    block_mods: list[torch.Tensor] = []
+    for block in action_expert.blocks:
+        chunks = block.modulation(conditioning).chunk(9, dim=1)
+        block_mods.append(torch.stack(chunks, dim=0))
+    block_mod = torch.stack(block_mods, dim=0).contiguous()
+
+    final_shift, final_scale = action_expert.final_layer.modulation(conditioning).chunk(2, dim=1)
+    final_mod = torch.stack((final_shift, final_scale), dim=0).contiguous()
+    return block_mod, final_mod
+
+
+def build_molmo_action_context(
+    action_expert: nn.Module,
+    encoder_k: torch.Tensor,
+    encoder_v: torch.Tensor,
+    encoder_attention_mask: torch.Tensor | None,
+    action_horizon: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Project stacked encoder K/V into action-expert cross-attn tensors."""
+    num_layers = int(encoder_k.shape[0])
+    encoder_kv_states = [(encoder_k[i], encoder_v[i]) for i in range(num_layers)]
+    batch_size = int(encoder_k.shape[1])
+
+    kv_contexts = action_expert._prepare_kv_context(encoder_kv_states)
+    context_k = torch.stack([k for k, _ in kv_contexts], dim=0).contiguous()
+    context_v = torch.stack([v for _, v in kv_contexts], dim=0).contiguous()
+
+    cross_mask = action_expert._build_cross_attention_mask(
+        encoder_attention_mask,
+        batch_size,
+        dtype,
+    )
+    if (
+        encoder_attention_mask is not None
+        and bool(encoder_attention_mask.to(dtype=torch.bool).all().item())
+    ):
+        cross_mask = None
+
+    self_mask = action_expert._build_self_attention_mask(
+        None,
+        int(action_horizon),
+        device,
+        dtype,
+    )
+
+    rope_cache = None
+    if len(action_expert.blocks) > 0 and action_expert.blocks[0].self_attn.rope is not None:
+        rope_cache = action_expert.blocks[0].self_attn.rope.build_cache(
+            seq_len=int(action_horizon),
+            device=device,
+            dtype=dtype,
+        )
+
+    if rope_cache is None:
+        rope_cos = torch.empty(0, device=device, dtype=dtype)
+        rope_sin = torch.empty(0, device=device, dtype=dtype)
+    else:
+        rope_cos, rope_sin = rope_cache
+
+    if cross_mask is None:
+        cross_mask = torch.empty(0, device=device, dtype=dtype)
+    if self_mask is None:
+        self_mask = torch.empty(0, device=device, dtype=dtype)
+
+    return context_k, context_v, cross_mask, self_mask, rope_cos, rope_sin
+
+
+class MolmoAct2ActionFlowStepExportModule(nn.Module):
+    """One MolmoAct2 flow-matching velocity step with pre-baked context tensors."""
+
+    def __init__(self, action_expert: nn.Module):
+        super().__init__()
+        self.action_expert = action_expert
+
+    def forward(
+        self,
+        actions: torch.Tensor,
+        block_mod: torch.Tensor,
+        final_mod: torch.Tensor,
+        context_k: torch.Tensor,
+        context_v: torch.Tensor,
+        cross_mask: torch.Tensor,
+        self_mask: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+    ) -> torch.Tensor:
+        expert = self.action_expert
+        x = expert.action_embed(actions)
+
+        rope_cache = (rope_cos, rope_sin) if rope_cos.numel() > 0 else None
+        cross_attn_mask = cross_mask if cross_mask.numel() > 0 else None
+        self_attn_mask = self_mask if self_mask.numel() > 0 else None
+
+        for idx, block in enumerate(expert.blocks):
+            block_modulation = (
+                block_mod[idx, 0],
+                block_mod[idx, 1],
+                block_mod[idx, 2],
+                block_mod[idx, 3],
+                block_mod[idx, 4],
+                block_mod[idx, 5],
+                block_mod[idx, 6],
+                block_mod[idx, 7],
+                block_mod[idx, 8],
+            )
+            x = block(
+                x,
+                block_mod[idx, 0],
+                cross_kv=(context_k[idx], context_v[idx]),
+                self_attn_mask=self_attn_mask,
+                attn_mask=cross_attn_mask,
+                is_causal=expert.config.causal_attn,
+                modulation=block_modulation,
+                rope_cache=rope_cache,
+            )
+
+        final_modulation = (final_mod[0], final_mod[1])
+        return expert.final_layer(x, final_mod[0], modulation=final_modulation)

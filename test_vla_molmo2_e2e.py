@@ -31,9 +31,9 @@ from trt.modules.export.language import (
     gather_last_token_hidden,
 )
 from trt.modules.export.diffusion import (
-    GrootDiTStepEncoderExportModule,
-    StaticActionVelocityStepExportModule,
-    TRTDynamicCategorySpecificMLPExportModule,
+    MolmoAct2ActionFlowStepExportModule,
+    build_molmo_action_context,
+    build_molmo_action_modulation,
 )
 from trt.plugin.plugin_utils import (
     restore_attention,
@@ -379,7 +379,89 @@ def main():
     parity("MolmoAct2 discrete logits A vs C (TRT)", logits_eager, logits_trt)
     parity("MolmoAct2 discrete hidden A vs C (TRT)", hidden_eager, hidden_discrete_trt)
 
-    print("COmpiling diffusion")
+    print("Compiling diffusion")
+
+    if action_expert is None:
+        raise RuntimeError("MolmoAct2 continuous diffusion requires action_expert.")
+
+    action_horizon = policy._generation_action_horizon()
+    max_action_dim = int(backbone.config.max_action_dim)
+
+    # Use TRT language encoder K/V for both rungs to isolate diffusion engine parity.
+    encoder_k = encoder_k_trt.to(device=device, dtype=dtype).contiguous()
+    encoder_v = encoder_v_trt.to(device=device, dtype=dtype).contiguous()
+    encoder_attention_mask = policy._encoder_attention_mask_for_action_expert(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+    )
+    if encoder_attention_mask is None:
+        encoder_attention_mask = attention_mask.to(dtype=torch.bool)
+
+    action_module = MolmoAct2ActionFlowStepExportModule(action_expert).eval().to(
+        device=device
+    )
+
+    step_actions = torch.randn(
+        bsz,
+        action_horizon,
+        max_action_dim,
+        device=device,
+        dtype=dtype,
+    )
+    step_timestep = torch.zeros(bsz, device=device, dtype=torch.float32)
+
+    block_mod, final_mod = build_molmo_action_modulation(
+        action_expert,
+        step_timestep,
+        dtype=dtype,
+    )
+    context_k, context_v, cross_mask, self_mask, rope_cos, rope_sin = (
+        build_molmo_action_context(
+            action_expert,
+            encoder_k,
+            encoder_v,
+            encoder_attention_mask.to(device=device),
+            action_horizon,
+            device,
+            dtype,
+        )
+    )
+
+    diffusion_input = (
+        step_actions,
+        block_mod,
+        final_mod,
+        context_k,
+        context_v,
+        cross_mask,
+        self_mask,
+        rope_cos,
+        rope_sin,
+    )
+
+    # --- Rung A: eager velocity (UNPATCHED) ---
+    with torch.no_grad():
+        eager_velocity = action_module(*diffusion_input)
+
+    # Action expert uses fused qkv self-attention and cross-attention — compile natively.
+    # --- Rung C: TRT compiled diffusion step ---
+    diffusion_exported = torch.export.export(
+        action_module, args=diffusion_input, strict=False
+    )
+    diffusion_input_specs = make_input_spec(diffusion_input)
+    diffusion_trt = torch_tensorrt.dynamo.compile(
+        diffusion_exported,
+        inputs=diffusion_input_specs,
+        **{
+            **ACTION_TRT_SETTINGS,
+            "use_python_runtime": True,
+            "require_full_compilation": False,
+        },
+    )
+    with torch.no_grad():
+        trt_velocity = diffusion_trt(*diffusion_input)
+
+    parity("MolmoAct2 diffusion A vs C", eager_velocity, trt_velocity)
 
     return 0
 
