@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from lerobot.policies.pi05.modeling_pi05 import create_sinusoidal_pos_embedding
-from trt.prefix_cache import PrefixKVCache
+from trt.prefix_cache import PrefixKVCache, SmolVLAPrefixPastLayers
 
 
 class TRTFixedCategorySpecificLinearExportModule(nn.Module):
@@ -332,6 +332,80 @@ class PI05PrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
             "adarms_cond": adarms_cond,
         }
         return (), expert_kwargs, (), {}
+
+
+class SmolVLAPrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
+    """SmolVLA suffix embed + prefix KV, consumed by ``vlm_with_expert`` expert path."""
+
+    def __init__(self, core):
+        super().__init__()
+        self.action_in_proj = core.action_in_proj
+        self.action_time_mlp_in = core.action_time_mlp_in
+        self.action_time_mlp_out = core.action_time_mlp_out
+        self.config = core.config
+        self.expert_hidden_size = core.vlm_with_expert.expert_hidden_size
+
+    def forward(
+        self,
+        x_t,
+        timestep,
+        prefix_k,
+        prefix_v,
+        position_ids,
+        attention_mask,
+    ):
+        suffix_embs = self.action_in_proj(x_t)
+
+        time_emb = create_sinusoidal_pos_embedding(
+            timestep,
+            self.expert_hidden_size,
+            min_period=self.config.min_period,
+            max_period=self.config.max_period,
+            device=timestep.device,
+        ).to(dtype=suffix_embs.dtype)
+        time_emb = time_emb[:, None, :].expand_as(suffix_embs)
+        action_time_emb = torch.cat([suffix_embs, time_emb], dim=2)
+
+        action_time_emb = self.action_time_mlp_in(action_time_emb)
+        action_time_emb = F.silu(action_time_emb)
+        suffix_embs = self.action_time_mlp_out(action_time_emb)
+
+        expert_kwargs = {
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "past_key_values": SmolVLAPrefixPastLayers(prefix_k, prefix_v),
+            "inputs_embeds": [None, suffix_embs],
+            "use_cache": True,
+            "fill_kv_cache": False,
+        }
+        return (), expert_kwargs, (), {}
+
+
+class SmolVLAExpertExportModule(nn.Module):
+    """Suffix-only ``vlm_with_expert.forward`` for one denoising step."""
+
+    def __init__(self, vlm_with_expert: nn.Module):
+        super().__init__()
+        self.vlm_with_expert = vlm_with_expert
+
+    def forward(
+        self,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        past_key_values,
+        inputs_embeds,
+        use_cache: bool = True,
+        fill_kv_cache: bool = False,
+    ):
+        outputs_embeds, _ = self.vlm_with_expert.forward(
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            fill_kv_cache=fill_kv_cache,
+        )
+        return outputs_embeds[1]
 
 
 def build_molmo_action_modulation(
