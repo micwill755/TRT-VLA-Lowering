@@ -5,7 +5,11 @@ from __future__ import annotations
 import torch
 
 from trt.compile import save_trt_engine_module
-from trt.language import language_edge_trt_settings
+from trt.language import (
+    language_edge_llm_config,
+    language_edge_trt_settings,
+    make_language_edge_input_specs,
+)
 from trt.modules.export.language import CausalLMExportModule
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.rope import make_rope_rotary_cos_sin
@@ -131,6 +135,13 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         "last_token_ids",
     ] + [f"past_key_values_{i}" for i in range(num_hidden_layers)]
     output_names = ["logits", "lm_hidden_states", "prefix_k", "prefix_v"]
+    input_specs = make_language_edge_input_specs(
+        input_names,
+        lm_inputs,
+        batch_size=batch_size,
+        max_seq_len=seq_len,
+        static_prefill_seq_len=True,
+    )
 
     patched = patch_language_attention(
         decoder,
@@ -152,19 +163,16 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
             input_names=input_names,
             output_names=output_names,
             extra_config={
-                "vocab_size": int(language.config.vocab_size),
-                "max_position_embeddings": int(
-                    getattr(language.config, "max_position_embeddings", seq_len)
+                **language_edge_llm_config(
+                    language.config,
+                    max_seq_len=seq_len,
+                    batch_size=batch_size,
+                    num_layers=num_hidden_layers,
                 ),
-                "hidden_size": hidden_size,
-                "num_hidden_layers": num_hidden_layers,
-                "num_attention_heads": num_attention_heads,
-                "num_key_value_heads": num_key_value_heads,
-                "head_dim": head_dim,
-                "max_seq_len": seq_len,
-                "batch_size": batch_size,
                 "enable_bidirectional_prefill": 1,
             },
+            input_specs=input_specs,
+            flat_tensors=lm_inputs,
             trt_settings={
                 **ctx.trt_settings,
                 **language_edge_trt_settings(),

@@ -95,6 +95,11 @@ def make_smolvla_suffix_position_and_mask(model, prefix_pad_masks, x_t, timestep
     prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
     suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
     full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+    attention_mask = torch.where(
+        full_att_2d_masks,
+        torch.zeros((), dtype=torch.float32, device=x_t.device),
+        torch.full((), -2.3819763e38, dtype=torch.float32, device=x_t.device),
+    )
     prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
     position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
-    return position_ids, full_att_2d_masks
+    return position_ids, attention_mask

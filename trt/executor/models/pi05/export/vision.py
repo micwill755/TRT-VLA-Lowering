@@ -63,14 +63,16 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
             (images_hwc,),
             ctx.engine_root / "visual",
             engine_file="visual.engine",
-            model_type="visual",
+            model_type="vit",
             component="vision",
             input_names=["pixel_values"],
             output_names=["visual_embeds"],
             extra_config={
                 "vocab_size": vocab_size,
                 "image_token_id": image_token_id,
-                "seq_len": seq_len,
+                "builder_config": {
+                    "seq_len": seq_len,
+                },
             },
             trt_settings=ctx.trt_settings,
         )

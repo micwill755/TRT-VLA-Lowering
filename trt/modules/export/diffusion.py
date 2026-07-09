@@ -396,6 +396,8 @@ class SmolVLAPrefixKVStepEncoderExportModule(ActionStepEncoderExportModule):
         attention_mask,
     ):
         suffix_embs = self.action_in_proj(x_t)
+        if attention_mask.dtype != torch.bool:
+            attention_mask = attention_mask == 0
 
         time_emb = create_sinusoidal_pos_embedding(
             timestep,
