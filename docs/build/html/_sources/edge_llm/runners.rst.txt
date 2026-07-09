@@ -50,8 +50,20 @@ visual rows into the image-placeholder positions:
        imageEmbedsTensor, mInputsEmbeds, stream);
 
 The placeholder token is identified by ``image_token_id`` from the vision (and
-language) ``config.json``. The number of rows each placeholder expands to is the
-vision ``seq_len`` written to ``visual/config.json``.
+language) ``config.json``. The number of rows each placeholder expands to is
+``builder_config.seq_len`` in ``visual/config.json``.
+
+**Tokenization parity** — for static prefill engines, the runtime must produce
+exactly ``builder_config.max_input_len`` tokens after expansion. GR00T uses
+``retokenize_groot_for_edge_llm`` and ``groot_edge_chat_template`` so Python export
+matches C++ VitRunner (Eagle-only tokenization is longer). Pi0.5 and SmolVLA use
+compact prefix templates; see :doc:`e2e` for static-length caveats when the C++
+tokenizer differs from Python.
+
+**Expanded image IDs** — VitRunner assigns placeholder token IDs starting at
+``vocab_size``. Those IDs are valid in the C++ embedding path (vision rows are
+spliced in without a table lookup). Export preprocess must mask
+``flat_ids >= vocab_size`` the same way when building ``inputs_embeds``.
 
 LLMEngineRunner
 ---------------
@@ -124,7 +136,21 @@ reads from its own ``config.json``. It exists because GR00T's action head needs 
 projected context (``eagle_linear → vlln → vl_self_attention``) that is cheaper to
 keep as a separate engine than to fold into either the language or action engine.
 Pi0.5 and SmolVLA skip it and hand ``prefix_k`` / ``prefix_v`` to the action
-engine instead.
+engine instead. The runtime calls ``runPi05VelocityAction`` for both models; the
+action engine binding layout is shared, but the traced denoising graph differs.
+
+Pi0.5 / SmolVLA action suffix inputs
+------------------------------------
+
+Before ``sampleActions``, ``ActionRunner`` builds suffix tensors on the host:
+
+- ``position_ids`` — arange over ``prefix_seq_len + suffix_len``.
+- ``attention_mask`` — float32 matrix with ``0.0`` for attended positions and a
+  large negative value for masked positions (not ``torch.bool`` at the engine
+  boundary).
+
+Export modules convert bool masks to float before ``save_trt_engine_module``; the
+SmolVLA step encoder converts back to bool inside the expert graph where needed.
 
 Where each runner writes its result
 -----------------------------------

@@ -28,6 +28,7 @@ inference, and benchmark orchestration for VLA models on top of
    :caption: Edge LLM
 
    edge_llm/overview
+   edge_llm/e2e
    edge_llm/runners
    edge_llm/bindings
 

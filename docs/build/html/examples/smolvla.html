@@ -797,10 +797,12 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1 has-children"><a class="reference internal" href="../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="../edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l1"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
@@ -984,6 +986,27 @@ python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="
 <code class="docutils literal notranslate"><span class="pre">trt/executor/models/smolvla/export/pipeline.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">trt/executor/models/smolvla/inference/pipeline.py</span></code></p>
 </section>
+<section id="edge-llm-runtime">
+<h2>Edge LLM runtime<a class="headerlink" href="#edge-llm-runtime" title="Link to this heading">#</a></h2>
+<p>SmolVLA shares the Pi0.5 three-engine layout and <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code>
+handoff. Vision uses <strong>64</strong> connector tokens per image (not 1024 raw SigLIP
+patches) and <code class="docutils literal notranslate"><span class="pre">image_token_id</span></code> for <code class="docutils literal notranslate"><span class="pre">&lt;image&gt;</span></code> (49190).</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">EDGELLM_PLUGIN_PATH</span><span class="o">=</span>/path/to/libNvInfer_edgellm_plugin.so
+
+llm_inference<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--engineDir<span class="o">=</span>/tmp/smolvla_edge_llm/language<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--multimodalEngineDir<span class="o">=</span>/tmp/smolvla_edge_llm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--inputFile<span class="o">=</span>/tmp/smolvla_edge_llm/runtime_smoke/input_action.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--outputFile<span class="o">=</span>/tmp/smolvla_edge_llm/runtime_smoke/output_e2e.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--maxGenerateLength<span class="o">=</span><span class="m">0</span>
+</pre></div>
+</div>
+<p>Default export uses a static prefix of <strong>151</strong> tokens (2×64 image + language +
+state). Action <code class="docutils literal notranslate"><span class="pre">attention_mask</span></code> must be float32 at the engine boundary. See
+<a class="reference internal" href="../edge_llm/e2e.html"><span class="doc">End-to-End: Export and llm_inference</span></a> for the full checklist and common failures.</p>
+<p>Full binding contract: <a class="reference internal" href="../edge_llm/overview.html"><span class="doc">Edge LLM Runtime Overview</span></a>, <a class="reference internal" href="../edge_llm/runners.html"><span class="doc">Runners and the Request Flow</span></a>,
+<a class="reference internal" href="../edge_llm/bindings.html"><span class="doc">Binding Contract: config.json to GPU Memory</span></a>.</p>
+</section>
 </section>
 
 
@@ -1039,6 +1062,7 @@ python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pipeline-stages">Pipeline stages</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#engine-layout">Engine layout</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stage-parity-script">Stage parity script</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#edge-llm-runtime">Edge LLM runtime</a></li>
 </ul>
   </nav></div>
 

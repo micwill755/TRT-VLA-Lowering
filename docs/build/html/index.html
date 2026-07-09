@@ -360,10 +360,12 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1 has-children"><a class="reference internal" href="edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l1"><a class="reference internal" href="edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l1"><a class="reference internal" href="edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
@@ -469,6 +471,7 @@ inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#pipeline-stages">Pipeline stages</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#engine-layout">Engine layout</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#stage-parity-script">Stage parity script</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#edge-llm-runtime">Edge LLM runtime</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="examples/smolvla.html">SmolVLA Export Pipeline Example</a><ul>
@@ -476,6 +479,7 @@ inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#pipeline-stages">Pipeline stages</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#engine-layout">Engine layout</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#stage-parity-script">Stage parity script</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#edge-llm-runtime">Edge LLM runtime</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="examples/molmo2.html">MolmoAct2 Export Pipeline Example</a><ul>
@@ -498,6 +502,20 @@ inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l1"><a class="reference internal" href="edge_llm/overview.html">Edge LLM Runtime Overview</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/overview.html#the-runtime-owns-the-runners">The runtime owns the runners</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/overview.html#why-config-json-matters">Why config.json matters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/overview.html#validated-vla-deployments">Validated VLA deployments</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a><ul>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#step-1-export-engines">Step 1 — Export engines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#step-2-run-c-inference">Step 2 — Run C++ inference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#model-layout-at-runtime">Model layout at runtime</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#request-json-format">Request JSON format</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#export-contract-checklist">Export contract checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#tokenization-and-prefix-length-parity">Tokenization and prefix length parity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#common-failures">Common failures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#validated-smoke-paths">Validated smoke paths</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/e2e.html#further-reading">Further reading</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="edge_llm/runners.html">Runners and the Request Flow</a><ul>
@@ -505,6 +523,7 @@ inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#llmenginerunner">LLMEngineRunner</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#actionrunner-and-the-three-handoff-modes">ActionRunner and the three handoff modes</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#actioncontextrunner">ActionContextRunner</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#pi0-5-smolvla-action-suffix-inputs">Pi0.5 / SmolVLA action suffix inputs</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#where-each-runner-writes-its-result">Where each runner writes its result</a></li>
 </ul>
 </li>
@@ -515,6 +534,7 @@ inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#step-4-runtime-allocates-gpu-tensors-from-engineconfig">Step 4 — Runtime allocates GPU tensors from EngineConfig</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#step-5-runtime-binds-buffers-to-engine-tensors-by-name">Step 5 — Runtime binds buffers to engine tensors by name</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#the-load-time-safety-check">The load-time safety check</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#vision-and-action-config-parity">Vision and action config parity</a></li>
 <li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#summary">Summary</a></li>
 </ul>
 </li>

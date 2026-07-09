@@ -797,10 +797,12 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1 has-children"><a class="reference internal" href="../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="../edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l1"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
@@ -1124,7 +1126,9 @@ execution mode inside the <code class="docutils literal notranslate"><span class
 <h2>Edge LLM Runtime<a class="headerlink" href="#edge-llm-runtime" title="Link to this heading">#</a></h2>
 <p>The C++ entry point in TensorRT Edge-LLM is <code class="docutils literal notranslate"><span class="pre">examples/llm/llm_inference.cpp</span></code>.
 For GR00T, the exported <code class="docutils literal notranslate"><span class="pre">language</span></code> stage becomes the main <code class="docutils literal notranslate"><span class="pre">--engineDir</span></code> and
-the other engines are loaded from <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir</span></code>:</p>
+the other engines are loaded from <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir</span></code>. Step-by-step export
+→ inference instructions, tokenization parity (555-token prefix), and smoke-test
+paths are in <a class="reference internal" href="../edge_llm/e2e.html"><span class="doc">End-to-End: Export and llm_inference</span></a>.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>llm_inference<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--engineDir<span class="o">=</span>/tmp/groot_edge_llm/language<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--multimodalEngineDir<span class="o">=</span>/tmp/groot_edge_llm<span class="w"> </span><span class="se">\</span>

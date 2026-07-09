@@ -797,10 +797,12 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1 current active has-children"><a class="reference internal" href="overview.html">Edge LLM Runtime Overview</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l2 current active"><a class="current reference internal" href="#">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l1"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
@@ -914,14 +916,16 @@ names, and writes a <code class="docutils literal notranslate"><span class="pre"
     <span class="n">sample_inputs</span><span class="p">,</span>
     <span class="n">ctx</span><span class="o">.</span><span class="n">engine_root</span> <span class="o">/</span> <span class="s2">&quot;visual&quot;</span><span class="p">,</span>
     <span class="n">engine_file</span><span class="o">=</span><span class="s2">&quot;visual.engine&quot;</span><span class="p">,</span>
-    <span class="n">model_type</span><span class="o">=</span><span class="s2">&quot;visual&quot;</span><span class="p">,</span>
+    <span class="n">model_type</span><span class="o">=</span><span class="s2">&quot;vit&quot;</span><span class="p">,</span>
     <span class="n">component</span><span class="o">=</span><span class="s2">&quot;vision&quot;</span><span class="p">,</span>
     <span class="n">input_names</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;pixel_values&quot;</span><span class="p">],</span>       <span class="c1"># engine input binding</span>
     <span class="n">output_names</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;visual_embeds&quot;</span><span class="p">],</span>     <span class="c1"># engine output binding</span>
     <span class="n">extra_config</span><span class="o">=</span><span class="p">{</span>
         <span class="s2">&quot;vocab_size&quot;</span><span class="p">:</span> <span class="n">vocab_size</span><span class="p">,</span>
         <span class="s2">&quot;image_token_id&quot;</span><span class="p">:</span> <span class="n">image_token_id</span><span class="p">,</span>
-        <span class="s2">&quot;seq_len&quot;</span><span class="p">:</span> <span class="n">seq_len</span><span class="p">,</span>
+        <span class="s2">&quot;builder_config&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;seq_len&quot;</span><span class="p">:</span> <span class="n">seq_len</span><span class="p">,</span>        <span class="c1"># connector tokens per image, not raw patch count</span>
+        <span class="p">},</span>
     <span class="p">},</span>
     <span class="n">trt_settings</span><span class="o">=</span><span class="n">ctx</span><span class="o">.</span><span class="n">trt_settings</span><span class="p">,</span>
 <span class="p">)</span>
@@ -993,7 +997,10 @@ and the C++ <code class="docutils literal notranslate"><span class="pre">binding
 <section id="step-2-language-config-json-carries-the-sizing-numbers">
 <h2>Step 2 — Language config.json carries the sizing numbers<a class="headerlink" href="#step-2-language-config-json-carries-the-sizing-numbers" title="Link to this heading">#</a></h2>
 <p>The language engine’s <code class="docutils literal notranslate"><span class="pre">config.json</span></code> is special: it drives almost every buffer in
-the runtime. It is built by <code class="docutils literal notranslate"><span class="pre">language_edge_llm_config</span></code> (<code class="docutils literal notranslate"><span class="pre">trt/language.py</span></code>):</p>
+the runtime. It is built by <code class="xref py py-func docutils literal notranslate"><span class="pre">language_edge_llm_config()</span></code> (<code class="docutils literal notranslate"><span class="pre">trt/language.py</span></code>).
+Static VLA prefill engines also trace inputs through
+<code class="xref py py-func docutils literal notranslate"><span class="pre">make_language_edge_input_specs()</span></code> with <code class="docutils literal notranslate"><span class="pre">static_prefill_seq_len=True</span></code> so the
+compiled profile matches the fixed prefix length (e.g. 555 / 830 / 151):</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">edge_config</span> <span class="o">=</span> <span class="p">{</span>
     <span class="s2">&quot;vocab_size&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
     <span class="s2">&quot;max_position_embeddings&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
@@ -1015,6 +1022,9 @@ the runtime. It is built by <code class="docutils literal notranslate"><span cla
 <span class="n">edge_config</span><span class="p">[</span><span class="s2">&quot;image_token_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="o">...</span>
 </pre></div>
 </div>
+<p><code class="docutils literal notranslate"><span class="pre">builder_config</span></code> is <strong>required</strong> at C++ load time. Exports that only write a
+top-level <code class="docutils literal notranslate"><span class="pre">seq_len</span></code> without <code class="docutils literal notranslate"><span class="pre">builder_config</span></code> fail validation in
+<code class="docutils literal notranslate"><span class="pre">LLMEngineRunner</span></code>.</p>
 </section>
 <section id="step-3-runtime-parses-config-json-into-engineconfig">
 <h2>Step 3 — Runtime parses config.json into EngineConfig<a class="headerlink" href="#step-3-runtime-parses-config-json-into-engineconfig" title="Link to this heading">#</a></h2>
@@ -1056,11 +1066,15 @@ the runtime. It is built by <code class="docutils literal notranslate"><span cla
 <td><p><code class="docutils literal notranslate"><span class="pre">imageTokenId</span></code></p></td>
 <td><p>Where vision rows are spliced into <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>.</p></td>
 </tr>
-<tr class="row-even"><td><p>engine has <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> out</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code> <code class="docutils literal notranslate"><span class="pre">builder_config.seq_len</span></code></p></td>
+<td><p>VitRunner expansion count</p></td>
+<td><p>Rows per <code class="docutils literal notranslate"><span class="pre">&lt;image&gt;</span></code> placeholder after tokenization.</p></td>
+</tr>
+<tr class="row-odd"><td><p>engine has <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> out</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">enableLmHiddenStates</span></code></p></td>
 <td><p>Whether <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> is exported for the action-context engine.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> output shape</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> output shape</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">enablePrefixKVOutputs</span></code> + <code class="docutils literal notranslate"><span class="pre">prefixKVOutputShape</span></code></p></td>
 <td><p>Whether/what size <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> buffers are.</p></td>
 </tr>
@@ -1125,6 +1139,24 @@ numbers match the actual engine tensor shapes, e.g.:</p>
 <p>If the engine exports <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> but the config is missing the
 prefix-KV output metadata, load fails outright. This is the guardrail that keeps
 the Python export contract and the C++ runtime bindings in sync.</p>
+</section>
+<section id="vision-and-action-config-parity">
+<h2>Vision and action config parity<a class="headerlink" href="#vision-and-action-config-parity" title="Link to this heading">#</a></h2>
+<p><strong>Vision</strong> — <code class="docutils literal notranslate"><span class="pre">MultimodalRunner</span></code> only instantiates <code class="docutils literal notranslate"><span class="pre">VitRunner</span></code> when
+<code class="docutils literal notranslate"><span class="pre">model_type</span></code> is <code class="docutils literal notranslate"><span class="pre">vit</span></code>. The per-image token count lives in
+<code class="docutils literal notranslate"><span class="pre">builder_config.seq_len</span></code> (not a top-level <code class="docutils literal notranslate"><span class="pre">seq_len</span></code> field). <code class="docutils literal notranslate"><span class="pre">image_token_id</span></code>
+must match the tokenizer’s placeholder token (e.g. SmolVLA <code class="docutils literal notranslate"><span class="pre">&lt;image&gt;</span></code> → 49190).</p>
+<p><strong>Action (Pi0.5 / SmolVLA)</strong> — <code class="docutils literal notranslate"><span class="pre">action/config.json</span></code> includes
+<code class="docutils literal notranslate"><span class="pre">lm_to_action_slots</span></code> mapping language output indices to action input indices
+(typically <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> at slots <code class="docutils literal notranslate"><span class="pre">[1,2]</span> <span class="pre">→</span> <span class="pre">[2,3]</span></code>). The action
+engine’s <code class="docutils literal notranslate"><span class="pre">prefix_seq_len</span></code> must equal <code class="docutils literal notranslate"><span class="pre">language/builder_config.max_input_len</span></code>.
+The suffix <code class="docutils literal notranslate"><span class="pre">attention_mask</span></code> binding is <strong>float32</strong> at the TRT boundary because
+<code class="docutils literal notranslate"><span class="pre">ActionRunner::preparePi05SuffixInputs</span></code> fills host float mask values; export
+converts bool masks before tracing.</p>
+<p><strong>Action (GR00T)</strong> — uses <code class="docutils literal notranslate"><span class="pre">context_embs</span></code>, <code class="docutils literal notranslate"><span class="pre">state</span></code>, and <code class="docutils literal notranslate"><span class="pre">embodiment_id</span></code> instead
+of prefix KV. The <code class="docutils literal notranslate"><span class="pre">action_context</span></code> engine projects <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> to
+<code class="docutils literal notranslate"><span class="pre">vl_embs</span></code> before the denoising loop.</p>
+<p>See <a class="reference internal" href="e2e.html"><span class="doc">End-to-End: Export and llm_inference</span></a> for per-model numbers and common mismatch errors.</p>
 </section>
 <section id="summary">
 <h2>Summary<a class="headerlink" href="#summary" title="Link to this heading">#</a></h2>
@@ -1205,6 +1237,7 @@ graph TB
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-4-runtime-allocates-gpu-tensors-from-engineconfig">Step 4 — Runtime allocates GPU tensors from EngineConfig</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-5-runtime-binds-buffers-to-engine-tensors-by-name">Step 5 — Runtime binds buffers to engine tensors by name</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-load-time-safety-check">The load-time safety check</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#vision-and-action-config-parity">Vision and action config parity</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#summary">Summary</a></li>
 </ul>
   </nav></div>

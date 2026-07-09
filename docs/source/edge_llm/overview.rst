@@ -105,9 +105,36 @@ engine binding it wires comes from two sources:
 If either drifts, the runtime either fails validation at load or binds the wrong
 GPU pointer. The next pages break down the runners and the exact binding contract.
 
+Validated VLA deployments
+-------------------------
+
+The following models have been exercised end-to-end with ``app.py --export-only``
+followed by C++ ``llm_inference`` (prefill + action diffusion, ``max_generate_length=0``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 20 66
+
+   * - Model
+     - Engines
+     - Action handoff
+   * - GR00T
+     - vision, language, action_context, action
+     - ``lm_hidden_states`` → context engine → ``context_embs`` → denoising
+   * - Pi0.5
+     - vision, language, action
+     - ``prefix_k`` / ``prefix_v`` → Pi0.5 velocity expert
+   * - SmolVLA
+     - vision, language, action
+     - ``prefix_k`` / ``prefix_v`` → SmolVLA expert (same binding layout as Pi0.5)
+
+See :doc:`e2e` for export commands, request JSON examples, the export/runtime
+checklist, tokenization parity notes, and common failure modes.
+
 .. toctree::
    :maxdepth: 1
    :hidden:
 
+   e2e
    runners
    bindings

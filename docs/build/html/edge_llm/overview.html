@@ -499,7 +499,7 @@ window.runMermaid = runMermaid;</script>
 
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Runners and the Request Flow" href="runners.html" />
+    <link rel="next" title="End-to-End: Export and llm_inference" href="e2e.html" />
     <link rel="prev" title="Alpamayo Export Pipeline Example" href="../examples/alpamayo.html" />
 
 
@@ -797,10 +797,12 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1 current active has-children"><a class="current reference internal" href="#">Edge LLM Runtime Overview</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l2"><a class="reference internal" href="bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l1"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l1"><a class="reference internal" href="bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
@@ -1000,6 +1002,41 @@ constants in <code class="docutils literal notranslate"><span class="pre">common
 </ol>
 <p>If either drifts, the runtime either fails validation at load or binds the wrong
 GPU pointer. The next pages break down the runners and the exact binding contract.</p>
+</section>
+<section id="validated-vla-deployments">
+<h2>Validated VLA deployments<a class="headerlink" href="#validated-vla-deployments" title="Link to this heading">#</a></h2>
+<p>The following models have been exercised end-to-end with <code class="docutils literal notranslate"><span class="pre">app.py</span> <span class="pre">--export-only</span></code>
+followed by C++ <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code> (prefill + action diffusion, <code class="docutils literal notranslate"><span class="pre">max_generate_length=0</span></code>):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 14.0%" />
+<col style="width: 20.0%" />
+<col style="width: 66.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model</p></th>
+<th class="head"><p>Engines</p></th>
+<th class="head"><p>Action handoff</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>GR00T</p></td>
+<td><p>vision, language, action_context, action</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> → context engine → <code class="docutils literal notranslate"><span class="pre">context_embs</span></code> → denoising</p></td>
+</tr>
+<tr class="row-odd"><td><p>Pi0.5</p></td>
+<td><p>vision, language, action</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> → Pi0.5 velocity expert</p></td>
+</tr>
+<tr class="row-even"><td><p>SmolVLA</p></td>
+<td><p>vision, language, action</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> → SmolVLA expert (same binding layout as Pi0.5)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>See <a class="reference internal" href="e2e.html"><span class="doc">End-to-End: Export and llm_inference</span></a> for export commands, request JSON examples, the export/runtime
+checklist, tokenization parity notes, and common failure modes.</p>
 <div class="toctree-wrapper compound">
 </div>
 </section>
@@ -1025,11 +1062,11 @@ GPU pointer. The next pages break down the runners and the exact binding contrac
       </div>
     </a>
     <a class="right-next"
-       href="runners.html"
+       href="e2e.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Runners and the Request Flow</p>
+        <p class="prev-next-title">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -1056,6 +1093,7 @@ GPU pointer. The next pages break down the runners and the exact binding contrac
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-runtime-owns-the-runners">The runtime owns the runners</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#why-config-json-matters">Why config.json matters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#validated-vla-deployments">Validated VLA deployments</a></li>
 </ul>
   </nav></div>
 

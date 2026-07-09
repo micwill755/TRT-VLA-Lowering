@@ -500,7 +500,7 @@ window.runMermaid = runMermaid;</script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
     <link rel="next" title="Binding Contract: config.json to GPU Memory" href="bindings.html" />
-    <link rel="prev" title="Edge LLM Runtime Overview" href="overview.html" />
+    <link rel="prev" title="End-to-End: Export and llm_inference" href="e2e.html" />
 
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -797,10 +797,12 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1 current active has-children"><a class="reference internal" href="overview.html">Edge LLM Runtime Overview</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l2 current active"><a class="current reference internal" href="#">Runners and the Request Flow</a></li>
 <li class="toctree-l2"><a class="reference internal" href="bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Runners and the Request Flow</a></li>
 <li class="toctree-l1"><a class="reference internal" href="bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
@@ -937,8 +939,18 @@ visual rows into the image-placeholder positions:</p>
 </pre></div>
 </div>
 <p>The placeholder token is identified by <code class="docutils literal notranslate"><span class="pre">image_token_id</span></code> from the vision (and
-language) <code class="docutils literal notranslate"><span class="pre">config.json</span></code>. The number of rows each placeholder expands to is the
-vision <code class="docutils literal notranslate"><span class="pre">seq_len</span></code> written to <code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code>.</p>
+language) <code class="docutils literal notranslate"><span class="pre">config.json</span></code>. The number of rows each placeholder expands to is
+<code class="docutils literal notranslate"><span class="pre">builder_config.seq_len</span></code> in <code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code>.</p>
+<p><strong>Tokenization parity</strong> — for static prefill engines, the runtime must produce
+exactly <code class="docutils literal notranslate"><span class="pre">builder_config.max_input_len</span></code> tokens after expansion. GR00T uses
+<code class="docutils literal notranslate"><span class="pre">retokenize_groot_for_edge_llm</span></code> and <code class="docutils literal notranslate"><span class="pre">groot_edge_chat_template</span></code> so Python export
+matches C++ VitRunner (Eagle-only tokenization is longer). Pi0.5 and SmolVLA use
+compact prefix templates; see <a class="reference internal" href="e2e.html"><span class="doc">End-to-End: Export and llm_inference</span></a> for static-length caveats when the C++
+tokenizer differs from Python.</p>
+<p><strong>Expanded image IDs</strong> — VitRunner assigns placeholder token IDs starting at
+<code class="docutils literal notranslate"><span class="pre">vocab_size</span></code>. Those IDs are valid in the C++ embedding path (vision rows are
+spliced in without a table lookup). Export preprocess must mask
+<code class="docutils literal notranslate"><span class="pre">flat_ids</span> <span class="pre">&gt;=</span> <span class="pre">vocab_size</span></code> the same way when building <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>.</p>
 </section>
 <section id="llmenginerunner">
 <h2>LLMEngineRunner<a class="headerlink" href="#llmenginerunner" title="Link to this heading">#</a></h2>
@@ -1015,7 +1027,20 @@ reads from its own <code class="docutils literal notranslate"><span class="pre">
 projected context (<code class="docutils literal notranslate"><span class="pre">eagle_linear</span> <span class="pre">→</span> <span class="pre">vlln</span> <span class="pre">→</span> <span class="pre">vl_self_attention</span></code>) that is cheaper to
 keep as a separate engine than to fold into either the language or action engine.
 Pi0.5 and SmolVLA skip it and hand <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> to the action
-engine instead.</p>
+engine instead. The runtime calls <code class="docutils literal notranslate"><span class="pre">runPi05VelocityAction</span></code> for both models; the
+action engine binding layout is shared, but the traced denoising graph differs.</p>
+</section>
+<section id="pi0-5-smolvla-action-suffix-inputs">
+<h2>Pi0.5 / SmolVLA action suffix inputs<a class="headerlink" href="#pi0-5-smolvla-action-suffix-inputs" title="Link to this heading">#</a></h2>
+<p>Before <code class="docutils literal notranslate"><span class="pre">sampleActions</span></code>, <code class="docutils literal notranslate"><span class="pre">ActionRunner</span></code> builds suffix tensors on the host:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">position_ids</span></code> — arange over <code class="docutils literal notranslate"><span class="pre">prefix_seq_len</span> <span class="pre">+</span> <span class="pre">suffix_len</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">attention_mask</span></code> — float32 matrix with <code class="docutils literal notranslate"><span class="pre">0.0</span></code> for attended positions and a
+large negative value for masked positions (not <code class="docutils literal notranslate"><span class="pre">torch.bool</span></code> at the engine
+boundary).</p></li>
+</ul>
+<p>Export modules convert bool masks to float before <code class="docutils literal notranslate"><span class="pre">save_trt_engine_module</span></code>; the
+SmolVLA step encoder converts back to bool inside the expert graph where needed.</p>
 </section>
 <section id="where-each-runner-writes-its-result">
 <h2>Where each runner writes its result<a class="headerlink" href="#where-each-runner-writes-its-result" title="Link to this heading">#</a></h2>
@@ -1056,12 +1081,12 @@ engine instead.</p>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="overview.html"
+       href="e2e.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">Edge LLM Runtime Overview</p>
+        <p class="prev-next-title">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></p>
       </div>
     </a>
     <a class="right-next"
@@ -1098,6 +1123,7 @@ engine instead.</p>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#llmenginerunner">LLMEngineRunner</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#actionrunner-and-the-three-handoff-modes">ActionRunner and the three handoff modes</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#actioncontextrunner">ActionContextRunner</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pi0-5-smolvla-action-suffix-inputs">Pi0.5 / SmolVLA action suffix inputs</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#where-each-runner-writes-its-result">Where each runner writes its result</a></li>
 </ul>
   </nav></div>

@@ -234,7 +234,9 @@ Edge LLM Runtime
 
 The C++ entry point in TensorRT Edge-LLM is ``examples/llm/llm_inference.cpp``.
 For GR00T, the exported ``language`` stage becomes the main ``--engineDir`` and
-the other engines are loaded from ``--multimodalEngineDir``:
+the other engines are loaded from ``--multimodalEngineDir``. Step-by-step export
+→ inference instructions, tokenization parity (555-token prefix), and smoke-test
+paths are in :doc:`../edge_llm/e2e`.
 
 .. code-block:: bash
 

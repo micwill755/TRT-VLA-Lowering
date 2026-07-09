@@ -97,3 +97,28 @@ For per-module TRT compile and timing without the full orchestrator, run:
 *Files:* ``trt/profile/smolvla.py``,
 ``trt/executor/models/smolvla/export/pipeline.py``,
 ``trt/executor/models/smolvla/inference/pipeline.py``
+
+Edge LLM runtime
+----------------
+
+SmolVLA shares the Pi0.5 three-engine layout and ``prefix_k`` / ``prefix_v``
+handoff. Vision uses **64** connector tokens per image (not 1024 raw SigLIP
+patches) and ``image_token_id`` for ``<image>`` (49190).
+
+.. code-block:: bash
+
+   export EDGELLM_PLUGIN_PATH=/path/to/libNvInfer_edgellm_plugin.so
+
+   llm_inference \
+     --engineDir=/tmp/smolvla_edge_llm/language \
+     --multimodalEngineDir=/tmp/smolvla_edge_llm \
+     --inputFile=/tmp/smolvla_edge_llm/runtime_smoke/input_action.json \
+     --outputFile=/tmp/smolvla_edge_llm/runtime_smoke/output_e2e.json \
+     --maxGenerateLength=0
+
+Default export uses a static prefix of **151** tokens (2×64 image + language +
+state). Action ``attention_mask`` must be float32 at the engine boundary. See
+:doc:`../edge_llm/e2e` for the full checklist and common failures.
+
+Full binding contract: :doc:`../edge_llm/overview`, :doc:`../edge_llm/runners`,
+:doc:`../edge_llm/bindings`.

@@ -797,10 +797,12 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1 has-children"><a class="reference internal" href="../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="../edge_llm/e2e.html">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
 <li class="toctree-l1"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
@@ -985,6 +987,27 @@ python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="
 <code class="docutils literal notranslate"><span class="pre">trt/executor/models/pi05/export/pipeline.py</span></code>,
 <code class="docutils literal notranslate"><span class="pre">trt/executor/models/pi05/inference/pipeline.py</span></code></p>
 </section>
+<section id="edge-llm-runtime">
+<h2>Edge LLM runtime<a class="headerlink" href="#edge-llm-runtime" title="Link to this heading">#</a></h2>
+<p>Pi0.5 uses three engines (no <code class="docutils literal notranslate"><span class="pre">action_context</span></code>). Language prefill exports
+<code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code>; the action engine consumes them directly.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">EDGELLM_PLUGIN_PATH</span><span class="o">=</span>/path/to/libNvInfer_edgellm_plugin.so
+
+llm_inference<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--engineDir<span class="o">=</span>/tmp/pi05_edge_llm/language<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--multimodalEngineDir<span class="o">=</span>/tmp/pi05_edge_llm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--inputFile<span class="o">=</span>/tmp/pi05_edge_llm/runtime_smoke/input_action.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--outputFile<span class="o">=</span>/tmp/pi05_edge_llm/runtime_smoke/output_e2e.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--maxGenerateLength<span class="o">=</span><span class="m">0</span>
+</pre></div>
+</div>
+<p>Default export uses a static prefix of <strong>830</strong> tokens (3 image slots × 256 +
+text/state). The C++ Paligemma tokenizer may not match Python token counts for
+natural task strings — see <a class="reference internal" href="../edge_llm/e2e.html"><span class="doc">End-to-End: Export and llm_inference</span></a> for parity notes and smoke-test
+paths.</p>
+<p>Full binding contract: <a class="reference internal" href="../edge_llm/overview.html"><span class="doc">Edge LLM Runtime Overview</span></a>, <a class="reference internal" href="../edge_llm/runners.html"><span class="doc">Runners and the Request Flow</span></a>,
+<a class="reference internal" href="../edge_llm/bindings.html"><span class="doc">Binding Contract: config.json to GPU Memory</span></a>.</p>
+</section>
 </section>
 
 
@@ -1040,6 +1063,7 @@ python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pipeline-stages">Pipeline stages</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#engine-layout">Engine layout</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stage-parity-script">Stage parity script</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#edge-llm-runtime">Edge LLM runtime</a></li>
 </ul>
   </nav></div>
 

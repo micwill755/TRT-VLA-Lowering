@@ -98,3 +98,28 @@ For per-module TRT compile and timing without the full orchestrator, run:
 *Files:* ``trt/profile/pi05.py``,
 ``trt/executor/models/pi05/export/pipeline.py``,
 ``trt/executor/models/pi05/inference/pipeline.py``
+
+Edge LLM runtime
+----------------
+
+Pi0.5 uses three engines (no ``action_context``). Language prefill exports
+``prefix_k`` / ``prefix_v``; the action engine consumes them directly.
+
+.. code-block:: bash
+
+   export EDGELLM_PLUGIN_PATH=/path/to/libNvInfer_edgellm_plugin.so
+
+   llm_inference \
+     --engineDir=/tmp/pi05_edge_llm/language \
+     --multimodalEngineDir=/tmp/pi05_edge_llm \
+     --inputFile=/tmp/pi05_edge_llm/runtime_smoke/input_action.json \
+     --outputFile=/tmp/pi05_edge_llm/runtime_smoke/output_e2e.json \
+     --maxGenerateLength=0
+
+Default export uses a static prefix of **830** tokens (3 image slots × 256 +
+text/state). The C++ Paligemma tokenizer may not match Python token counts for
+natural task strings — see :doc:`../edge_llm/e2e` for parity notes and smoke-test
+paths.
+
+Full binding contract: :doc:`../edge_llm/overview`, :doc:`../edge_llm/runners`,
+:doc:`../edge_llm/bindings`.

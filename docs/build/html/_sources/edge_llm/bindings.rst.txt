@@ -26,14 +26,16 @@ names, and writes a ``config.json`` beside the ``.engine``:
        sample_inputs,
        ctx.engine_root / "visual",
        engine_file="visual.engine",
-       model_type="visual",
+       model_type="vit",
        component="vision",
        input_names=["pixel_values"],       # engine input binding
        output_names=["visual_embeds"],     # engine output binding
        extra_config={
            "vocab_size": vocab_size,
            "image_token_id": image_token_id,
-           "seq_len": seq_len,
+           "builder_config": {
+               "seq_len": seq_len,        # connector tokens per image, not raw patch count
+           },
        },
        trt_settings=ctx.trt_settings,
    )
@@ -95,7 +97,10 @@ Step 2 — Language config.json carries the sizing numbers
 --------------------------------------------------------
 
 The language engine's ``config.json`` is special: it drives almost every buffer in
-the runtime. It is built by ``language_edge_llm_config`` (``trt/language.py``):
+the runtime. It is built by :func:`language_edge_llm_config` (``trt/language.py``).
+Static VLA prefill engines also trace inputs through
+:func:`make_language_edge_input_specs` with ``static_prefill_seq_len=True`` so the
+compiled profile matches the fixed prefix length (e.g. 555 / 830 / 151):
 
 .. code-block:: python
 
@@ -118,6 +123,10 @@ the runtime. It is built by ``language_edge_llm_config`` (``trt/language.py``):
    # optional VLA fields
    edge_config["context_hidden_size"] = ...   # -> contextEmbDim
    edge_config["image_token_id"] = ...
+
+``builder_config`` is **required** at C++ load time. Exports that only write a
+top-level ``seq_len`` without ``builder_config`` fail validation in
+``LLMEngineRunner``.
 
 Step 3 — Runtime parses config.json into EngineConfig
 -----------------------------------------------------
@@ -149,6 +158,9 @@ Step 3 — Runtime parses config.json into EngineConfig
    * - ``image_token_id``
      - ``imageTokenId``
      - Where vision rows are spliced into ``inputs_embeds``.
+   * - ``visual/config.json`` ``builder_config.seq_len``
+     - VitRunner expansion count
+     - Rows per ``<image>`` placeholder after tokenization.
    * - engine has ``lm_hidden_states`` out
      - ``enableLmHiddenStates``
      - Whether ``lm_hidden_states`` is exported for the action-context engine.
@@ -224,6 +236,28 @@ numbers match the actual engine tensor shapes, e.g.:
 If the engine exports ``prefix_k`` / ``prefix_v`` but the config is missing the
 prefix-KV output metadata, load fails outright. This is the guardrail that keeps
 the Python export contract and the C++ runtime bindings in sync.
+
+Vision and action config parity
+-------------------------------
+
+**Vision** — ``MultimodalRunner`` only instantiates ``VitRunner`` when
+``model_type`` is ``vit``. The per-image token count lives in
+``builder_config.seq_len`` (not a top-level ``seq_len`` field). ``image_token_id``
+must match the tokenizer's placeholder token (e.g. SmolVLA ``<image>`` → 49190).
+
+**Action (Pi0.5 / SmolVLA)** — ``action/config.json`` includes
+``lm_to_action_slots`` mapping language output indices to action input indices
+(typically ``prefix_k`` / ``prefix_v`` at slots ``[1,2] → [2,3]``). The action
+engine's ``prefix_seq_len`` must equal ``language/builder_config.max_input_len``.
+The suffix ``attention_mask`` binding is **float32** at the TRT boundary because
+``ActionRunner::preparePi05SuffixInputs`` fills host float mask values; export
+converts bool masks before tracing.
+
+**Action (GR00T)** — uses ``context_embs``, ``state``, and ``embodiment_id`` instead
+of prefix KV. The ``action_context`` engine projects ``lm_hidden_states`` to
+``vl_embs`` before the denoising loop.
+
+See :doc:`e2e` for per-model numbers and common mismatch errors.
 
 Summary
 -------

@@ -1,0 +1,1027 @@
+
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>End-to-End: Export and llm_inference &#8212; Torch-TRT pipelines</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/nvidia-sphinx-theme.css?v=933278ad" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=3ad11fa9" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=a95f357e85573c9b56d5"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5" />
+
+
+
+    <script src="../_static/documentation_options.js?v=c6e86fd7"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=18b33a23"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'edge_llm/e2e';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.19.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = '_static/switcher.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'latest';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            false;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+
+    <link rel="icon" href="../_static/favicon.png"/>
+
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Runners and the Request Flow" href="runners.html" />
+    <link rel="prev" title="Edge LLM Runtime Overview" href="overview.html" />
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="latest" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+  
+
+
+  </head>
+
+  <body data-default-mode="">
+
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a>
+
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-3"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-3"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-3"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-3">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+
+
+<nav class="bd-docs-nav bd-links"
+     aria-label="Table of Contents">
+  <p class="bd-links__title" role="heading" aria-level="1">Table of Contents</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/getting_started/overview.html">Overview</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../user_guide/getting_started/supported-models.html">Supported Models</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/gr00t.html">GR00T</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/pi05.html">Pi0.5</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/molmo2.html">Molmo2</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/smolvla.html">SmolVLA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/alpamayo.html">Alpamayo</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/getting_started/installation.html">Installation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../examples/gr00t.html">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="overview.html">Edge LLM Runtime Overview</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></a></li>
+<li class="toctree-l1"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/pipelines-and-stages.html">Pipelines and Stages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/runners.html">Runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/hooks.html">Hooks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/export-pipeline.html">Export Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/overview.html">Plugins Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/architecture.html">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/registration.html">Plugin Registration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/custom-ops.html">Custom Ops</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/converters.html">Converters</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/attention-patching.html">Attention Patching</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/parity-and-debugging.html">Parity and Debugging</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/overview.html">Diffusion Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/components.html">Diffusion Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/action-rollout.html">Action Rollout</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/customization/customization-guide.html">Customization Guide</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="overview.html" class="nav-link">Edge LLM Runtime Overview</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code></span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="end-to-end-export-and-llm-inference">
+<h1>End-to-End: Export and <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code><a class="headerlink" href="#end-to-end-export-and-llm-inference" title="Link to this heading">#</a></h1>
+<p>This page walks through the full deployment path that was validated for <strong>GR00T</strong>,
+<strong>Pi0.5</strong>, and <strong>SmolVLA</strong>: export engines with <code class="docutils literal notranslate"><span class="pre">app.py</span></code>, then run the C++
+<code class="docutils literal notranslate"><span class="pre">llm_inference</span></code> binary from TensorRT Edge-LLM. The Python export pipeline and the
+C++ runtime are separate programs; they only work together when the exported
+<code class="docutils literal notranslate"><span class="pre">config.json</span></code> files, tokenizer sidecars, and request JSON all match what
+<code class="docutils literal notranslate"><span class="pre">LLMInferenceRuntime</span></code> expects.</p>
+<section id="prerequisites">
+<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h2>
+<p>Build or locate the Edge-LLM TensorRT plugin and point both tools at it:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">EDGE_LLM_PLUGIN_SO</span><span class="o">=</span>/path/to/libNvInfer_edgellm_plugin.so<span class="w">   </span><span class="c1"># Python export</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">EDGELLM_PLUGIN_PATH</span><span class="o">=</span>/path/to/libNvInfer_edgellm_plugin.so<span class="w">    </span><span class="c1"># C++ llm_inference</span>
+</pre></div>
+</div>
+<p>From the project root:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>/path/to/Test
+</pre></div>
+</div>
+</section>
+<section id="step-1-export-engines">
+<h2>Step 1 — Export engines<a class="headerlink" href="#step-1-export-engines" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 14.0%" />
+<col style="width: 28.0%" />
+<col style="width: 58.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model</p></th>
+<th class="head"><p>Command</p></th>
+<th class="head"><p>Default engine root</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>GR00T</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">app.py</span> <span class="pre">--model</span> <span class="pre">gr00t</span> <span class="pre">--export-only</span> <span class="pre">--device</span> <span class="pre">cuda</span> <span class="pre">--engine-dir</span> <span class="pre">/tmp/groot_edge_llm</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/groot_edge_llm</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Pi0.5</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">app.py</span> <span class="pre">--model</span> <span class="pre">pi05</span> <span class="pre">--export-only</span> <span class="pre">--device</span> <span class="pre">cuda</span> <span class="pre">--engine-dir</span> <span class="pre">/tmp/pi05_edge_llm</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/pi05_edge_llm</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>SmolVLA</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">app.py</span> <span class="pre">--model</span> <span class="pre">smolvla</span> <span class="pre">--export-only</span> <span class="pre">--device</span> <span class="pre">cuda</span> <span class="pre">--engine-dir</span> <span class="pre">/tmp/smolvla_edge_llm</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/smolvla_edge_llm</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Each export writes a tree like:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>/tmp/&lt;model&gt;_edge_llm/
+  visual/visual.engine
+    config.json
+  language/language.engine
+    config.json
+    embedding.safetensors
+    processed_chat_template.json
+    tokenizer assets
+  action_context/context.engine     # GR00T only
+    config.json
+  action/action.engine
+    config.json
+</pre></div>
+</div>
+</section>
+<section id="step-2-run-c-inference">
+<h2>Step 2 — Run C++ inference<a class="headerlink" href="#step-2-run-c-inference" title="Link to this heading">#</a></h2>
+<p>All three models use the same CLI shape. <code class="docutils literal notranslate"><span class="pre">--engineDir</span></code> points at the
+<strong>language</strong> subdirectory; <code class="docutils literal notranslate"><span class="pre">--multimodalEngineDir</span></code> points at the export root:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>/path/to/llm_inference<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--engineDir<span class="o">=</span>/tmp/&lt;model&gt;_edge_llm/language<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--multimodalEngineDir<span class="o">=</span>/tmp/&lt;model&gt;_edge_llm<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--inputFile<span class="o">=</span>/tmp/&lt;model&gt;_edge_llm/runtime_smoke/input_action.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--outputFile<span class="o">=</span>/tmp/&lt;model&gt;_edge_llm/runtime_smoke/output_e2e.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--maxGenerateLength<span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--dumpOutput<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--dumpProfile
+</pre></div>
+</div>
+<p>Set <code class="docutils literal notranslate"><span class="pre">max_generate_length</span></code> to <code class="docutils literal notranslate"><span class="pre">0</span></code> for action-only VLA runs (prefill + diffusion,
+no text decode). Successful responses include an <code class="docutils literal notranslate"><span class="pre">actions</span></code> array in the output JSON.</p>
+</section>
+<section id="model-layout-at-runtime">
+<h2>Model layout at runtime<a class="headerlink" href="#model-layout-at-runtime" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 14.0%" />
+<col style="width: 18.0%" />
+<col style="width: 18.0%" />
+<col style="width: 18.0%" />
+<col style="width: 32.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model</p></th>
+<th class="head"><p>Vision</p></th>
+<th class="head"><p>Language</p></th>
+<th class="head"><p>Action context</p></th>
+<th class="head"><p>Action handoff</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>GR00T</p></td>
+<td><p>VitRunner</p></td>
+<td><p>prefill → <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ActionContextRunner</span></code> → <code class="docutils literal notranslate"><span class="pre">vl_embs</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">context_embs</span></code> denoising (GR00T buckets)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Pi0.5</p></td>
+<td><p>VitRunner</p></td>
+<td><p>prefill → <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code></p></td>
+<td><p><em>(none)</em></p></td>
+<td><p>Pi0.5 velocity expert (<code class="docutils literal notranslate"><span class="pre">pi05_prefix_kv</span></code>)</p></td>
+</tr>
+<tr class="row-even"><td><p>SmolVLA</p></td>
+<td><p>VitRunner</p></td>
+<td><p>prefill → <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code></p></td>
+<td><p><em>(none)</em></p></td>
+<td><p>SmolVLA expert (same binding layout as Pi0.5)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>GR00T is the only model here with a separate <code class="docutils literal notranslate"><span class="pre">action_context</span></code> engine. Pi0.5 and
+SmolVLA wire language prefix KV directly into the action engine
+(<code class="docutils literal notranslate"><span class="pre">runPi05VelocityAction</span></code> in <code class="docutils literal notranslate"><span class="pre">llmInferenceRuntime.cpp</span></code>).</p>
+</section>
+<section id="request-json-format">
+<h2>Request JSON format<a class="headerlink" href="#request-json-format" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">llm_inference</span></code> reads a batch of chat-style requests. For VLA smoke tests, each
+request needs images plus task text. GR00T also accepts <code class="docutils literal notranslate"><span class="pre">embodiment_id</span></code> on the
+batch root.</p>
+<p><strong>GR00T</strong> (two cameras, task string, embodiment id):</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch_size&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;max_generate_length&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;embodiment_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">31</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;requests&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">    </span><span class="nt">&quot;messages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">      </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;image&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;image&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/path/to/camera_0.png&quot;</span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;image&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;image&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/path/to/camera_1.png&quot;</span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;[&#39;put the white mug on the left plate ...&#39;]&quot;</span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}]</span>
+<span class="w">  </span><span class="p">}]</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Pi0.5</strong> (three image slots for the default libero profile — two real cameras plus
+one padded empty camera; task + state in text):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Pi0.5 export uses 3 image masks → 3×256 + text tokens = static prefix 830</span>
+</pre></div>
+</div>
+<p><strong>SmolVLA</strong> (two 512×512 cameras; task text only in the runtime JSON — state is
+embedded in the exported prefix, not passed separately to <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code> today):</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;batch_size&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;max_generate_length&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;requests&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">    </span><span class="nt">&quot;messages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">      </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;image&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;image&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/path/to/camera_0.png&quot;</span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;image&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;image&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/path/to/camera_1.png&quot;</span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;put the white mug on the left plate ...\\n&quot;</span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}]</span>
+<span class="w">  </span><span class="p">}]</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>The C++ runtime formats prompts using <code class="docutils literal notranslate"><span class="pre">processed_chat_template.json</span></code>. Image
+content items become <code class="docutils literal notranslate"><span class="pre">&lt;image&gt;</span></code> placeholders (see <code class="docutils literal notranslate"><span class="pre">content_types.image.format</span></code>),
+which VitRunner expands to <code class="docutils literal notranslate"><span class="pre">builder_config.seq_len</span></code> embedding rows per image.</p>
+</section>
+<section id="export-contract-checklist">
+<h2>Export contract checklist<a class="headerlink" href="#export-contract-checklist" title="Link to this heading">#</a></h2>
+<p>These are the fields that <strong>must</strong> be correct for <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code> to load and run.
+See <a class="reference internal" href="bindings.html"><span class="doc">Binding Contract: config.json to GPU Memory</span></a> for the full binding-name reference.</p>
+<section id="language-language-config-json">
+<h3>Language (<code class="docutils literal notranslate"><span class="pre">language/config.json</span></code>)<a class="headerlink" href="#language-language-config-json" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">builder_config</span></code> with <code class="docutils literal notranslate"><span class="pre">max_input_len</span></code>, <code class="docutils literal notranslate"><span class="pre">max_kv_cache_capacity</span></code>, <code class="docutils literal notranslate"><span class="pre">max_batch_size</span></code>
+— written by <code class="xref py py-func docutils literal notranslate"><span class="pre">language_edge_llm_config()</span></code> (<code class="docutils literal notranslate"><span class="pre">trt/language.py</span></code>).</p></li>
+<li><p>Static prefill engines use <code class="xref py py-func docutils literal notranslate"><span class="pre">make_language_edge_input_specs()</span></code> with
+<code class="docutils literal notranslate"><span class="pre">static_prefill_seq_len=True</span></code> so the TRT profile matches the traced prefix length.</p></li>
+<li><p>Sidecars in <code class="docutils literal notranslate"><span class="pre">language/</span></code>: <code class="docutils literal notranslate"><span class="pre">embedding.safetensors</span></code>, HF tokenizer files,
+<code class="docutils literal notranslate"><span class="pre">processed_chat_template.json</span></code>.</p></li>
+<li><p>Optional outputs drive the action path:
+<code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> (Pi0.5, SmolVLA) or <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> + separate
+<code class="docutils literal notranslate"><span class="pre">action_context</span></code> (GR00T).</p></li>
+</ul>
+</section>
+<section id="vision-visual-config-json">
+<h3>Vision (<code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code>)<a class="headerlink" href="#vision-visual-config-json" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">model_type</span></code> must be <code class="docutils literal notranslate"><span class="pre">vit</span></code> (not <code class="docutils literal notranslate"><span class="pre">visual</span></code>) so <code class="docutils literal notranslate"><span class="pre">MultimodalRunner</span></code> loads
+<code class="docutils literal notranslate"><span class="pre">VitRunner</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">builder_config.seq_len</span></code> = <strong>connector output tokens per image</strong> (e.g. 256 for
+GR00T/Pi0.5, 64 for SmolVLA), not the raw SigLIP patch count.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">image_token_id</span></code> must match the token that <code class="docutils literal notranslate"><span class="pre">&lt;image&gt;</span></code> (or GR00T’s
+<code class="docutils literal notranslate"><span class="pre">IMG_CONTEXT</span></code>) encodes to in the C++ tokenizer.</p></li>
+<li><p>Engine input <code class="docutils literal notranslate"><span class="pre">pixel_values</span></code> is traced as <strong>HWC</strong> <code class="docutils literal notranslate"><span class="pre">[N,</span> <span class="pre">H,</span> <span class="pre">W,</span> <span class="pre">3]</span></code>; export calls
+<code class="docutils literal notranslate"><span class="pre">nchw_to_hwc</span></code> before <code class="docutils literal notranslate"><span class="pre">save_trt_engine_module</span></code>.</p></li>
+</ul>
+</section>
+<section id="action-action-config-json">
+<h3>Action (<code class="docutils literal notranslate"><span class="pre">action/config.json</span></code>)<a class="headerlink" href="#action-action-config-json" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p>Pi0.5 / SmolVLA: <code class="docutils literal notranslate"><span class="pre">lm_to_action_slots</span></code> maps language outputs
+<code class="docutils literal notranslate"><span class="pre">[1,2]</span> <span class="pre">→</span> <span class="pre">[2,3]</span></code> (<code class="docutils literal notranslate"><span class="pre">prefix_k</span></code>, <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">attention_mask</span></code> must be <strong>float32</strong> for the C++ <code class="docutils literal notranslate"><span class="pre">ActionRunner</span></code> suffix builder
+(<code class="docutils literal notranslate"><span class="pre">preparePi05SuffixInputs</span></code> writes <code class="docutils literal notranslate"><span class="pre">0.0</span></code> / large negative mask values). Export
+converts bool masks to float before tracing; the SmolVLA step encoder converts
+back to bool inside the graph.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">prefix_seq_len</span></code> must equal the language engine’s <code class="docutils literal notranslate"><span class="pre">max_input_len</span></code>.</p></li>
+</ul>
+</section>
+</section>
+<section id="tokenization-and-prefix-length-parity">
+<h2>Tokenization and prefix length parity<a class="headerlink" href="#tokenization-and-prefix-length-parity" title="Link to this heading">#</a></h2>
+<p>The language engine is exported at a <strong>fixed</strong> prefix length. The C++ runtime must
+produce exactly that many tokens after VitRunner image expansion, or prefill fails
+with a shape mismatch on <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 12.0%" />
+<col style="width: 14.0%" />
+<col style="width: 14.0%" />
+<col style="width: 60.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model</p></th>
+<th class="head"><p>Export seq</p></th>
+<th class="head"><p>Runtime path</p></th>
+<th class="head"><p>Parity notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>GR00T</p></td>
+<td><p>555 (libero default)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">groot_edge_chat_template</span></code> + VitRunner expand</p></td>
+<td><p>Export uses <code class="xref py py-func docutils literal notranslate"><span class="pre">retokenize_groot_for_edge_llm()</span></code> so Python matches C++
+(Eagle processor alone produces a longer sequence). Helpers live in
+<code class="docutils literal notranslate"><span class="pre">trt/tokenizer.py</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Pi0.5</p></td>
+<td><p>830</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pi05_compact_prefix</span></code> template</p></td>
+<td><p>C++ Paligemma tokenizer can differ slightly from Python; smoke prompts may
+need tuning to hit the static length. Three image slots × 256 + text.</p></td>
+</tr>
+<tr class="row-even"><td><p>SmolVLA</p></td>
+<td><p>151</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">smolvla_compact_prefix</span></code> template</p></td>
+<td><p>Prefix = 2×64 image + language + <strong>state</strong> token. Runtime JSON only supplies
+images + text, so the text portion may need one extra token vs the natural
+task string to match 151.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Expanded image token IDs (<code class="docutils literal notranslate"><span class="pre">&gt;=</span> <span class="pre">vocab_size</span></code>) are valid in the C++ path: VitRunner
+assigns placeholder IDs starting at <code class="docutils literal notranslate"><span class="pre">vocab_size</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">embeddingLookupWithImageInsertion</span></code> splices vision rows without a table lookup.
+Python export preprocess must treat those positions the same way (mask
+<code class="docutils literal notranslate"><span class="pre">flat_ids</span> <span class="pre">&gt;=</span> <span class="pre">vocab_size</span></code> when building <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>).</p>
+</section>
+<section id="common-failures">
+<h2>Common failures<a class="headerlink" href="#common-failures" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 38.0%" />
+<col style="width: 62.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Symptom</p></th>
+<th class="head"><p>Likely cause / fix</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Missing</span> <span class="pre">required</span> <span class="pre">field</span> <span class="pre">'builder_config'</span> <span class="pre">in</span> <span class="pre">builder_config</span></code></p></td>
+<td><p>Language export missing <code class="xref py py-func docutils literal notranslate"><span class="pre">language_edge_llm_config()</span></code>. Re-export with
+current <code class="docutils literal notranslate"><span class="pre">export/language.py</span></code> hooks.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Static</span> <span class="pre">dimension</span> <span class="pre">mismatch</span> <span class="pre">for</span> <span class="pre">inputs_embeds.</span> <span class="pre">Set</span> <span class="pre">[1,T_run,…],</span> <span class="pre">expected</span> <span class="pre">[1,T_eng,…]</span></code></p></td>
+<td><p>Tokenization parity: runtime <code class="docutils literal notranslate"><span class="pre">T_run</span></code> ≠ exported <code class="docutils literal notranslate"><span class="pre">max_input_len</span></code>. Align
+chat template, image count, and text (see table above).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">expanded</span> <span class="pre">image</span> <span class="pre">token</span> <span class="pre">count</span> <span class="pre">must</span> <span class="pre">match</span> <span class="pre">engine</span> <span class="pre">output</span> <span class="pre">rows</span></code></p></td>
+<td><p>Wrong <code class="docutils literal notranslate"><span class="pre">image_token_id</span></code> in <code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code> (e.g. SmolVLA needs
+<code class="docutils literal notranslate"><span class="pre">&lt;image&gt;</span></code> → 49190, not the fake wrapper token 49189).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">VitRunner:</span> <span class="pre">invalid</span> <span class="pre">model</span> <span class="pre">type:</span> <span class="pre">visual</span></code></p></td>
+<td><p>Set <code class="docutils literal notranslate"><span class="pre">model_type:</span> <span class="pre">vit</span></code> and nest <code class="docutils literal notranslate"><span class="pre">seq_len</span></code> under <code class="docutils literal notranslate"><span class="pre">builder_config</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">unsupported</span> <span class="pre">tensor</span> <span class="pre">dtype</span> <span class="pre">for</span> <span class="pre">host</span> <span class="pre">fill:</span> <span class="pre">4</span></code> (bool)</p></td>
+<td><p>Action <code class="docutils literal notranslate"><span class="pre">attention_mask</span></code> exported as bool; use float32 mask for Pi0.5-style
+action engines.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Failed</span> <span class="pre">to</span> <span class="pre">wire</span> <span class="pre">static</span> <span class="pre">action</span> <span class="pre">inputs</span></code></p></td>
+<td><p>Often the bool mask issue above, or missing <code class="docutils literal notranslate"><span class="pre">prefix_seq_len</span></code> in action config.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="validated-smoke-paths">
+<h2>Validated smoke paths<a class="headerlink" href="#validated-smoke-paths" title="Link to this heading">#</a></h2>
+<p>After a successful export + <code class="docutils literal notranslate"><span class="pre">llm_inference</span></code> run:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 14.0%" />
+<col style="width: 36.0%" />
+<col style="width: 50.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model</p></th>
+<th class="head"><p>Input</p></th>
+<th class="head"><p>Output</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>GR00T</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/groot_edge_llm/runtime_smoke/input_action.json</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/groot_edge_llm/runtime_smoke/output_e2e.json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Pi0.5</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/pi05_edge_llm/runtime_smoke/input_action.json</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/pi05_edge_llm/runtime_smoke/output_e2e.json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>SmolVLA</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/smolvla_edge_llm/runtime_smoke/input_action.json</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">/tmp/smolvla_edge_llm/runtime_smoke/output_e2e.json</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Example successful prefill metrics (single libero frame, <code class="docutils literal notranslate"><span class="pre">max_generate_length=0</span></code>):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 14.0%" />
+<col style="width: 16.0%" />
+<col style="width: 16.0%" />
+<col style="width: 16.0%" />
+<col style="width: 16.0%" />
+<col style="width: 22.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model</p></th>
+<th class="head"><p>Prefill tokens</p></th>
+<th class="head"><p>Images</p></th>
+<th class="head"><p>Image tokens</p></th>
+<th class="head"><p>Diffusor</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>GR00T</p></td>
+<td><p>555</p></td>
+<td><p>2</p></td>
+<td><p>512</p></td>
+<td><p>~113 ms</p></td>
+<td><p>4 engines, <code class="docutils literal notranslate"><span class="pre">action_context</span></code> path</p></td>
+</tr>
+<tr class="row-odd"><td><p>Pi0.5</p></td>
+<td><p>830</p></td>
+<td><p>3</p></td>
+<td><p>768</p></td>
+<td><p>~29 ms</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> handoff</p></td>
+</tr>
+<tr class="row-even"><td><p>SmolVLA</p></td>
+<td><p>151</p></td>
+<td><p>2</p></td>
+<td><p>128</p></td>
+<td><p>~13 ms</p></td>
+<td><p>64 tokens/image; state in prefix</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="further-reading">
+<h2>Further reading<a class="headerlink" href="#further-reading" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="overview.html"><span class="doc">Edge LLM Runtime Overview</span></a> — how <code class="docutils literal notranslate"><span class="pre">engineDir</span></code> and <code class="docutils literal notranslate"><span class="pre">multimodalEngineDir</span></code> map to runners</p></li>
+<li><p><a class="reference internal" href="runners.html"><span class="doc">Runners and the Request Flow</span></a> — <code class="docutils literal notranslate"><span class="pre">handleRequest</span></code> order and handoff modes</p></li>
+<li><p><a class="reference internal" href="bindings.html"><span class="doc">Binding Contract: config.json to GPU Memory</span></a> — <code class="docutils literal notranslate"><span class="pre">config.json</span></code> fields and GPU allocation</p></li>
+<li><p><a class="reference internal" href="../examples/gr00t.html"><span class="doc">GR00T Export Pipeline Example</span></a> — GR00T export pipeline and tensor contract</p></li>
+<li><p><a class="reference internal" href="../examples/pi05.html"><span class="doc">Pi0.5 Export Pipeline Example</span></a> — Pi0.5 three-stage layout</p></li>
+<li><p><a class="reference internal" href="../examples/smolvla.html"><span class="doc">SmolVLA Export Pipeline Example</span></a> — SmolVLA three-stage layout</p></li>
+</ul>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="overview.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Edge LLM Runtime Overview</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="runners.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Runners and the Request Flow</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+
+
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-1-export-engines">Step 1 — Export engines</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-2-run-c-inference">Step 2 — Run C++ inference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#model-layout-at-runtime">Model layout at runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#request-json-format">Request JSON format</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#export-contract-checklist">Export contract checklist</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#language-language-config-json">Language (<code class="docutils literal notranslate"><span class="pre">language/config.json</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#vision-visual-config-json">Vision (<code class="docutils literal notranslate"><span class="pre">visual/config.json</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#action-action-config-json">Action (<code class="docutils literal notranslate"><span class="pre">action/config.json</span></code>)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tokenization-and-prefix-length-parity">Tokenization and prefix length parity</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#common-failures">Common failures</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#validated-smoke-paths">Validated smoke paths</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#further-reading">Further reading</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5"></script>
+
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+<a class="footer-brand logo" href="https://www.nvidia.com">
+  <img src="../_static/nvidia-logo-horiz-rgb-1c-blk-for-screen.svg" class="logo__image only-light" alt="NVIDIA"/>
+  <img src="../_static/nvidia-logo-horiz-rgb-1c-wht-for-screen.svg" class="logo__image only-dark" alt="NVIDIA"/>
+</a></div>
+      
+        <div class="footer-item">
+
+<div class="footer-links">
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-policy/">Privacy Policy</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-center/">Your Privacy Choices</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/terms-of-service/">Terms of Service</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/accessibility/">Accessibility</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/company-policies/">Corporate Policies</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/product-security/">Product Security</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/contact/">Contact</a>
+  
+  
+  
+</div>
+</div>
+      
+        <div class="footer-item">
+
+
+
+
+  <p class="copyright">
+    
+      Copyright © 2025, Nvidia.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+<div class="extra_footer">
+  
+  <p>Last updated on July 09, 2026.</p>
+  
+</div></div>
+      
+    </div>
+  
+  
+  
+</div>
+
+  </footer>
+  </body>
+</html>
