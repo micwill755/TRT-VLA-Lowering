@@ -352,6 +352,20 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../examples/gr00t.html">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
@@ -608,7 +622,7 @@ stage <code class="docutils literal notranslate"><span class="pre">input_sources
 <tr class="row-odd"><td><p>Sample data</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">trt/data.py</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">load_test_data</span></code>, <code class="docutils literal notranslate"><span class="pre">prepare_model_inputs</span></code>, model-specific packers
-(e.g. <code class="docutils literal notranslate"><span class="pre">pack_groot_language_inputs</span></code> in <code class="docutils literal notranslate"><span class="pre">trt/packing.py</span></code>).</p></td>
+(e.g. language embedding splice in export/inference hooks).</p></td>
 </tr>
 <tr class="row-even"><td><p>IO contract</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">trt/io_spec.py</span></code></p></td>
@@ -977,17 +991,13 @@ directly into the action engine; see <code class="docutils literal notranslate">
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>Benchmark stages</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/pipeline.py</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">BenchmarkStageConfig(name,</span> <span class="pre">enabled,</span> <span class="pre">run)</span></code> per execution mode.</p></td>
+<tr class="row-even"><td><p>Benchmark</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/pipelines/benchmark.py</span></code></p></td>
+<td><p>Runs <code class="docutils literal notranslate"><span class="pre">InferencePipeline</span></code> per <code class="docutils literal notranslate"><span class="pre">ExecutionMode</span></code>; collects stage tensors.</p></td>
 </tr>
-<tr class="row-odd"><td><p>Inference dispatch</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/executor/benchmark/run.py</span></code></p></td>
-<td><p>Sets <code class="docutils literal notranslate"><span class="pre">ctx.execution_mode</span></code>, runs <code class="docutils literal notranslate"><span class="pre">InferencePipeline</span></code>.</p></td>
-</tr>
-<tr class="row-even"><td><p>Parity metrics</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">trt/measure.py</span></code>, <code class="docutils literal notranslate"><span class="pre">report_*</span></code> in <code class="docutils literal notranslate"><span class="pre">benchmark/run.py</span></code></p></td>
-<td><p>Action ADE, per-tensor <code class="docutils literal notranslate"><span class="pre">tensor_parity_metrics</span></code>, optional staged checks.</p></td>
+<tr class="row-odd"><td><p>Parity metrics</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trt/measure.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">parity_metrics</span></code>, <code class="docutils literal notranslate"><span class="pre">report_stage_parity</span></code> tables per stage.</p></td>
 </tr>
 </tbody>
 </table>
@@ -1195,7 +1205,7 @@ upstream reference for vision + language + action engine layout</p></li>
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 07, 2026.</p>
+  <p>Last updated on July 09, 2026.</p>
   
 </div></div>
       

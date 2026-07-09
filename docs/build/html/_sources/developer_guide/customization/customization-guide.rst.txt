@@ -145,7 +145,7 @@ Profiles own **HuggingFace / LeRobot setup** and **compile sample inputs**.
    * - Sample data
      - ``trt/data.py``
      - ``load_test_data``, ``prepare_model_inputs``, model-specific packers
-       (e.g. ``pack_groot_language_inputs`` in ``trt/packing.py``).
+       (e.g. language embedding splice in export/inference hooks).
    * - IO contract
      - ``trt/io_spec.py``
      - ``PipelineIOSpec`` / ``GROOT_EDGE_IO``: TRT binding names, slot wiring
@@ -437,15 +437,12 @@ Benchmark Customization Points
    * - Area
      - Files
      - What to update
-   * - Benchmark stages
-     - ``trt/executor/benchmark/pipeline.py``
-     - ``BenchmarkStageConfig(name, enabled, run)`` per execution mode.
-   * - Inference dispatch
-     - ``trt/executor/benchmark/run.py``
-     - Sets ``ctx.execution_mode``, runs ``InferencePipeline``.
+   * - Benchmark
+     - ``trt/pipelines/benchmark.py``
+     - Runs ``InferencePipeline`` per ``ExecutionMode``; collects stage tensors.
    * - Parity metrics
-     - ``trt/measure.py``, ``report_*`` in ``benchmark/run.py``
-     - Action ADE, per-tensor ``tensor_parity_metrics``, optional staged checks.
+     - ``trt/measure.py``
+     - ``parity_metrics``, ``report_stage_parity`` tables per stage.
 
 
 Environment And Prerequisites

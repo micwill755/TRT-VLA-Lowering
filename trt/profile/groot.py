@@ -13,7 +13,7 @@ from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.utils.constants import ACTION, OBS_STATE
 from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 
-from trt.data import create_pil_messages, prepare_model_inputs
+from trt.data import create_pil_messages, prepare_model_inputs, retokenize_groot_for_edge_llm
 from trt.profile import VLAProfile
 from trt.utils import force_hf_attention
 
@@ -80,7 +80,7 @@ class GrootProfile(VLAProfile):
         args: argparse.Namespace,
     ) -> dict[str, Any]:
         pil_messages = create_pil_messages(data)
-        return prepare_model_inputs(
+        model_inputs = prepare_model_inputs(
             self.eagle_processor,
             self.eagle_processor.process_vision_info,
             {"add_generation_prompt": True},
@@ -94,4 +94,16 @@ class GrootProfile(VLAProfile):
             data,
             pil_messages,
             self.device,
+        )
+        eagle = self.model.backbone.eagle_model
+        image_token_id = int(
+            getattr(eagle, "image_token_index", eagle.config.image_token_index)
+        )
+        return retokenize_groot_for_edge_llm(
+            model_inputs,
+            messages=pil_messages,
+            tokenizer=self.text_tok,
+            image_token_id=image_token_id,
+            seq_len_per_image=256,
+            im_end=getattr(self.text_tok, "eos_token", "") or "",
         )

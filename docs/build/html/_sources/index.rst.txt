@@ -18,6 +18,18 @@ inference, and benchmark orchestration for VLA models on top of
    :caption: Examples
 
    examples/gr00t
+   examples/pi05
+   examples/smolvla
+   examples/molmo2
+   examples/alpamayo
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Edge LLM
+
+   edge_llm/overview
+   edge_llm/runners
+   edge_llm/bindings
 
 .. toctree::
    :maxdepth: 2

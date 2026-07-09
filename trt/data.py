@@ -20,6 +20,7 @@ from lerobot.policies.factory import make_pre_post_processors
 from lerobot.utils.constants import OBS_STATE
 
 from trt import helper
+from trt.tokenizer import edge_llm_tokenize_messages, groot_edge_chat_template
 
 # Camera keys read from a LeRobot dataset frame (libero provides image + image2).
 IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
@@ -160,8 +161,39 @@ def prepare_model_inputs(
         "task": data["task"],
     }
 
-    # TODO: remove this function
     return helper.to_device(model_inputs, device)
+
+
+def retokenize_groot_for_edge_llm(
+    model_inputs: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    tokenizer: Any,
+    image_token_id: int,
+    seq_len_per_image: int,
+    im_end: str = "",
+) -> dict[str, Any]:
+    """Replace Eagle ``input_ids`` with VitRunner-compatible tokenization for export/runtime parity."""
+    chat_template = groot_edge_chat_template(
+        image_token_id=image_token_id,
+        seq_len_per_image=seq_len_per_image,
+        im_end=im_end,
+    )
+    input_ids = edge_llm_tokenize_messages(
+        tokenizer,
+        messages,
+        chat_template,
+        apply_chat_template=True,
+        add_generation_prompt=True,
+    )
+    tokenized_data = dict(model_inputs["tokenized_data"])
+    tokenized_data["input_ids"] = torch.tensor([input_ids], dtype=torch.long)
+    tokenized_data["attention_mask"] = torch.ones(
+        1,
+        len(input_ids),
+        dtype=torch.long,
+    )
+    return {**model_inputs, "tokenized_data": tokenized_data}
 
 def pack_state(
     state: torch.Tensor,

@@ -12,19 +12,19 @@ The following models are supported (or in progress) in Torch-TRT pipelines.
      - Notes
    * - :doc:`models/gr00t`
      - ``gr00t``, ``groot``
-     - Export, load, inference, benchmark
+     - Export, inference, benchmark via ``app.py``; see :doc:`../../examples/gr00t`
    * - :doc:`models/pi05`
      - ``pi05``
-     - Load registered; export varies by release
-   * - :doc:`models/molmo2`
-     - ``molmo2``
-     - Export and inference
+     - Export, inference, benchmark via ``app.py``; see :doc:`../../examples/pi05`
    * - :doc:`models/smolvla`
      - ``smolvla``
-     - Load registered
+     - Export, inference, benchmark via ``app.py``; see :doc:`../../examples/smolvla`
+   * - :doc:`models/molmo2`
+     - ``molmo2``
+     - E2E parity via ``test_vla_molmo2_e2e.py``; see :doc:`../../examples/molmo2`
    * - :doc:`models/alpamayo`
      - ``alpamayo``
-     - VLA pipeline (Edge-LLM layout)
+     - E2E parity via ``test_vla_alpamayo_e2e.py``; see :doc:`../../examples/alpamayo`
 
 .. toctree::
    :maxdepth: 1

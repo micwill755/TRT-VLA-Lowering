@@ -5,6 +5,31 @@ This example shows how GR00T wraps a vision-language-action model as a set of
 TensorRT engines and how the export, load, and inference pipelines sit above the
 runtime layer. Use it as the template when adding another engine-backed model.
 
+Quick start
+-----------
+
+.. code-block:: bash
+
+   export EDGE_LLM_PLUGIN_SO=/path/to/libNvInfer_edgellm_plugin.so
+
+   # Export + benchmark (default)
+   python app.py --model gr00t --device cuda --engine-dir /tmp/groot_edge_llm
+
+   # Export only
+   python app.py --model gr00t --export-only --device cuda --engine-dir /tmp/groot_edge_llm
+
+   # Benchmark only (requires prior export)
+   python app.py --model gr00t --benchmark-only --device cuda --engine-dir /tmp/groot_edge_llm
+
+   # Eager inference only
+   python app.py --model gr00t --inference-only --device cuda
+
+For per-module TRT compile and timing without the full orchestrator:
+
+.. code-block:: bash
+
+   python test_vla_gr00t_e2e.py
+
 At a high level, the orchestrator owns the live model, policy, device, sample inputs,
 and engine directory. The pipeline layer adapts that state into ordered export
 stages, writes engines, and drives inference and benchmark through the same

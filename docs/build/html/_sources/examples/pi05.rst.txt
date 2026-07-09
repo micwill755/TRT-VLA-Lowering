@@ -1,0 +1,100 @@
+Pi0.5 Export Pipeline Example
+===============================
+
+Physical Intelligence **Pi0.5** uses a three-stage Edge-LLM layout: vision, language,
+and action. Unlike GR00T, the action head consumes language hidden states directly
+(there is no separate ``action_context`` engine).
+
+Quick start
+-----------
+
+From the project root:
+
+.. code-block:: bash
+
+   cd /path/to/Test
+   export EDGE_LLM_PLUGIN_SO=/path/to/libNvInfer_edgellm_plugin.so
+
+Export and benchmark in one command:
+
+.. code-block:: bash
+
+   python app.py --model pi05 --device cuda --engine-dir /tmp/pi05_edge_llm
+
+Export and benchmark separately:
+
+.. code-block:: bash
+
+   python app.py --model pi05 --export-only --device cuda --engine-dir /tmp/pi05_edge_llm
+   python app.py --model pi05 --benchmark-only --device cuda --engine-dir /tmp/pi05_edge_llm
+
+Eager inference only:
+
+.. code-block:: bash
+
+   python app.py --model pi05 --inference-only --device cuda
+
+Default checkpoint: ``lerobot/pi05_libero``. Override with ``--model-id``.
+
+Pipeline stages
+---------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 12 20 24 44
+
+   * - Stage
+     - Engine directory
+     - Inputs from
+     - Responsibility
+   * - ``0``
+     - ``visual``
+     - Runtime inputs
+     - PaliGemma vision tower → image embeddings.
+   * - ``1``
+     - ``language``
+     - Stage ``0``
+     - Prefill with visual embeddings; emits LM hidden state and KV cache.
+   * - ``2``
+     - ``action``
+     - Stage ``1``
+     - Flow-matching denoising loop → robot actions (``final_output``).
+
+.. mermaid::
+
+   graph LR
+       IN["runtime sample"]
+       V["0 visual"]
+       L["1 language"]
+       A["2 action"]
+       OUT["actions"]
+
+       IN --> V --> L --> A --> OUT
+
+Engine layout
+-------------
+
+After export:
+
+.. code-block:: text
+
+   /tmp/pi05_edge_llm/
+     visual/visual.engine
+     language/language.engine
+       config.json
+       embedding.safetensors
+       tokenizer artifacts
+     action/action.engine
+
+Stage parity script
+-------------------
+
+For per-module TRT compile and timing without the full orchestrator, run:
+
+.. code-block:: bash
+
+   python test_vla_pi05_e2e.py
+
+*Files:* ``trt/profile/pi05.py``,
+``trt/executor/models/pi05/export/pipeline.py``,
+``trt/executor/models/pi05/inference/pipeline.py``

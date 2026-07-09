@@ -229,6 +229,10 @@
   
 
   
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
 </div>
 
     </header>
@@ -349,6 +353,20 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../../examples/gr00t.html">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../examples/pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../examples/smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../examples/molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../examples/alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
@@ -442,11 +460,28 @@
   <section id="pi0-5">
 <h1>Pi0.5<a class="headerlink" href="#pi0-5" title="Link to this heading">#</a></h1>
 <p><strong>Alias:</strong> <code class="docutils literal notranslate"><span class="pre">pi05</span></code></p>
-<p>Physical Intelligence pi0.5 policy pipeline (load path registered; export/inference
-coverage varies by release).</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>pi05
+<p>Physical Intelligence pi0.5 policy pipeline with three Edge-LLM engines
+(vision, language, action).</p>
+<section id="quick-start">
+<h2>Quick start<a class="headerlink" href="#quick-start" title="Link to this heading">#</a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">EDGE_LLM_PLUGIN_SO</span><span class="o">=</span>/path/to/libNvInfer_edgellm_plugin.so
+
+<span class="c1"># Export + benchmark (default)</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>pi05<span class="w"> </span>--device<span class="w"> </span>cuda<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/pi05_edge_llm
+
+<span class="c1"># Export only</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>pi05<span class="w"> </span>--export-only<span class="w"> </span>--device<span class="w"> </span>cuda<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/pi05_edge_llm
+
+<span class="c1"># Benchmark only (requires prior export)</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>pi05<span class="w"> </span>--benchmark-only<span class="w"> </span>--device<span class="w"> </span>cuda<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/pi05_edge_llm
+
+<span class="c1"># Eager inference only</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>pi05<span class="w"> </span>--inference-only<span class="w"> </span>--device<span class="w"> </span>cuda
 </pre></div>
 </div>
+<p>Default checkpoint: <code class="docutils literal notranslate"><span class="pre">lerobot/pi05_libero</span></code>. See <a class="reference internal" href="../../../examples/pi05.html"><span class="doc">Pi0.5 Export Pipeline Example</span></a> for
+stage details and the e2e parity script.</p>
+</section>
 </section>
 
 
@@ -484,9 +519,25 @@ coverage varies by release).</p>
             
             
 
-<div class="bd-sidebar-secondary"></div>
+
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
 
 
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-start">Quick start</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
               
             
 
@@ -574,7 +625,7 @@ coverage varies by release).</p>
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 07, 2026.</p>
+  <p>Last updated on July 09, 2026.</p>
   
 </div></div>
       

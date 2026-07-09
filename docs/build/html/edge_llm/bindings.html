@@ -1,0 +1,1312 @@
+
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Binding Contract: config.json to GPU Memory &#8212; Torch-TRT pipelines</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=a95f357e85573c9b56d5" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/nvidia-sphinx-theme.css?v=933278ad" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=3ad11fa9" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=a95f357e85573c9b56d5"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5" />
+
+
+
+    <script src="../_static/documentation_options.js?v=c6e86fd7"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=18b33a23"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+    <script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.12.1/dist/mermaid.esm.min.mjs";
+
+
+
+
+
+const initStyles = () => {
+    const defaultStyle = document.createElement('style');
+    defaultStyle.textContent = `pre.mermaid {
+    /* Same as .mermaid-container > pre */
+    display: block;
+    width: 100%;
+}
+
+pre.mermaid > svg {
+    /* Same as .mermaid-container > pre > svg */
+    height: 500px;
+    width: 100%;
+    max-width: 100% !important;
+}`;
+    document.head.appendChild(defaultStyle);
+
+    const fullscreenStyle = document.createElement('style');
+    fullscreenStyle.textContent = `.mermaid-container {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+}
+
+.mermaid-container > pre {
+    display: block;
+    width: 100%;
+}
+
+.mermaid-container > pre > svg {
+    height: 500px;
+    width: 100%;
+    max-width: 100% !important;
+}
+
+.mermaid-fullscreen-btn {
+    width: 28px;
+    height: 28px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    color: #333;
+}
+
+.mermaid-fullscreen-btn:hover {
+    opacity: 100% !important;
+    background: rgba(255, 255, 255, 1);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+    transform: scale(1.1);
+}
+
+.mermaid-fullscreen-btn.dark-theme {
+    background: rgba(50, 50, 50, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #e0e0e0;
+}
+
+.mermaid-fullscreen-btn.dark-theme:hover {
+    background: rgba(60, 60, 60, 1);
+    box-shadow: 0 3px 10px rgba(255, 255, 255, 0.2);
+}
+
+.mermaid-fullscreen-modal {
+    display: none;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 95vw;
+    height: 100vh;
+    background: rgba(255, 255, 255, 0.98);
+    z-index: 9999;
+    padding: 20px;
+    overflow: auto;
+}
+
+.mermaid-fullscreen-modal.dark-theme {
+    background: rgba(0, 0, 0, 0.98);
+}
+
+.mermaid-fullscreen-modal.active {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mermaid-container-fullscreen {
+    position: relative;
+    width: 95vw;
+    height: 90vh;
+    max-width: 95vw;
+    max-height: 90vh;
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    overflow: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mermaid-container-fullscreen.dark-theme {
+    background: #1a1a1a;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8);
+}
+
+.mermaid-container-fullscreen pre.mermaid {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mermaid-container-fullscreen .mermaid svg {
+    height: 100% !important;
+    width: 100% !important;
+    cursor: grab;
+}
+
+.mermaid-fullscreen-close {
+    position: fixed !important;
+    top: 20px !important;
+    right: 20px !important;
+    width: 40px;
+    height: 40px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    border-radius: 50%;
+    cursor: pointer;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transition: all 0.2s;
+    font-size: 24px;
+    line-height: 1;
+    color: #333;
+}
+
+.mermaid-fullscreen-close:hover {
+    background: white;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+    transform: scale(1.1);
+}
+
+.mermaid-fullscreen-close.dark-theme {
+    background: rgba(50, 50, 50, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #e0e0e0;
+}
+
+.mermaid-fullscreen-close.dark-theme:hover {
+    background: rgba(60, 60, 60, 1);
+    box-shadow: 0 6px 16px rgba(255, 255, 255, 0.2);
+}
+
+.mermaid-fullscreen-modal .mermaid-fullscreen-btn {
+    display: none !important;
+}`;
+    document.head.appendChild(fullscreenStyle);
+}
+
+// Detect if page has dark background
+const isDarkTheme = () => {
+    // We use a set of heuristics:
+    // 1. Check for common dark mode classes or attributes
+    // 2. Check computed background color brightness
+    if (document.documentElement.classList.contains('dark') ||
+        document.documentElement.getAttribute('data-theme') === 'dark' ||
+        document.body.classList.contains('dark') ||
+        document.body.getAttribute('data-theme') === 'dark') {
+        // console.log("Dark theme detected via class/attribute");
+        return true;
+    }
+    if (document.documentElement.classList.contains('light') ||
+        document.documentElement.getAttribute('data-theme') === 'light' ||
+        document.body.classList.contains('light') ||
+        document.body.getAttribute('data-theme') === 'light') {
+        // console.log("Light theme detected via class/attribute");
+        return false;
+    }
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        // console.log("Dark theme detected via prefers-color-scheme");
+        return true;
+    }
+    const bgColor = window.getComputedStyle(document.body).backgroundColor;
+    const match = bgColor.match(/rgb\((\d+),\s*(\d+),\s*(\d+)/);
+    if (match) {
+        const r = parseInt(match[1]);
+        const g = parseInt(match[2]);
+        const b = parseInt(match[3]);
+        const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+        // console.log("Background color brightness:", brightness);
+        return brightness < 128;
+    }
+    // console.log("No dark or light theme detected, defaulting to light theme");
+    return false;
+};
+
+let darkTheme = isDarkTheme();
+let modal = null;
+let modalContent = null;
+let previousScrollOffset = [window.scrollX, window.scrollY];
+
+const runMermaid = async (rerun) => {
+    console.log("Running mermaid diagrams, rerun =", rerun);
+    // clear all existing mermaid charts
+    let all_mermaids = document.querySelectorAll(".mermaid");
+
+    if (rerun) {
+        all_mermaids.forEach((el) => {
+            if(!el.hasAttribute("data-original-code")) {
+                // store original code
+                // console.log(`Storing original code for first run: `, el.innerHTML);
+                el.setAttribute('data-original-code', el.innerHTML);
+            }
+            if(el.getAttribute("data-processed") === "true") {
+                // remove and restore original
+                el.removeAttribute("data-processed");
+                // console.log(`Restoring original code for re-run: `, el.getAttribute('data-original-code'));
+                el.innerHTML = el.getAttribute('data-original-code');
+            } else {
+                // store original code
+                // console.log(`Storing original code for re-run: `, el.innerHTML);
+                el.setAttribute('data-original-code', el.innerHTML);
+            }
+        });
+        await mermaid.run();
+    }
+
+    all_mermaids = document.querySelectorAll(".mermaid");
+    const mermaids_processed = document.querySelectorAll(".mermaid[data-processed='true']");
+
+    if ("False" === "True") {
+        const mermaids_to_add_zoom = -1 === -1 ? all_mermaids.length : -1;
+        if(mermaids_to_add_zoom > 0) {
+            var svgs = d3.selectAll("");
+            if(all_mermaids.length !== mermaids_processed.length) {
+                setTimeout(() => runMermaid(false), 200);
+                return;
+            } else if(svgs.size() !== mermaids_to_add_zoom) {
+                setTimeout(() => runMermaid(false), 200);
+                return;
+            } else {
+                svgs.each(function() {
+                    var svg = d3.select(this);
+                    svg.html("<g class='wrapper'>" + svg.html() + "</g>");
+                    var inner = svg.select("g");
+                    var zoom = d3.zoom().on("zoom", function(event) {
+                        inner.attr("transform", event.transform);
+                    });
+                    svg.call(zoom);
+                });
+            }
+        }
+    } else if(all_mermaids.length !== mermaids_processed.length) {
+        // Wait for mermaid to process all diagrams
+        setTimeout(() => runMermaid(false), 200);
+        return;
+    }
+
+    // Stop here if not adding fullscreen capability
+    if ("True" !== "True") return;
+
+    if (modal !== null ) {
+        // Destroy existing modal
+        modal.remove();
+        modal = null;
+        modalContent = null;
+    }
+
+    modal = document.createElement('div');
+    modal.className = 'mermaid-fullscreen-modal' + (darkTheme ? ' dark-theme' : '');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Fullscreen diagram viewer');
+    modal.innerHTML = `
+        <button class="mermaid-fullscreen-close${darkTheme ? ' dark-theme' : ''}" aria-label="Close fullscreen">✕</button>
+        <div class="mermaid-container-fullscreen${darkTheme ? ' dark-theme' : ''}"></div>
+    `;
+    document.body.appendChild(modal);
+
+    modalContent = modal.querySelector('.mermaid-container-fullscreen');
+    const closeBtn = modal.querySelector('.mermaid-fullscreen-close');
+
+    const closeModal = () => {
+        modal.classList.remove('active');
+        modalContent.innerHTML = '';
+        document.body.style.overflow = ''
+        window.scrollTo({left: previousScrollOffset[0], top: previousScrollOffset[1], behavior: 'instant'});
+    };
+
+    closeBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modal.classList.contains('active')) {
+            closeModal();
+        }
+    });
+
+    document.querySelectorAll('.mermaid').forEach((mermaidDiv) => {
+        if (mermaidDiv.parentNode.classList.contains('mermaid-container') ||
+            mermaidDiv.closest('.mermaid-fullscreen-modal')) {
+            // Already processed, adjust button class if needed
+            const existingBtn = mermaidDiv.parentNode.querySelector('.mermaid-fullscreen-btn');
+            if (existingBtn) {
+                existingBtn.className = 'mermaid-fullscreen-btn' + (darkTheme ? ' dark-theme' : '');
+            }
+            return;
+        }
+
+        const container = document.createElement('div');
+        container.className = 'mermaid-container';
+        mermaidDiv.parentNode.insertBefore(container, mermaidDiv);
+        container.appendChild(mermaidDiv);
+
+        const fullscreenBtn = document.createElement('button');
+        fullscreenBtn.className = 'mermaid-fullscreen-btn' + (darkTheme ? ' dark-theme' : '');
+        fullscreenBtn.setAttribute('aria-label', 'View diagram in fullscreen');
+        fullscreenBtn.textContent = '⛶';
+        fullscreenBtn.style.opacity = '50%';
+
+        // Calculate dynamic position based on diagram's margin and padding
+        const diagramStyle = window.getComputedStyle(mermaidDiv);
+        const marginTop = parseFloat(diagramStyle.marginTop) || 0;
+        const marginRight = parseFloat(diagramStyle.marginRight) || 0;
+        const paddingTop = parseFloat(diagramStyle.paddingTop) || 0;
+        const paddingRight = parseFloat(diagramStyle.paddingRight) || 0;
+        fullscreenBtn.style.top = `${marginTop + paddingTop + 4}px`;
+        fullscreenBtn.style.right = `${marginRight + paddingRight + 4}px`;
+
+        fullscreenBtn.addEventListener('click', () => {
+            previousScrollOffset = [window.scroll, window.scrollY];
+            const clone = mermaidDiv.cloneNode(true);
+            modalContent.innerHTML = '';
+            modalContent.appendChild(clone);
+
+            const svg = clone.querySelector('svg');
+            if (svg) {
+                svg.removeAttribute('width');
+                svg.removeAttribute('height');
+                svg.style.width = '100%';
+                svg.style.height = 'auto';
+                svg.style.maxWidth = '100%';
+                svg.style.sdisplay = 'block';
+
+                if ("False" === "True") {
+                    setTimeout(() => {
+                        const g = svg.querySelector('g');
+                        if (g) {
+                            var svgD3 = d3.select(svg);
+                            svgD3.html("<g class='wrapper'>" + svgD3.html() + "</g>");
+                            var inner = svgD3.select("g");
+                            var zoom = d3.zoom().on("zoom", function(event) {
+                                inner.attr("transform", event.transform);
+                            });
+                            svgD3.call(zoom);
+                        }
+                    }, 100);
+                }
+            }
+
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        });
+        container.appendChild(fullscreenBtn);
+    });
+};
+
+const load = async () => {
+    initStyles();
+
+    await runMermaid(true);
+
+    const reRunIfThemeChanges = async () => {
+        const newDarkTheme = isDarkTheme();
+        if (newDarkTheme !== darkTheme) {
+            darkTheme = newDarkTheme;
+            console.log("Theme change detected, re-running mermaid with", darkTheme ? "dark" : "default", "theme");
+            await mermaid.initialize(
+                {...JSON.parse(
+                    `{"startOnLoad": false}`
+                ),
+                ...{ darkMode: darkTheme, theme: darkTheme ? 'dark' : 'default' },
+                }
+            );
+            await runMermaid(true);
+        }
+    };
+
+    // Update theme classes when theme changes
+    const themeObserver = new MutationObserver(reRunIfThemeChanges);
+    themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'data-theme']
+    });
+    themeObserver.observe(document.body, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'data-theme']
+    });
+};
+
+
+
+
+
+console.log("Initializing mermaid with", darkTheme ? "dark" : "default", "theme");
+mermaid.initialize(
+    {...JSON.parse(
+        `{"startOnLoad": false}`
+    ),
+    ...{ darkMode: darkTheme, theme: darkTheme ? 'dark' : 'default' },
+    }
+);
+
+window.addEventListener("load", load);
+window.runMermaid = runMermaid;</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'edge_llm/bindings';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.19.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = '_static/switcher.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'latest';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            false;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+
+    <link rel="icon" href="../_static/favicon.png"/>
+
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Overview" href="../developer_guide/architecture/overview.html" />
+    <link rel="prev" title="Runners and the Request Flow" href="runners.html" />
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="latest" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+  
+
+
+  </head>
+
+  <body data-default-mode="">
+
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="Torch-TRT pipelines - Home"/>
+    <img src="../_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="Torch-TRT pipelines - Home"/>
+  
+  
+    <p class="title logo__title">Torch-TRT pipelines</p>
+  
+</a>
+
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-3"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-3"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-3"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-3">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+
+
+<nav class="bd-docs-nav bd-links"
+     aria-label="Table of Contents">
+  <p class="bd-links__title" role="heading" aria-level="1">Table of Contents</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/getting_started/overview.html">Overview</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../user_guide/getting_started/supported-models.html">Supported Models</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/gr00t.html">GR00T</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/pi05.html">Pi0.5</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/molmo2.html">Molmo2</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/smolvla.html">SmolVLA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../user_guide/getting_started/models/alpamayo.html">Alpamayo</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/getting_started/installation.html">Installation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../examples/gr00t.html">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="overview.html">Edge LLM Runtime Overview</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/pipelines-and-stages.html">Pipelines and Stages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/runners.html">Runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/hooks.html">Hooks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/export-pipeline.html">Export Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/inference-pipeline.html">Inference Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/load-pipeline.html">Engine Load (Serialized Inference)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/architecture/benchmark-pipeline.html">Benchmark Pipeline</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Plugins</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/overview.html">Plugins Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/architecture.html">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/registration.html">Plugin Registration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/custom-ops.html">Custom Ops</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/converters.html">Converters</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/attention-patching.html">Attention Patching</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/plugins/parity-and-debugging.html">Parity and Debugging</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Export Modules</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/overview.html">Export Modules Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/vision-example.html">GR00T Vision Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/language-example.html">GR00T Language Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/export_modules/action-context-example.html">GR00T Action Context Export Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/overview.html">Diffusion Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/components.html">Diffusion Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/groot-example.html">GR00T Diffusion Step Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/diffusion/action-rollout.html">Action Rollout</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Customization</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../developer_guide/customization/customization-guide.html">Customization Guide</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="overview.html" class="nav-link">Edge LLM Runtime Overview</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Binding Contract: config.json to GPU Memory</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="binding-contract-config-json-to-gpu-memory">
+<h1>Binding Contract: config.json to GPU Memory<a class="headerlink" href="#binding-contract-config-json-to-gpu-memory" title="Link to this heading">#</a></h1>
+<p>This is the exact mechanism the question is about: how the <code class="docutils literal notranslate"><span class="pre">config.json</span></code> written
+during export tells <code class="docutils literal notranslate"><span class="pre">LLMInferenceRuntime</span></code> what GPU tensors to allocate and which
+engine bindings to attach them to.</p>
+<p>Two things must line up:</p>
+<ol class="arabic simple">
+<li><p><strong>Binding names</strong> — the string names of the engine’s input/output tensors.</p></li>
+<li><p><strong>Config numbers</strong> — the shapes/flags the runtime uses to size buffers.</p></li>
+</ol>
+<p>Export writes both; the runtime reads both.</p>
+<section id="step-1-export-bakes-binding-names-into-the-engine-and-config-json">
+<h2>Step 1 — Export bakes binding names into the engine and config.json<a class="headerlink" href="#step-1-export-bakes-binding-names-into-the-engine-and-config-json" title="Link to this heading">#</a></h2>
+<p>Every engine is written by <code class="xref py py-func docutils literal notranslate"><span class="pre">save_trt_engine_module()</span></code>
+(<code class="docutils literal notranslate"><span class="pre">trt/compile.py</span></code>). It compiles the traced module, forces the output binding
+names, and writes a <code class="docutils literal notranslate"><span class="pre">config.json</span></code> beside the <code class="docutils literal notranslate"><span class="pre">.engine</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">save_trt_engine_module</span><span class="p">(</span>
+    <span class="n">module</span><span class="p">,</span>
+    <span class="n">sample_inputs</span><span class="p">,</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">engine_root</span> <span class="o">/</span> <span class="s2">&quot;visual&quot;</span><span class="p">,</span>
+    <span class="n">engine_file</span><span class="o">=</span><span class="s2">&quot;visual.engine&quot;</span><span class="p">,</span>
+    <span class="n">model_type</span><span class="o">=</span><span class="s2">&quot;visual&quot;</span><span class="p">,</span>
+    <span class="n">component</span><span class="o">=</span><span class="s2">&quot;vision&quot;</span><span class="p">,</span>
+    <span class="n">input_names</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;pixel_values&quot;</span><span class="p">],</span>       <span class="c1"># engine input binding</span>
+    <span class="n">output_names</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;visual_embeds&quot;</span><span class="p">],</span>     <span class="c1"># engine output binding</span>
+    <span class="n">extra_config</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;vocab_size&quot;</span><span class="p">:</span> <span class="n">vocab_size</span><span class="p">,</span>
+        <span class="s2">&quot;image_token_id&quot;</span><span class="p">:</span> <span class="n">image_token_id</span><span class="p">,</span>
+        <span class="s2">&quot;seq_len&quot;</span><span class="p">:</span> <span class="n">seq_len</span><span class="p">,</span>
+    <span class="p">},</span>
+    <span class="n">trt_settings</span><span class="o">=</span><span class="n">ctx</span><span class="o">.</span><span class="n">trt_settings</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Internally it records the names and per-tensor metadata into <code class="docutils literal notranslate"><span class="pre">config.json</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">config</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;model_type&quot;</span><span class="p">:</span> <span class="n">model_type</span><span class="p">,</span>
+    <span class="s2">&quot;component&quot;</span><span class="p">:</span> <span class="n">component</span><span class="p">,</span>
+    <span class="s2">&quot;engine_file&quot;</span><span class="p">:</span> <span class="n">engine_file</span><span class="p">,</span>
+    <span class="s2">&quot;precision&quot;</span><span class="p">:</span> <span class="s2">&quot;FP16&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;input_names&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">input_names</span><span class="p">),</span>
+    <span class="s2">&quot;inputs&quot;</span><span class="p">:</span>  <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="n">tensor_meta</span><span class="p">(</span><span class="n">t</span><span class="p">)</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">input_names</span><span class="p">,</span> <span class="n">flat_tensors</span><span class="p">)},</span>
+    <span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="p">[</span><span class="n">tensor_meta</span><span class="p">(</span><span class="n">t</span><span class="p">)</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">flatten_tensors</span><span class="p">(</span><span class="n">example_output</span><span class="p">)],</span>
+<span class="p">}</span>
+<span class="k">if</span> <span class="n">output_names</span><span class="p">:</span>
+    <span class="n">config</span><span class="p">[</span><span class="s2">&quot;output_names&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">output_names</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">extra_config</span><span class="p">:</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">extra_config</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The output binding names are applied to the TRT engine itself via
+<code class="docutils literal notranslate"><span class="pre">patch_trt_interpreter_output_names</span></code> so the compiled engine advertises exactly
+<code class="docutils literal notranslate"><span class="pre">logits</span></code> / <code class="docutils literal notranslate"><span class="pre">context_embs</span></code> / <code class="docutils literal notranslate"><span class="pre">visual_embeds</span></code> / etc. Those strings are the
+<strong>same constants</strong> the C++ side hard-codes in <code class="docutils literal notranslate"><span class="pre">common/bindingNames.h</span></code>:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 26.0%" />
+<col style="width: 30.0%" />
+<col style="width: 44.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Engine</p></th>
+<th class="head"><p>Input bindings</p></th>
+<th class="head"><p>Output bindings</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>visual</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pixel_values</span></code> (HWC)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">visual_embeds</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>language</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>, <code class="docutils literal notranslate"><span class="pre">rope_rotary_cos_sin</span></code>, <code class="docutils literal notranslate"><span class="pre">context_lengths</span></code>,
+<code class="docutils literal notranslate"><span class="pre">kvcache_start_index</span></code>, <code class="docutils literal notranslate"><span class="pre">last_token_ids</span></code>, <code class="docutils literal notranslate"><span class="pre">past_key_values_{i}</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">logits</span></code> (+ optional <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> / <code class="docutils literal notranslate"><span class="pre">context_embs</span></code> /
+<code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code>)</p></td>
+</tr>
+<tr class="row-even"><td><p>action_context</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">vl_embs</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>action (GR00T)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">actions</span></code>, <code class="docutils literal notranslate"><span class="pre">timestep</span></code>, <code class="docutils literal notranslate"><span class="pre">context_embs</span></code>, <code class="docutils literal notranslate"><span class="pre">state</span></code>, <code class="docutils literal notranslate"><span class="pre">embodiment_id</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">velocity</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>action (Pi0.5)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">x_t</span></code>, <code class="docutils literal notranslate"><span class="pre">timestep</span></code>, <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code>, <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code>, <code class="docutils literal notranslate"><span class="pre">position_ids</span></code>,
+<code class="docutils literal notranslate"><span class="pre">attention_mask</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">velocity</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>On the Python side these names are centralized in <code class="docutils literal notranslate"><span class="pre">trt/io_spec.py</span></code>
+(<code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> / <code class="docutils literal notranslate"><span class="pre">GROOT_EDGE_IO</span></code> / <code class="docutils literal notranslate"><span class="pre">PI05_EDGE_IO</span></code>), so the export modules
+and the C++ <code class="docutils literal notranslate"><span class="pre">bindingNames.h</span></code> describe the same tensors.</p>
+</section>
+<section id="step-2-language-config-json-carries-the-sizing-numbers">
+<h2>Step 2 — Language config.json carries the sizing numbers<a class="headerlink" href="#step-2-language-config-json-carries-the-sizing-numbers" title="Link to this heading">#</a></h2>
+<p>The language engine’s <code class="docutils literal notranslate"><span class="pre">config.json</span></code> is special: it drives almost every buffer in
+the runtime. It is built by <code class="docutils literal notranslate"><span class="pre">language_edge_llm_config</span></code> (<code class="docutils literal notranslate"><span class="pre">trt/language.py</span></code>):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">edge_config</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;vocab_size&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
+    <span class="s2">&quot;max_position_embeddings&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
+    <span class="s2">&quot;hidden_size&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
+    <span class="s2">&quot;num_hidden_layers&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
+    <span class="s2">&quot;num_attention_heads&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
+    <span class="s2">&quot;num_key_value_heads&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
+    <span class="s2">&quot;head_dim&quot;</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span>
+    <span class="s2">&quot;builder_config&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;max_batch_size&quot;</span><span class="p">:</span> <span class="n">batch_size</span><span class="p">,</span>
+        <span class="s2">&quot;max_input_len&quot;</span><span class="p">:</span> <span class="n">max_seq_len</span><span class="p">,</span>
+        <span class="s2">&quot;max_kv_cache_capacity&quot;</span><span class="p">:</span> <span class="n">max_seq_len</span><span class="p">,</span>
+        <span class="s2">&quot;context_emb&quot;</span><span class="p">:</span> <span class="n">context_hidden_size</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">...</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+<span class="c1"># optional VLA fields</span>
+<span class="n">edge_config</span><span class="p">[</span><span class="s2">&quot;context_hidden_size&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="o">...</span>   <span class="c1"># -&gt; contextEmbDim</span>
+<span class="n">edge_config</span><span class="p">[</span><span class="s2">&quot;image_token_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="o">...</span>
+</pre></div>
+</div>
+</section>
+<section id="step-3-runtime-parses-config-json-into-engineconfig">
+<h2>Step 3 — Runtime parses config.json into EngineConfig<a class="headerlink" href="#step-3-runtime-parses-config-json-into-engineconfig" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">LLMEngineRunner</span></code> reads those fields into <code class="docutils literal notranslate"><span class="pre">mEngineConfig</span></code>:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 34.0%" />
+<col style="width: 30.0%" />
+<col style="width: 36.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>config.json field</p></th>
+<th class="head"><p>EngineConfig field</p></th>
+<th class="head"><p>Drives</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">builder_config.max_batch_size</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">maxSupportedBatchSize</span></code></p></td>
+<td><p>Batch dim of every activation buffer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">builder_config.max_input_len</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">maxSupportedInputLength</span></code></p></td>
+<td><p>Sequence dim of <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code> / context buffers.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">hidden_size</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">hiddenSize</span></code></p></td>
+<td><p>Width of <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code> and <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">builder_config.context_emb</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">enableContextEmb</span></code></p></td>
+<td><p>Whether <code class="docutils literal notranslate"><span class="pre">context_embs</span></code> output buffer is allocated.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">context_hidden_size</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">contextEmbDim</span></code></p></td>
+<td><p>Width of the <code class="docutils literal notranslate"><span class="pre">context_embs</span></code> buffer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">image_token_id</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">imageTokenId</span></code></p></td>
+<td><p>Where vision rows are spliced into <code class="docutils literal notranslate"><span class="pre">inputs_embeds</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>engine has <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> out</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">enableLmHiddenStates</span></code></p></td>
+<td><p>Whether <code class="docutils literal notranslate"><span class="pre">lm_hidden_states</span></code> is exported for the action-context engine.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> output shape</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">enablePrefixKVOutputs</span></code> + <code class="docutils literal notranslate"><span class="pre">prefixKVOutputShape</span></code></p></td>
+<td><p>Whether/what size <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> buffers are.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="step-4-runtime-allocates-gpu-tensors-from-engineconfig">
+<h2>Step 4 — Runtime allocates GPU tensors from EngineConfig<a class="headerlink" href="#step-4-runtime-allocates-gpu-tensors-from-engineconfig" title="Link to this heading">#</a></h2>
+<p>In the <code class="docutils literal notranslate"><span class="pre">LLMInferenceRuntime</span></code> constructor the numbers above become concrete
+device allocations:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">mInputIds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="o">::</span><span class="n">Tensor</span><span class="p">({</span><span class="n">maxSupportedBatchSize</span><span class="p">,</span><span class="w"> </span><span class="n">maxSupportedInputLength</span><span class="p">},</span>
+<span class="w">                       </span><span class="n">kGPU</span><span class="p">,</span><span class="w"> </span><span class="n">kINT32</span><span class="p">);</span>
+<span class="n">mInputsEmbeds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="o">::</span><span class="n">Tensor</span><span class="p">({</span><span class="n">maxSupportedBatchSize</span><span class="p">,</span><span class="w"> </span><span class="n">maxSupportedInputLength</span><span class="p">,</span><span class="w"> </span><span class="n">hiddenSize</span><span class="p">},</span>
+<span class="w">                           </span><span class="n">kGPU</span><span class="p">,</span><span class="w"> </span><span class="n">kHALF</span><span class="p">);</span>
+<span class="n">mOutputLogits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="o">::</span><span class="n">Tensor</span><span class="p">({</span><span class="n">maxSupportedBatchSize</span><span class="p">,</span><span class="w"> </span><span class="n">outputVocabSize</span><span class="p">},</span>
+<span class="w">                           </span><span class="n">kGPU</span><span class="p">,</span><span class="w"> </span><span class="n">kFLOAT</span><span class="p">);</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">enableContextEmb</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">enableLmHiddenStates</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">seqOutputDim</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">enableContextEmb</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">contextEmbDim</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">hiddenSize</span><span class="p">;</span>
+<span class="w">    </span><span class="n">mOutputContextEmbeds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="o">::</span><span class="n">Tensor</span><span class="p">({</span><span class="n">maxSupportedBatchSize</span><span class="p">,</span><span class="w"> </span><span class="n">maxSupportedInputLength</span><span class="p">,</span><span class="w"> </span><span class="n">seqOutputDim</span><span class="p">},</span>
+<span class="w">                                      </span><span class="n">kGPU</span><span class="p">,</span><span class="w"> </span><span class="n">kHALF</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">enablePrefixKVOutputs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">mOutputPrefixK</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="o">::</span><span class="n">Tensor</span><span class="p">(</span><span class="n">prefixKVOutputShape</span><span class="p">,</span><span class="w"> </span><span class="n">kGPU</span><span class="p">,</span><span class="w"> </span><span class="n">kHALF</span><span class="p">);</span>
+<span class="w">    </span><span class="n">mOutputPrefixV</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="o">::</span><span class="n">Tensor</span><span class="p">(</span><span class="n">prefixKVOutputShape</span><span class="p">,</span><span class="w"> </span><span class="n">kGPU</span><span class="p">,</span><span class="w"> </span><span class="n">kHALF</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Note there is <strong>no PyTorch model</strong> here — the buffer shapes come purely from the
+exported <code class="docutils literal notranslate"><span class="pre">config.json</span></code>. This is why an export that writes the wrong
+<code class="docutils literal notranslate"><span class="pre">max_input_len</span></code> or forgets <code class="docutils literal notranslate"><span class="pre">context_hidden_size</span></code> produces either an
+undersized buffer or a load-time validation error.</p>
+</section>
+<section id="step-5-runtime-binds-buffers-to-engine-tensors-by-name">
+<h2>Step 5 — Runtime binds buffers to engine tensors by name<a class="headerlink" href="#step-5-runtime-binds-buffers-to-engine-tensors-by-name" title="Link to this heading">#</a></h2>
+<p>At execution the runners attach the allocated device pointers to the engine’s
+named bindings with <code class="docutils literal notranslate"><span class="pre">setInputShape</span></code> + <code class="docutils literal notranslate"><span class="pre">setTensorAddress</span></code>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">context</span><span class="o">-&gt;</span><span class="n">setInputShape</span><span class="p">(</span><span class="n">name</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span><span class="w"> </span><span class="n">tensor</span><span class="p">.</span><span class="n">getShape</span><span class="p">().</span><span class="n">getTRTDims</span><span class="p">());</span>
+<span class="n">context</span><span class="o">-&gt;</span><span class="n">setTensorAddress</span><span class="p">(</span><span class="n">name</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span><span class="w"> </span><span class="n">tensor</span><span class="p">.</span><span class="n">rawPointer</span><span class="p">());</span>
+</pre></div>
+</div>
+<p>For example the action runner wires <code class="docutils literal notranslate"><span class="pre">kvcache_start_index</span></code>, <code class="docutils literal notranslate"><span class="pre">noise_trajectory</span></code>,
+<code class="docutils literal notranslate"><span class="pre">time_steps_t0/t1</span></code>, per-layer <code class="docutils literal notranslate"><span class="pre">k_cache_{i}</span></code> / <code class="docutils literal notranslate"><span class="pre">v_cache_{i}</span></code>, and writes back
+<code class="docutils literal notranslate"><span class="pre">denoised_trajectory</span></code> — each looked up by the exact binding name string. The
+context handoff is a name-keyed copy too:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">mActionRunner</span><span class="o">-&gt;</span><span class="n">copyInputFrom</span><span class="p">(</span><span class="s">&quot;context_embs&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">mActionContextRunner</span><span class="o">-&gt;</span><span class="n">getVlEmbs</span><span class="p">(),</span><span class="w"> </span><span class="n">stream</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>Because the copy targets the binding named <code class="docutils literal notranslate"><span class="pre">context_embs</span></code>, the action engine
+must have been exported with that input name — which is exactly what
+<code class="docutils literal notranslate"><span class="pre">GROOT_EDGE_IO.action.input_names</span></code> and <code class="docutils literal notranslate"><span class="pre">groot/export/diffusion.py</span></code> declare.</p>
+</section>
+<section id="the-load-time-safety-check">
+<h2>The load-time safety check<a class="headerlink" href="#the-load-time-safety-check" title="Link to this heading">#</a></h2>
+<p>When the language engine loads, <code class="docutils literal notranslate"><span class="pre">LLMEngineRunner</span></code> validates that the config
+numbers match the actual engine tensor shapes, e.g.:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">Dims</span><span class="w"> </span><span class="n">contextEmbedsDim</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mEngine</span><span class="o">-&gt;</span><span class="n">getTensorShape</span><span class="p">(</span><span class="n">binding_names</span><span class="o">::</span><span class="n">kOutputContextEmbeds</span><span class="p">);</span>
+<span class="n">validate_eq_engine_with_config</span><span class="p">(</span><span class="n">mConfig</span><span class="p">.</span><span class="n">contextEmbDim</span><span class="p">,</span><span class="w"> </span><span class="n">contextEmbedsDim</span><span class="p">.</span><span class="n">d</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span><span class="w"> </span><span class="s">&quot;contextEmbDim&quot;</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>If the engine exports <code class="docutils literal notranslate"><span class="pre">prefix_k</span></code> / <code class="docutils literal notranslate"><span class="pre">prefix_v</span></code> but the config is missing the
+prefix-KV output metadata, load fails outright. This is the guardrail that keeps
+the Python export contract and the C++ runtime bindings in sync.</p>
+</section>
+<section id="summary">
+<h2>Summary<a class="headerlink" href="#summary" title="Link to this heading">#</a></h2>
+<pre  class="mermaid">
+        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+graph TB
+    EM[&quot;Export module&lt;br/&gt;io_spec input/output names&quot;]
+    CFG[&quot;config.json&lt;br/&gt;names + shapes + flags&quot;]
+    ENG[&quot;TRT engine&lt;br/&gt;named bindings&quot;]
+    EC[&quot;EngineConfig&lt;br/&gt;parsed numbers&quot;]
+    ALLOC[&quot;GPU tensors&lt;br/&gt;mInputsEmbeds, mOutputContextEmbeds, ...&quot;]
+    BIND[&quot;setInputShape + setTensorAddress&lt;br/&gt;by binding name&quot;]
+
+    EM --&gt; CFG
+    EM --&gt; ENG
+    CFG --&gt; EC --&gt; ALLOC --&gt; BIND
+    ENG --&gt; BIND
+
+    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+    classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+    class CFG,EC,ALLOC,BIND nvNode
+    class EM,ENG greyNode
+    </pre></section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="runners.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Runners and the Request Flow</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="../developer_guide/architecture/overview.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Overview</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+
+
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-1-export-bakes-binding-names-into-the-engine-and-config-json">Step 1 — Export bakes binding names into the engine and config.json</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-2-language-config-json-carries-the-sizing-numbers">Step 2 — Language config.json carries the sizing numbers</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-3-runtime-parses-config-json-into-engineconfig">Step 3 — Runtime parses config.json into EngineConfig</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-4-runtime-allocates-gpu-tensors-from-engineconfig">Step 4 — Runtime allocates GPU tensors from EngineConfig</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-5-runtime-binds-buffers-to-engine-tensors-by-name">Step 5 — Runtime binds buffers to engine tensors by name</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-load-time-safety-check">The load-time safety check</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#summary">Summary</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=a95f357e85573c9b56d5"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=a95f357e85573c9b56d5"></script>
+
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+<a class="footer-brand logo" href="https://www.nvidia.com">
+  <img src="../_static/nvidia-logo-horiz-rgb-1c-blk-for-screen.svg" class="logo__image only-light" alt="NVIDIA"/>
+  <img src="../_static/nvidia-logo-horiz-rgb-1c-wht-for-screen.svg" class="logo__image only-dark" alt="NVIDIA"/>
+</a></div>
+      
+        <div class="footer-item">
+
+<div class="footer-links">
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-policy/">Privacy Policy</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-center/">Your Privacy Choices</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/terms-of-service/">Terms of Service</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/accessibility/">Accessibility</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/company-policies/">Corporate Policies</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/product-security/">Product Security</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/contact/">Contact</a>
+  
+  
+  
+</div>
+</div>
+      
+        <div class="footer-item">
+
+
+
+
+  <p class="copyright">
+    
+      Copyright © 2025, Nvidia.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+<div class="extra_footer">
+  
+  <p>Last updated on July 09, 2026.</p>
+  
+</div></div>
+      
+    </div>
+  
+  
+  
+</div>
+
+  </footer>
+  </body>
+</html>

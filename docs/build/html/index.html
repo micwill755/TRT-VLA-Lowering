@@ -352,6 +352,20 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="examples/gr00t.html">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples/pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples/smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples/molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples/alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
@@ -423,7 +437,10 @@ inference, and benchmark orchestration for VLA models on top of
 <div class="toctree-wrapper compound">
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="user_guide/getting_started/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user_guide/getting_started/overview.html">Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="user_guide/getting_started/overview.html#supported-models">Supported models</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="user_guide/getting_started/supported-models.html">Supported Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="user_guide/getting_started/installation.html">Installation</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="user_guide/getting_started/installation.html#prerequisites">Prerequisites</a></li>
@@ -436,6 +453,7 @@ inference, and benchmark orchestration for VLA models on top of
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="examples/gr00t.html">GR00T Export Pipeline Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="examples/gr00t.html#quick-start">Quick start</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/gr00t.html#design-pattern">Design pattern</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/gr00t.html#gr00t-stages">GR00T stages</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/gr00t.html#export-data-flow">Export data flow</a></li>
@@ -444,6 +462,60 @@ inference, and benchmark orchestration for VLA models on top of
 <li class="toctree-l2"><a class="reference internal" href="examples/gr00t.html#edge-llm-runtime">Edge LLM Runtime</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/gr00t.html#tensor-transforms-per-runner">Tensor transforms per runner</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples/gr00t.html#adding-another-engine-backed-model">Adding another engine-backed model</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="examples/pi05.html">Pi0.5 Export Pipeline Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#quick-start">Quick start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#pipeline-stages">Pipeline stages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#engine-layout">Engine layout</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/pi05.html#stage-parity-script">Stage parity script</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="examples/smolvla.html">SmolVLA Export Pipeline Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#quick-start">Quick start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#pipeline-stages">Pipeline stages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#engine-layout">Engine layout</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/smolvla.html#stage-parity-script">Stage parity script</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="examples/molmo2.html">MolmoAct2 Export Pipeline Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="examples/molmo2.html#quick-start">Quick start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/molmo2.html#pipeline-stages-e2e-script">Pipeline stages (e2e script)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/molmo2.html#engine-layout-planned">Engine layout (planned)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="examples/alpamayo.html">Alpamayo Export Pipeline Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="examples/alpamayo.html#quick-start">Quick start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/alpamayo.html#pipeline-stages-e2e-script">Pipeline stages (e2e script)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="examples/alpamayo.html#engine-layout-planned">Engine layout (planned)</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="edge_llm/overview.html">Edge LLM Runtime Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/overview.html#the-runtime-owns-the-runners">The runtime owns the runners</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/overview.html#why-config-json-matters">Why config.json matters</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="edge_llm/runners.html">Runners and the Request Flow</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#visionrunner-vitrunner">VisionRunner (VitRunner)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#llmenginerunner">LLMEngineRunner</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#actionrunner-and-the-three-handoff-modes">ActionRunner and the three handoff modes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#actioncontextrunner">ActionContextRunner</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/runners.html#where-each-runner-writes-its-result">Where each runner writes its result</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#step-1-export-bakes-binding-names-into-the-engine-and-config-json">Step 1 — Export bakes binding names into the engine and config.json</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#step-2-language-config-json-carries-the-sizing-numbers">Step 2 — Language config.json carries the sizing numbers</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#step-3-runtime-parses-config-json-into-engineconfig">Step 3 — Runtime parses config.json into EngineConfig</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#step-4-runtime-allocates-gpu-tensors-from-engineconfig">Step 4 — Runtime allocates GPU tensors from EngineConfig</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#step-5-runtime-binds-buffers-to-engine-tensors-by-name">Step 5 — Runtime binds buffers to engine tensors by name</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#the-load-time-safety-check">The load-time safety check</a></li>
+<li class="toctree-l2"><a class="reference internal" href="edge_llm/bindings.html#summary">Summary</a></li>
 </ul>
 </li>
 </ul>
@@ -819,7 +891,7 @@ inference, and benchmark orchestration for VLA models on top of
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 07, 2026.</p>
+  <p>Last updated on July 09, 2026.</p>
   
 </div></div>
       

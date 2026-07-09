@@ -349,6 +349,20 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../examples/gr00t.html">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
@@ -454,23 +468,23 @@
 <tbody>
 <tr class="row-even"><td><p><a class="reference internal" href="models/gr00t.html"><span class="doc">GR00T</span></a></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">gr00t</span></code>, <code class="docutils literal notranslate"><span class="pre">groot</span></code></p></td>
-<td><p>Export, load, inference, benchmark</p></td>
+<td><p>Export, inference, benchmark via <code class="docutils literal notranslate"><span class="pre">app.py</span></code>; see <a class="reference internal" href="../../examples/gr00t.html"><span class="doc">GR00T Export Pipeline Example</span></a></p></td>
 </tr>
 <tr class="row-odd"><td><p><a class="reference internal" href="models/pi05.html"><span class="doc">Pi0.5</span></a></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">pi05</span></code></p></td>
-<td><p>Load registered; export varies by release</p></td>
+<td><p>Export, inference, benchmark via <code class="docutils literal notranslate"><span class="pre">app.py</span></code>; see <a class="reference internal" href="../../examples/pi05.html"><span class="doc">Pi0.5 Export Pipeline Example</span></a></p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="models/molmo2.html"><span class="doc">Molmo2</span></a></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">molmo2</span></code></p></td>
-<td><p>Export and inference</p></td>
-</tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="models/smolvla.html"><span class="doc">SmolVLA</span></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="models/smolvla.html"><span class="doc">SmolVLA</span></a></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">smolvla</span></code></p></td>
-<td><p>Load registered</p></td>
+<td><p>Export, inference, benchmark via <code class="docutils literal notranslate"><span class="pre">app.py</span></code>; see <a class="reference internal" href="../../examples/smolvla.html"><span class="doc">SmolVLA Export Pipeline Example</span></a></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="models/molmo2.html"><span class="doc">Molmo2</span></a></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">molmo2</span></code></p></td>
+<td><p>E2E parity via <code class="docutils literal notranslate"><span class="pre">test_vla_molmo2_e2e.py</span></code>; see <a class="reference internal" href="../../examples/molmo2.html"><span class="doc">MolmoAct2 Export Pipeline Example</span></a></p></td>
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="models/alpamayo.html"><span class="doc">Alpamayo</span></a></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">alpamayo</span></code></p></td>
-<td><p>VLA pipeline (Edge-LLM layout)</p></td>
+<td><p>E2E parity via <code class="docutils literal notranslate"><span class="pre">test_vla_alpamayo_e2e.py</span></code>; see <a class="reference internal" href="../../examples/alpamayo.html"><span class="doc">Alpamayo Export Pipeline Example</span></a></p></td>
 </tr>
 </tbody>
 </table>
@@ -604,7 +618,7 @@
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 07, 2026.</p>
+  <p>Last updated on July 09, 2026.</p>
   
 </div></div>
       

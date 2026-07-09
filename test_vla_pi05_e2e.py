@@ -40,7 +40,7 @@ from trt.modules.export.diffusion import (
 from trt.measure import parity
 from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
-from trt.utils import force_hf_attention
+from trt.utils import force_hf_attention, free_cuda_memory
 from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.vision import nchw_to_hwc
 from trt.rope import make_rope_rotary_cos_sin
@@ -322,6 +322,20 @@ def main():
     inputs_embeds = inputs_embeds.to(device=device, dtype=dtype).contiguous()
     lm_dtype = next(language.parameters()).dtype
 
+    # free the vision engine + export artifacts before the language TRT build so
+    # TensorRT has enough contiguous GPU memory for its builder allocation.
+    free_cuda_memory(
+        trt_engine,
+        exported,
+        visual,
+        embs_trt,
+        embs_eager,
+        embs_eager_plugin,
+        trt_image_embs,
+        hidden_states,
+        pixel_values,
+    )
+
     for _ in range(5):
         language(
             inputs_embeds=inputs_embeds.to(dtype=lm_dtype),
@@ -430,10 +444,6 @@ def main():
         end.record()
         torch.cuda.synchronize()
         trt_elapsed_ms = start.elapsed_time(end) / 100
-
-        print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
-        print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
-        print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
     finally:
         restore_attention(patched)
 
@@ -445,6 +455,18 @@ def main():
 
     prefix_k = trt_out[2].to(device=device, dtype=dtype).contiguous()
     prefix_v = trt_out[3].to(device=device, dtype=dtype).contiguous()
+
+    # free the language engine + export artifacts before the diffusion TRT build.
+    free_cuda_memory(
+        lm_trt_engine,
+        lm_exported,
+        lm,
+        trt_out,
+        flat_tensors,
+        kv_caches,
+        inputs_embeds,
+        lm_hidden_eager,
+    )
 
     diffusion_model = StaticActionVelocityStepExportModule(
         step_encoder=PI05PrefixKVStepEncoderExportModule(model),
@@ -531,12 +553,21 @@ def main():
     print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
     print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
     print(f"vision speedup: {(vision_eager_elapsed_ms / vision_trt_elapsed_ms):.3f}x")
+    print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
+    print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
+    print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
     print(f"diffusion eager execute: {diffusion_eager_elapsed_ms:.3f} ms")
     print(f"diffusion trt execute: {diffusion_trt_elapsed_ms:.3f} ms")
     print(f"diffusion speedup: {(diffusion_eager_elapsed_ms / diffusion_trt_elapsed_ms):.3f}x")
     print(f"total eager execute: {eager_total_ms:.3f} ms")
     print(f"total trt execute: {trt_total_ms:.3f} ms")
     print(f"total speedup: {(eager_total_ms / trt_total_ms):.3f}x")
+
+    free_cuda_memory(
+        diffusion_trt_engine,
+        diffusion_exported,
+        diffusion_model,
+    )
 
     return 0
 

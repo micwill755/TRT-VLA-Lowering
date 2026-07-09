@@ -499,7 +499,7 @@ window.runMermaid = runMermaid;</script>
 
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Overview" href="../developer_guide/architecture/overview.html" />
+    <link rel="next" title="Pi0.5 Export Pipeline Example" href="pi05.html" />
     <link rel="prev" title="Installation" href="../user_guide/getting_started/installation.html" />
 
 
@@ -789,6 +789,20 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
@@ -881,6 +895,27 @@ window.runMermaid = runMermaid;</script>
 <p>This example shows how GR00T wraps a vision-language-action model as a set of
 TensorRT engines and how the export, load, and inference pipelines sit above the
 runtime layer. Use it as the template when adding another engine-backed model.</p>
+<section id="quick-start">
+<h2>Quick start<a class="headerlink" href="#quick-start" title="Link to this heading">#</a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">EDGE_LLM_PLUGIN_SO</span><span class="o">=</span>/path/to/libNvInfer_edgellm_plugin.so
+
+<span class="c1"># Export + benchmark (default)</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--device<span class="w"> </span>cuda<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/groot_edge_llm
+
+<span class="c1"># Export only</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--export-only<span class="w"> </span>--device<span class="w"> </span>cuda<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/groot_edge_llm
+
+<span class="c1"># Benchmark only (requires prior export)</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--benchmark-only<span class="w"> </span>--device<span class="w"> </span>cuda<span class="w"> </span>--engine-dir<span class="w"> </span>/tmp/groot_edge_llm
+
+<span class="c1"># Eager inference only</span>
+python<span class="w"> </span>app.py<span class="w"> </span>--model<span class="w"> </span>gr00t<span class="w"> </span>--inference-only<span class="w"> </span>--device<span class="w"> </span>cuda
+</pre></div>
+</div>
+<p>For per-module TRT compile and timing without the full orchestrator:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>test_vla_gr00t_e2e.py
+</pre></div>
+</div>
 <p>At a high level, the orchestrator owns the live model, policy, device, sample inputs,
 and engine directory. The pipeline layer adapts that state into ordered export
 stages, writes engines, and drives inference and benchmark through the same
@@ -905,7 +940,8 @@ graph TB
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
     class RT,CTX nvNode
     class EXP,INF,BENCH greyNode
-    </pre><section id="design-pattern">
+    </pre></section>
+<section id="design-pattern">
 <h2>Design pattern<a class="headerlink" href="#design-pattern" title="Link to this heading">#</a></h2>
 <p>GR00T keeps the generic pipeline mechanics separate from model-specific logic:</p>
 <ul class="simple">
@@ -1403,11 +1439,11 @@ state is sliced into engines, compiled, loaded per stage, and replayed.</p>
       </div>
     </a>
     <a class="right-next"
-       href="../developer_guide/architecture/overview.html"
+       href="pi05.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Overview</p>
+        <p class="prev-next-title">Pi0.5 Export Pipeline Example</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -1432,6 +1468,7 @@ state is sliced into engines, compiled, loaded per stage, and replayed.</p>
   </div>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-start">Quick start</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-pattern">Design pattern</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#gr00t-stages">GR00T stages</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#export-data-flow">Export data flow</a></li>
@@ -1531,7 +1568,7 @@ state is sliced into engines, compiled, loaded per stage, and replayed.</p>
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 07, 2026.</p>
+  <p>Last updated on July 09, 2026.</p>
   
 </div></div>
       

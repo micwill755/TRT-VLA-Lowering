@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import logging
+import gc
+import os
 import sys
 import time
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torch_tensorrt
@@ -20,6 +24,9 @@ if _ALPAMAYO_SRC.is_dir() and str(_ALPAMAYO_SRC) not in sys.path:
     sys.path.insert(0, str(_ALPAMAYO_SRC))
 
 from alpamayo_r1 import helper
+from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    BaseModelOutputWithDeepstackFeatures,
+)
 
 from trt.compile import make_input_spec
 from trt.measure import parity
@@ -47,6 +54,7 @@ TRT_SETTINGS = {
 
 LANGUAGE_TRT_SETTINGS = {
     **TRT_SETTINGS,
+    "offload_module_to_cpu": True,
 }
 
 ACTION_TRT_SETTINGS = {
@@ -56,7 +64,6 @@ ACTION_TRT_SETTINGS = {
 VISION_TRT_SETTINGS = {
     **TRT_SETTINGS,
 }
-
 
 def load_config(device, model_path: str = "nvidia/Alpamayo-R1-10B", dtype=torch.float16):
     try:
@@ -76,6 +83,7 @@ def load_config(device, model_path: str = "nvidia/Alpamayo-R1-10B", dtype=torch.
     return model, processor
 
 
+@torch.no_grad()
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
@@ -148,24 +156,24 @@ def main():
     with torch.no_grad():
         embs_eager, _deepstack_eager = visual(pixel_values, None)
 
-    for _ in range(5):
-        visual(pixel_values, None)
+        for _ in range(5):
+            visual(pixel_values, None)
 
-    torch.cuda.synchronize(device)
-    t0 = time.perf_counter()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(100):
-        visual(pixel_values, None)
-    end.record()
-    torch.cuda.synchronize()
-    vision_eager_elapsed_ms = start.elapsed_time(end) / 100
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(100):
+            visual(pixel_values, None)
+        end.record()
+        torch.cuda.synchronize()
+        vision_eager_elapsed_ms = start.elapsed_time(end) / 100
 
     if not patch_qwen3vl_vision_attention():
         raise RuntimeError("Failed to patch Qwen3-VL vision attention for TRT export")
 
-    vision_inputs = (pixel_values, None)
+    vision_inputs = (pixel_values,)
     with torch.no_grad():
         exported = torch.export.export(visual, args=vision_inputs, strict=False)
         input_specs = make_input_spec(vision_inputs)
@@ -198,9 +206,17 @@ def main():
     print("Compiling language")
 
     original_visual_forward = vlm_model.visual.forward
-    vlm_model.visual.forward = lambda hidden_states, grid_thw=None: trt_engine(
-        hidden_states, None
-    )
+
+    def _trt_visual_forward(hidden_states, grid_thw=None, **kwargs):
+        del grid_thw, kwargs
+        pooler_output, deepstack_features = trt_engine(hidden_states)
+        return BaseModelOutputWithDeepstackFeatures(
+            last_hidden_state=pooler_output,
+            pooler_output=pooler_output,
+            deepstack_features=deepstack_features,
+        )
+
+    vlm_model.visual.forward = _trt_visual_forward
     try:
         with torch.no_grad():
             (
@@ -219,6 +235,12 @@ def main():
             )
     finally:
         vlm_model.visual.forward = original_visual_forward
+
+    # The vision engine/module are no longer needed after VLM preprocessing.
+    del trt_engine, exported, input_specs, visual
+    vlm_model.visual.to("cpu")
+    gc.collect()
+    torch.cuda.empty_cache()
 
     bsz = inputs_embeds.shape[0]
     attention_mask = model_inputs["tokenized_data"]["attention_mask"].to(device=device)
@@ -280,10 +302,6 @@ def main():
     end.record()
     torch.cuda.synchronize()
     trt_elapsed_ms = start.elapsed_time(end) / 100
-
-    print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
-    print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
-    print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
 
     parity("language A vs C (TRT)", lm_hidden_eager, lm_hidden_trt)
 
@@ -389,14 +407,17 @@ def main():
     print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
     print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
     print(f"vision speedup: {(vision_eager_elapsed_ms / vision_trt_elapsed_ms):.3f}x")
+    print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
+    print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
+    print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
     print(f"diffusion eager execute: {diffusion_eager_elapsed_ms:.3f} ms")
     print(f"diffusion trt execute: {diffusion_trt_elapsed_ms:.3f} ms")
     print(f"diffusion speedup: {(diffusion_eager_elapsed_ms / diffusion_trt_elapsed_ms):.3f}x")
     print(f"total eager execute: {eager_total_ms:.3f} ms")
     print(f"total trt execute: {trt_total_ms:.3f} ms")
     print(f"total speedup: {(eager_total_ms / trt_total_ms):.3f}x")
+    
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

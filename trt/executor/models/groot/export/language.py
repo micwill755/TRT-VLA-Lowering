@@ -11,12 +11,20 @@ from __future__ import annotations
 import torch
 
 from trt.compile import save_trt_engine_module
-from trt.language import language_edge_trt_settings
+from trt.language import (
+    language_edge_llm_config,
+    language_edge_trt_settings,
+    make_language_edge_input_specs,
+)
 from trt.modules.export.language import CausalLMExportModule
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.rope import make_rope_rotary_cos_sin
 from trt.context import EdgeContext
-from trt.tokenizer import save_embedding_table, save_tokenizer_for_edge_llm
+from trt.tokenizer import (
+    groot_edge_chat_template,
+    save_embedding_table,
+    save_tokenizer_for_edge_llm,
+)
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     eagle = ctx.model.backbone.eagle_model
@@ -35,12 +43,18 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     )
 
     # --- build packed language embeddings (splice vision rows into token embeds) ---
-    input_embs = language.get_input_embeddings()(input_ids)
+    vocab_size = int(language.get_input_embeddings().num_embeddings)
+    safe_ids = torch.where(
+        input_ids >= vocab_size,
+        torch.zeros_like(input_ids),
+        input_ids,
+    )
+    input_embs = language.get_input_embeddings()(safe_ids)
     bsz, seq_len, hidden = input_embs.shape
 
     flat_embs = input_embs.reshape(bsz * seq_len, hidden)
     flat_ids = input_ids.reshape(bsz * seq_len)
-    image_token_mask = flat_ids == image_token_index
+    image_token_mask = (flat_ids == image_token_index) | (flat_ids >= vocab_size)
 
     flat_image_embs = image_embs.reshape(-1, hidden).to(
         device=flat_embs.device,
@@ -161,6 +175,13 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         "last_token_ids",
     ] + [f"past_key_values_{i}" for i in range(num_hidden_layers)]
     output_names = ["logits", "lm_hidden_states", "prefix_k", "prefix_v"]
+    input_specs = make_language_edge_input_specs(
+        input_names,
+        lm_inputs,
+        batch_size=batch_size,
+        max_seq_len=seq_len,
+        static_prefill_seq_len=True,
+    )
 
     patched = patch_language_attention(
         decoder,
@@ -182,20 +203,17 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
             input_names=input_names,
             output_names=output_names,
             extra_config={
-                "vocab_size": int(language.config.vocab_size),
-                "max_position_embeddings": int(
-                    getattr(language.config, "max_position_embeddings", seq_len)
+                **language_edge_llm_config(
+                    language.config,
+                    max_seq_len=seq_len,
+                    batch_size=batch_size,
+                    num_layers=num_hidden_layers,
+                    image_token_id=inputs["image_token_id"],
                 ),
-                "hidden_size": hidden_size,
-                "num_hidden_layers": num_hidden_layers,
-                "num_attention_heads": num_attention_heads,
-                "num_key_value_heads": num_key_value_heads,
-                "head_dim": head_dim,
-                "max_seq_len": seq_len,
-                "batch_size": batch_size,
-                "image_token_id": inputs["image_token_id"],
                 "seq_len_per_image": inputs["seq_len_per_image"],
             },
+            input_specs=input_specs,
+            flat_tensors=lm_inputs,
             trt_settings={
                 **ctx.trt_settings,
                 **language_edge_trt_settings(),
@@ -231,10 +249,11 @@ def save_artifacts(ctx: EdgeContext, inputs: dict, result: dict) -> None:
     save_tokenizer_for_edge_llm(
         language_dir,
         tokenizer=tokenizer,
-        chat_template={
-            "image_token_id": inputs["image_token_id"],
-            "seq_len_per_image": inputs["seq_len_per_image"],
-        },
+        chat_template=groot_edge_chat_template(
+            image_token_id=inputs["image_token_id"],
+            seq_len_per_image=inputs["seq_len_per_image"],
+            im_end=getattr(tokenizer, "eos_token", "") or "",
+        ),
     )
 
 def postprocess(ctx: EdgeContext, result: dict) -> dict:

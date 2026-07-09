@@ -31,12 +31,18 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
     )
 
     # --- build packed language embeddings (splice vision rows into token embeds) ---
-    input_embs = language.get_input_embeddings()(input_ids)
+    vocab_size = int(language.get_input_embeddings().num_embeddings)
+    safe_ids = torch.where(
+        input_ids >= vocab_size,
+        torch.zeros_like(input_ids),
+        input_ids,
+    )
+    input_embs = language.get_input_embeddings()(safe_ids)
     bsz, seq_len, hidden = input_embs.shape
 
     flat_embs = input_embs.reshape(bsz * seq_len, hidden)
     flat_ids = input_ids.reshape(bsz * seq_len)
-    image_token_mask = flat_ids == image_token_index
+    image_token_mask = (flat_ids == image_token_index) | (flat_ids >= vocab_size)
 
     flat_image_embs = image_embs.reshape(-1, hidden).to(
         device=flat_embs.device,

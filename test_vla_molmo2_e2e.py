@@ -379,9 +379,6 @@ def main():
         torch.cuda.synchronize()
         trt_elapsed_ms = start.elapsed_time(end) / 100
 
-        print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
-        print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
-        print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
     finally:
         restore_attention(patched)
 
@@ -469,9 +466,6 @@ def main():
         torch.cuda.synchronize()
         discrete_trt_elapsed_ms = start.elapsed_time(end) / 100
 
-        print(f"discrete lm eager execute: {discrete_eager_elapsed_ms:.3f} ms")
-        print(f"discrete lm trt execute: {discrete_trt_elapsed_ms:.3f} ms")
-        print(f"discrete lm speedup: {(discrete_eager_elapsed_ms / discrete_trt_elapsed_ms):.3f}x")
     finally:
         restore_attention(patched_discrete)
 
@@ -621,6 +615,12 @@ def main():
     print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
     print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
     print(f"vision speedup: {(vision_eager_elapsed_ms / vision_trt_elapsed_ms):.3f}x")
+    print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
+    print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
+    print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
+    print(f"discrete lm eager execute: {discrete_eager_elapsed_ms:.3f} ms")
+    print(f"discrete lm trt execute: {discrete_trt_elapsed_ms:.3f} ms")
+    print(f"discrete lm speedup: {(discrete_eager_elapsed_ms / discrete_trt_elapsed_ms):.3f}x")
     print(f"diffusion eager execute: {diffusion_eager_elapsed_ms:.3f} ms")
     print(f"diffusion trt execute: {diffusion_trt_elapsed_ms:.3f} ms")
     print(f"diffusion speedup: {(diffusion_eager_elapsed_ms / diffusion_trt_elapsed_ms):.3f}x")

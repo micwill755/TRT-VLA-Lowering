@@ -789,6 +789,20 @@ window.runMermaid = runMermaid;</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../examples/gr00t.html">GR00T Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/pi05.html">Pi0.5 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/smolvla.html">SmolVLA Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/molmo2.html">MolmoAct2 Export Pipeline Example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/alpamayo.html">Alpamayo Export Pipeline Example</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Edge LLM</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../edge_llm/overview.html">Edge LLM Runtime Overview</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../../edge_llm/runners.html">Runners and the Request Flow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../edge_llm/bindings.html">Binding Contract: config.json to GPU Memory</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Architecture</span></p>
 <ul class="nav bd-sidenav">
@@ -883,7 +897,7 @@ window.runMermaid = runMermaid;</script>
 </pre></div>
 </div>
 <p>It does not initialize noise, choose timesteps, integrate velocities, or loop.
-That outer <strong>rollout</strong> lives in <code class="docutils literal notranslate"><span class="pre">trt/action_rollout.py</span></code> and mirrors the C++
+That outer <strong>rollout</strong> lives in <code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/inference/diffusion.py</span></code> and mirrors the C++
 <code class="docutils literal notranslate"><span class="pre">ActionRunner</span></code> loop at runtime.</p>
 <section id="why-rollout-is-separate-from-the-engine">
 <h2>Why rollout is separate from the engine<a class="headerlink" href="#why-rollout-is-separate-from-the-engine" title="Link to this heading">#</a></h2>
@@ -1120,7 +1134,7 @@ the loop.</p>
 <section id="when-you-can-skip-rollout">
 <h2>When you can skip rollout<a class="headerlink" href="#when-you-can-skip-rollout" title="Link to this heading">#</a></h2>
 <p>For a quick one-off GR00T script you can call <code class="docutils literal notranslate"><span class="pre">action_head.get_action</span></code> directly
-and never touch <code class="docutils literal notranslate"><span class="pre">action_rollout.py</span></code>.</p>
+and never touch the groot inference diffusion rollout helper.</p>
 <p>Use rollout when you need to:</p>
 <ul class="simple">
 <li><p>drive a <strong>compiled single-step engine</strong> (no loop inside the graph),</p></li>
@@ -1136,7 +1150,8 @@ and never touch <code class="docutils literal notranslate"><span class="pre">act
 <li><p><a class="reference internal" href="components.html"><span class="doc">Diffusion Components</span></a> — <code class="docutils literal notranslate"><span class="pre">StaticActionVelocityStepExportModule</span></code> and step encoders.</p></li>
 <li><p><a class="reference internal" href="groot-example.html"><span class="doc">GR00T Diffusion Step Example</span></a> — tensor shapes for one GR00T denoising step.</p></li>
 </ul>
-<p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/action_rollout.py</span></code>, <code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/inference/action.py</span></code></p>
+<p><em>Files:</em> <code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/inference/diffusion.py</span></code>,
+<code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/diffusion.py</span></code></p>
 </section>
 </section>
 
@@ -1293,7 +1308,7 @@ and never touch <code class="docutils literal notranslate"><span class="pre">act
         <div class="footer-item">
 <div class="extra_footer">
   
-  <p>Last updated on July 07, 2026.</p>
+  <p>Last updated on July 09, 2026.</p>
   
 </div></div>
       

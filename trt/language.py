@@ -497,14 +497,14 @@ def make_language_edge_input_specs(
     hidden_size = int(sample_inputs[0].shape[2])
 
     prefill_profile = {
-        "min": (1, min_prefill_seq, hidden_size),
-        "opt": (batch_size, opt_prefill_seq, hidden_size),
-        "max": (batch_size, max_seq_len, hidden_size),
+        "min_shape": (1, min_prefill_seq, hidden_size),
+        "opt_shape": (batch_size, opt_prefill_seq, hidden_size),
+        "max_shape": (batch_size, max_seq_len, hidden_size),
     }
     decode_profile = {
-        "min": (1, 1, hidden_size),
-        "opt": (batch_size, 1, hidden_size),
-        "max": (batch_size, 1, hidden_size),
+        "min_shape": (1, 1, hidden_size),
+        "opt_shape": (batch_size, 1, hidden_size),
+        "max_shape": (batch_size, 1, hidden_size),
     }
 
     kv_template = next(
@@ -514,15 +514,15 @@ def make_language_edge_input_specs(
     kv_cache_profile = None
     if kv_template is not None:
         kv_cache_profile = {
-            "min": (1, 2, int(kv_template.shape[2]), 1, int(kv_template.shape[4])),
-            "opt": (
+            "min_shape": (1, 2, int(kv_template.shape[2]), 1, int(kv_template.shape[4])),
+            "opt_shape": (
                 batch_size,
                 2,
                 int(kv_template.shape[2]),
                 max_seq_len,
                 int(kv_template.shape[4]),
             ),
-            "max": (
+            "max_shape": (
                 batch_size,
                 2,
                 int(kv_template.shape[2]),
