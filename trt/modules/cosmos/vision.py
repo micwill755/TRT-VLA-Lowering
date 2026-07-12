@@ -89,3 +89,46 @@ class Cosmos3MoTDenoiseStepExportModule(nn.Module):
 
     def forward(self, latents: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
         return self._step(latents, timestep)
+
+
+class Cosmos3MoTLayerExportModule(nn.Module):
+    """One Cosmos3 dual-path MoT decoder layer.
+
+    This is the practical TRT export boundary for 32GB GPUs. The full
+    Cosmos3OmniTransformer owns embedding, packing, all decoder layers, and
+    output heads; exporting it as one engine leaves almost no builder memory.
+    """
+
+    def __init__(
+        self,
+        layer: nn.Module,
+        *,
+        sample_und_seq: torch.Tensor,
+        sample_gen_seq: torch.Tensor,
+        sample_rotary_emb: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ):
+        super().__init__()
+        self.layer = layer
+
+        with torch.no_grad():
+            und_out, gen_out = self.forward(
+                sample_und_seq,
+                sample_gen_seq,
+                sample_rotary_emb[0],
+                sample_rotary_emb[1],
+                sample_rotary_emb[2],
+                sample_rotary_emb[3],
+            )
+            self.und_output_shape = tuple(und_out.shape)
+            self.gen_output_shape = tuple(gen_out.shape)
+
+    def forward(
+        self,
+        und_seq: torch.Tensor,
+        gen_seq: torch.Tensor,
+        cos_und: torch.Tensor,
+        sin_und: torch.Tensor,
+        cos_gen: torch.Tensor,
+        sin_gen: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.layer(und_seq, gen_seq, (cos_und, sin_und, cos_gen, sin_gen))
