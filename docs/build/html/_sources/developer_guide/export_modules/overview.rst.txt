@@ -1,15 +1,50 @@
 Export Modules Overview
 =======================
 
-Each GR00T engine stage compiles a small **export module** — a ``nn.Module`` whose
+Each engine stage compiles a small **export module** — a ``nn.Module`` whose
 ``forward`` matches the TensorRT / Edge-LLM binding contract. Model-specific
-**hooks** under ``trt/executor/models/groot/export/`` build that module, patch
+**hooks** under ``trt/executor/models/<model>/export/`` build that module, patch
 attention for plugins, call ``save_trt_engine_module``, and pass representative
 tensors to the next stage.
 
 The reusable wrappers live in ``trt/modules/export/``. Stage hooks only wire
 subgraphs from ``ctx.model`` and handle I/O layout (NCHW vs HWC, flat KV bindings,
 dummy downstream tensors).
+
+
+How export modules become Edge-LLM engines
+------------------------------------------
+
+Using Torch-TensorRT export modules keeps the build inside PyTorch instead of a
+separate ONNX path: each stage defines an ``nn.Module`` with the exact binding
+names the C++ runtime expects, compiles it directly, and writes ``config.json``
+from the same ``PipelineIOSpec`` that wires stages together in Python.
+
+.. mermaid::
+
+   %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+   graph TB
+       EP["ExportPipeline<br/>pipeline executor"]
+       HOOKS["Stage export hooks<br/>preprocess / export / postprocess"]
+       EM["Export module<br/>nn.Module in trt/modules/export/"]
+       SPEC["PipelineIOSpec<br/>GROOT_EDGE_IO / PI05_EDGE_IO"]
+       COMPILE["Torch-TensorRT compile<br/>save_trt_engine_module"]
+       ART["Engine artifacts<br/>.engine + config.json<br/>+ language sidecars"]
+       RT["Edge-LLM C++ runtime<br/>LLMInferenceRuntime"]
+
+       EP -->|per stage| HOOKS
+       HOOKS -->|preprocess: build module<br/>+ sample tensors| EM
+       HOOKS -->|export: patch attention| COMPILE
+       EM --> COMPILE
+       SPEC -->|input_names / output_names<br/>lm_to_action_slots| COMPILE
+       COMPILE --> ART
+       ART -->|load + bind by name| RT
+
+       classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+       classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+
+       class EP,EM,COMPILE,RT nvNode
+       class HOOKS,SPEC,ART greyNode
 
 
 Stage map
@@ -28,6 +63,10 @@ Stage map
 
        classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
        class V,L,AC,A nvNode
+
+GR00T uses four stages (vision → language → action_context → action). Pi0.5 and
+SmolVLA use three (vision → language → action) with ``PI05PrefixKVStepEncoderExportModule``
+/ ``SmolVLAPrefixKVStepEncoderExportModule`` for the action engine.
 
 .. list-table::
    :header-rows: 1

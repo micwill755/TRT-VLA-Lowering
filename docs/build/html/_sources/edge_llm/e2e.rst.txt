@@ -81,6 +81,63 @@ All three models use the same CLI shape. ``--engineDir`` points at the
 Set ``max_generate_length`` to ``0`` for action-only VLA runs (prefill + diffusion,
 no text decode). Successful responses include an ``actions`` array in the output JSON.
 
+How ``handleRequest`` works
+---------------------------
+
+``llm_inference`` constructs ``LLMInferenceRuntime`` from ``--engineDir`` and
+``--multimodalEngineDir``, then calls ``handleRequest(request, response, stream)``
+once per batched request. Each stage below maps to a ``Stage timings`` log line in
+the C++ output.
+
+.. mermaid::
+
+   %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+   graph TB
+       REQ["1. Request JSON<br/>images + task text"]
+       TOK["2. Tokenize<br/>chat template → input_ids"]
+       VIT["3. ViT stage<br/>preprocess + visual.engine<br/>→ visual_embeds"]
+       APREP["4. Action preprocess<br/>suffix / state / handoff mode"]
+       EMB["5. Embedding assembly<br/>lookup + splice image rows<br/>→ inputs_embeds"]
+       PRE["6. LLM Prefill<br/>language.engine<br/>→ prefix_k/v or lm_hidden_states"]
+       DEC["7. LLM Generation<br/>decode loop (skipped when<br/>max_generate_length = 0)"]
+       AC["8a. Action context<br/>context.engine → vl_embs<br/>(GR00T only)"]
+       ACT["8b. Diffusor<br/>action.engine denoise loop<br/>→ outputActions"]
+       OUT["9. Response JSON<br/>actions array"]
+
+       REQ --> TOK --> VIT --> APREP --> EMB --> PRE --> DEC
+       PRE -->|GR00T| AC --> ACT
+       PRE -.->|Pi0.5 / SmolVLA<br/>prefix_k, prefix_v| ACT
+       ACT --> OUT
+
+       classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+       classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+       class VIT,PRE,AC,ACT nvNode
+       class REQ,TOK,APREP,EMB,DEC,OUT greyNode
+
+**Step-by-step summary:**
+
+1. **Parse & tokenize** — messages are formatted with ``processed_chat_template.json``
+   and encoded to token IDs; ``<image>`` placeholders are marked for expansion.
+2. **ViT** — ``VisionRunner`` preprocesses pixels (HWC), expands image tokens, and
+   runs ``visual.engine`` to produce ``visual_embeds``.
+3. **Action preprocess** — ``ActionRunner`` prepares static inputs and selects the
+   handoff mode (``context_tensor`` for GR00T, ``pi05_prefix_kv`` for Pi0.5/SmolVLA).
+4. **Embedding assembly** — ``embeddingLookupWithImageInsertion`` splices vision rows
+   into ``inputs_embeds`` at image-placeholder positions.
+5. **LLM Prefill** — ``LLMEngineRunner::executePrefillStep`` runs the language engine;
+   auxiliary outputs feed the action path (``prefix_k``/``prefix_v`` or
+   ``lm_hidden_states``).
+6. **LLM Generation** — token-by-token decode until EOS; skipped for VLA action runs
+   with ``max_generate_length = 0``.
+7. **Diffusor** — GR00T routes ``lm_hidden_states`` through ``action_context`` first;
+   Pi0.5 and SmolVLA wire ``prefix_k``/``prefix_v`` directly. ``sampleActions`` runs
+   the flow-matching loop for ``num_inference_steps`` and copies actions to host.
+8. **Response** — ``outputActions`` is written to the output JSON; ``Stage timings - E2E``
+   covers the full request.
+
+See :doc:`runners` for runner ownership details and :doc:`bindings` for how
+``config.json`` sizes the buffers each stage binds.
+
 Model layout at runtime
 -----------------------
 

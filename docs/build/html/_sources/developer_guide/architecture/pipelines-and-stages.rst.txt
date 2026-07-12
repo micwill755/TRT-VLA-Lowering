@@ -81,32 +81,46 @@ uses four stages:
 PipelineConfig structure
 ------------------------
 
+The **pipeline executor** (``ExportPipeline`` or ``InferencePipeline``) is the
+runtime object that *consumes* a ``PipelineConfig``: it loops over the configured
+stages, merges inputs, invokes each stage's **runner**, and stores outputs. The
+runner (``ExportRunner`` / ``InferenceRunner``) is not the pipeline — it executes
+one stage by calling that stage's hooks.
+
 .. mermaid::
 
    %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
    graph TB
+       PE["Pipeline executor<br/>ExportPipeline / InferencePipeline"]
        PC[PipelineConfig]
        PH[Pipeline hooks<br/>preprocess / postprocess]
        STAGES[tuple of StageConfig]
        S0[StageConfig 0]
        S1[StageConfig 1]
        SN[StageConfig N]
+       RUN["Runner<br/>ExportRunner / InferenceRunner"]
+       H0[stage hooks]
+       CTX["ctx.stage_results<br/>stage outputs"]
 
+       PE -->|reads| PC
        PC --> PH
        PC --> STAGES
        STAGES --> S0
        STAGES --> S1
        STAGES --> SN
 
-       S0 --> R0[runner class]
-       S0 --> H0[stage hooks]
+       PE -->|loops stages| RUN
        S0 --> IS0[input_sources]
+       S0 --> RUN
+       RUN --> H0
+       RUN -->|write output| CTX
+       PE -->|merge pipeline inputs<br/>+ upstream outputs| RUN
 
        classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
        classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
-       class PC,PH,STAGES nvNode
-       class S0,S1,SN,R0,H0,IS0 greyNode
+       class PE,PC,PH,STAGES,RUN nvNode
+       class S0,S1,SN,H0,IS0,CTX greyNode
 
 
 Inter-stage data

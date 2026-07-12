@@ -988,31 +988,44 @@ graph LR
     </pre></section>
 <section id="pipelineconfig-structure">
 <h2>PipelineConfig structure<a class="headerlink" href="#pipelineconfig-structure" title="Link to this heading">#</a></h2>
+<p>The <strong>pipeline executor</strong> (<code class="docutils literal notranslate"><span class="pre">ExportPipeline</span></code> or <code class="docutils literal notranslate"><span class="pre">InferencePipeline</span></code>) is the
+runtime object that <em>consumes</em> a <code class="docutils literal notranslate"><span class="pre">PipelineConfig</span></code>: it loops over the configured
+stages, merges inputs, invokes each stage’s <strong>runner</strong>, and stores outputs. The
+runner (<code class="docutils literal notranslate"><span class="pre">ExportRunner</span></code> / <code class="docutils literal notranslate"><span class="pre">InferenceRunner</span></code>) is not the pipeline — it executes
+one stage by calling that stage’s hooks.</p>
 <pre  class="mermaid">
         %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
 graph TB
+    PE[&quot;Pipeline executor&lt;br/&gt;ExportPipeline / InferencePipeline&quot;]
     PC[PipelineConfig]
     PH[Pipeline hooks&lt;br/&gt;preprocess / postprocess]
     STAGES[tuple of StageConfig]
     S0[StageConfig 0]
     S1[StageConfig 1]
     SN[StageConfig N]
+    RUN[&quot;Runner&lt;br/&gt;ExportRunner / InferenceRunner&quot;]
+    H0[stage hooks]
+    CTX[&quot;ctx.stage_results&lt;br/&gt;stage outputs&quot;]
 
+    PE --&gt;|reads| PC
     PC --&gt; PH
     PC --&gt; STAGES
     STAGES --&gt; S0
     STAGES --&gt; S1
     STAGES --&gt; SN
 
-    S0 --&gt; R0[runner class]
-    S0 --&gt; H0[stage hooks]
+    PE --&gt;|loops stages| RUN
     S0 --&gt; IS0[input_sources]
+    S0 --&gt; RUN
+    RUN --&gt; H0
+    RUN --&gt;|write output| CTX
+    PE --&gt;|merge pipeline inputs&lt;br/&gt;+ upstream outputs| RUN
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
 
-    class PC,PH,STAGES nvNode
-    class S0,S1,SN,R0,H0,IS0 greyNode
+    class PE,PC,PH,STAGES,RUN nvNode
+    class S0,S1,SN,H0,IS0,CTX greyNode
     </pre></section>
 <section id="inter-stage-data">
 <h2>Inter-stage data<a class="headerlink" href="#inter-stage-data" title="Link to this heading">#</a></h2>

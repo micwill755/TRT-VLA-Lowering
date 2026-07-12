@@ -894,14 +894,45 @@ window.runMermaid = runMermaid;</script>
                   
   <section id="export-modules-overview">
 <h1>Export Modules Overview<a class="headerlink" href="#export-modules-overview" title="Link to this heading">#</a></h1>
-<p>Each GR00T engine stage compiles a small <strong>export module</strong> — a <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> whose
+<p>Each engine stage compiles a small <strong>export module</strong> — a <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> whose
 <code class="docutils literal notranslate"><span class="pre">forward</span></code> matches the TensorRT / Edge-LLM binding contract. Model-specific
-<strong>hooks</strong> under <code class="docutils literal notranslate"><span class="pre">trt/executor/models/groot/export/</span></code> build that module, patch
+<strong>hooks</strong> under <code class="docutils literal notranslate"><span class="pre">trt/executor/models/&lt;model&gt;/export/</span></code> build that module, patch
 attention for plugins, call <code class="docutils literal notranslate"><span class="pre">save_trt_engine_module</span></code>, and pass representative
 tensors to the next stage.</p>
 <p>The reusable wrappers live in <code class="docutils literal notranslate"><span class="pre">trt/modules/export/</span></code>. Stage hooks only wire
 subgraphs from <code class="docutils literal notranslate"><span class="pre">ctx.model</span></code> and handle I/O layout (NCHW vs HWC, flat KV bindings,
 dummy downstream tensors).</p>
+<section id="how-export-modules-become-edge-llm-engines">
+<h2>How export modules become Edge-LLM engines<a class="headerlink" href="#how-export-modules-become-edge-llm-engines" title="Link to this heading">#</a></h2>
+<p>Using Torch-TensorRT export modules keeps the build inside PyTorch instead of a
+separate ONNX path: each stage defines an <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> with the exact binding
+names the C++ runtime expects, compiles it directly, and writes <code class="docutils literal notranslate"><span class="pre">config.json</span></code>
+from the same <code class="docutils literal notranslate"><span class="pre">PipelineIOSpec</span></code> that wires stages together in Python.</p>
+<pre  class="mermaid">
+        %%{init: {'theme':'neutral', 'themeVariables': {'primaryColor':'#76B900','primaryTextColor':'#fff','primaryBorderColor':'#5a8f00','lineColor':'#666','edgeLabelBackground':'#ffffff','labelTextColor':'#000','clusterBkg':'#ffffff','clusterBorder':'#999'}}}%%
+graph TB
+    EP[&quot;ExportPipeline&lt;br/&gt;pipeline executor&quot;]
+    HOOKS[&quot;Stage export hooks&lt;br/&gt;preprocess / export / postprocess&quot;]
+    EM[&quot;Export module&lt;br/&gt;nn.Module in trt/modules/export/&quot;]
+    SPEC[&quot;PipelineIOSpec&lt;br/&gt;GROOT_EDGE_IO / PI05_EDGE_IO&quot;]
+    COMPILE[&quot;Torch-TensorRT compile&lt;br/&gt;save_trt_engine_module&quot;]
+    ART[&quot;Engine artifacts&lt;br/&gt;.engine + config.json&lt;br/&gt;+ language sidecars&quot;]
+    RT[&quot;Edge-LLM C++ runtime&lt;br/&gt;LLMInferenceRuntime&quot;]
+
+    EP --&gt;|per stage| HOOKS
+    HOOKS --&gt;|preprocess: build module&lt;br/&gt;+ sample tensors| EM
+    HOOKS --&gt;|export: patch attention| COMPILE
+    EM --&gt; COMPILE
+    SPEC --&gt;|input_names / output_names&lt;br/&gt;lm_to_action_slots| COMPILE
+    COMPILE --&gt; ART
+    ART --&gt;|load + bind by name| RT
+
+    classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
+    classDef greyNode fill:#f5f5f5,stroke:#999,stroke-width:1px,color:#333
+
+    class EP,EM,COMPILE,RT nvNode
+    class HOOKS,SPEC,ART greyNode
+    </pre></section>
 <section id="stage-map">
 <h2>Stage map<a class="headerlink" href="#stage-map" title="Link to this heading">#</a></h2>
 <pre  class="mermaid">
@@ -916,7 +947,10 @@ graph LR
 
     classDef nvNode fill:#76B900,stroke:#5a8f00,stroke-width:1px,color:#fff
     class V,L,AC,A nvNode
-    </pre><div class="pst-scrollable-table-container"><table class="table">
+    </pre><p>GR00T uses four stages (vision → language → action_context → action). Pi0.5 and
+SmolVLA use three (vision → language → action) with <code class="docutils literal notranslate"><span class="pre">PI05PrefixKVStepEncoderExportModule</span></code>
+/ <code class="docutils literal notranslate"><span class="pre">SmolVLAPrefixKVStepEncoderExportModule</span></code> for the action engine.</p>
+<div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 18.0%" />
 <col style="width: 28.0%" />
@@ -1038,6 +1072,7 @@ just-compiled engine.</p>
   </div>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-export-modules-become-edge-llm-engines">How export modules become Edge-LLM engines</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stage-map">Stage map</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#common-export-hook-pattern">Common export hook pattern</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#related-pages">Related pages</a></li>
