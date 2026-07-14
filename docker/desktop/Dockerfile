@@ -29,8 +29,18 @@ ARG HOST_UID=1000
 ARG HOST_GID=1000
 ARG HOST_USER=dev
 
+# Ubuntu 24.04 base ships a default "ubuntu" user at UID 1000, which can collide
+# with HOST_UID. Reuse any existing account for that UID instead of failing.
 RUN groupadd -f -g "${HOST_GID}" "${HOST_USER}" && \
-    id -u "${HOST_USER}" >/dev/null 2>&1 || useradd -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash "${HOST_USER}"
+    if ! id -u "${HOST_USER}" >/dev/null 2>&1; then \
+      existing_user="$(getent passwd "${HOST_UID}" | cut -d: -f1)"; \
+      if [ -n "${existing_user}" ]; then \
+        usermod -l "${HOST_USER}" -g "${HOST_GID}" "${existing_user}" && \
+        usermod -d "/home/${HOST_USER}" -m "${HOST_USER}" 2>/dev/null || true; \
+      else \
+        useradd -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash "${HOST_USER}"; \
+      fi; \
+    fi
 
 WORKDIR /workspace/TRT-VLA-Lowering
 
