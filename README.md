@@ -75,23 +75,48 @@ EDGE_LLM_PLUGIN_SO=/home/mwilliams/tensorrt-edge-llm/build-plugin-trt10/libNvInf
 
 ### Desktop parity (x86_64, RTX 5090, TRT 10.14)
 
-Download and extract the [TensorRT 10.14 GA](https://developer.nvidia.com/tensorrt)
-x86_64 tarball (CUDA 13). Do **not** reuse a TRT 11 plugin from native conda.
+The plugin **must** link `libnvinfer.so.10` (TRT 10.x). If your host only has
+TensorRT 11 (`libnvinfer.so.11`), a host build silently links the wrong version
+and fails inside the container with `libnvinfer.so.11: cannot open shared object`.
+
+**Recommended: build inside the desktop container.** It already has the pip
+TensorRT 10.14 libs, so the plugin links the exact runtime it will use. Headers
+come from the open-source TensorRT repo (no gated NVIDIA download):
+
+```bash
+cd ~/workspace/Test
+
+# Rebuild the desktop image first (adds cmake + build-essential):
+./docker/desktop/build.sh
+
+# Build the plugin in-container (clones TRT 10.14 headers, uses pip libs):
+EDGE_LLM_SRC=~/workspace/TensorRT-Edge-LLM ./docker/desktop/build-plugin.sh
+```
+
+This writes `build-plugin-trt10/libNvInfer_edgellm_plugin.so.1.0` in the Edge-LLM
+source and prints the `ldd` line (expect `libnvinfer.so.10`).
+
+**Alternative: host build against a TRT 10.14 tarball.** If you have the
+[TensorRT 10.14 GA](https://developer.nvidia.com/tensorrt) x86_64 tarball (CUDA 13)
+extracted, keep TRT 11 off the linker path and point cmake at it:
 
 ```bash
 cd ~/workspace/TensorRT-Edge-LLM
+export PATH=/usr/local/cuda-13.0/bin:$PATH CUDA_HOME=/usr/local/cuda-13.0
+unset LD_LIBRARY_PATH
 rm -rf build-plugin-trt10 && mkdir build-plugin-trt10 && cd build-plugin-trt10
 cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
-  -DTRT_PACKAGE_DIR=$HOME/workspace/TensorRT-10.14.1.48 \
+  -DTRT_PACKAGE_DIR=$HOME/workspace/TensorRT-10.14.2.2 \
   -DCUDA_CTK_VERSION=13.0 \
   -DENABLE_CUTE_DSL=OFF
 make NvInfer_edgellm_plugin -j"$(nproc)"
 ```
 
-Verify the plugin registers the VLA attention creators:
+Verify (either method):
 
 ```bash
+ldd build-plugin-trt10/libNvInfer_edgellm_plugin.so.* | grep nvinfer   # must be .so.10
 strings build-plugin-trt10/libNvInfer_edgellm_plugin.so.* | grep -E 'AttentionPlugin|ViTAttentionPlugin'
 ```
 
@@ -101,8 +126,8 @@ Set in `docker/desktop/.env`:
 EDGE_LLM_PLUGIN_SO=/home/micwilliams/workspace/TensorRT-Edge-LLM/build-plugin-trt10/libNvInfer_edgellm_plugin.so.1.0
 ```
 
-`docker/desktop/run.sh` auto-resolves `.so.1` vs `.so.1.0` and mounts the plugin
-build directory into the container.
+`docker/desktop/run.sh` auto-resolves `.so.1` vs `.so.1.0`, mounts the plugin dir,
+and stages a world-readable copy into the container.
 
 ### Native dev (x86_64, TRT 11)
 

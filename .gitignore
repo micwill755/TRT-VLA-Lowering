@@ -4,3 +4,4 @@ __pycache__/
 docker/.env
 docker/thor/.env
 docker/desktop/.env
+docker/desktop/.trt-oss-include/

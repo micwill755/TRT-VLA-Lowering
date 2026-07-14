@@ -47,12 +47,17 @@ RUN groupadd -f -g "${HOST_GID}" "${HOST_USER}" && \
 
 WORKDIR /workspace/TRT-VLA-Lowering
 
+# build-essential + cmake let you compile the Edge-LLM plugin inside the
+# container against the pip TensorRT 10.14 libs (see docker/desktop/build-plugin.sh).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 \
       python3-pip \
       python3-dev \
       git \
       ca-certificates \
+      build-essential \
+      cmake \
+      ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --upgrade --ignore-installed pip setuptools wheel && \
