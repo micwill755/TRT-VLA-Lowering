@@ -25,8 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
 ENV CUDA_HOME=/usr/local/cuda \
-    PATH=/usr/local/cuda/bin:${PATH} \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+    PATH=/usr/local/cuda/bin:${PATH}
 
 ARG HOST_UID=1000
 ARG HOST_GID=1000
@@ -72,6 +71,24 @@ RUN python3 -m pip install --upgrade --ignore-installed pip setuptools wheel && 
 
 COPY docker/common/requirements.container.txt /tmp/requirements.container.txt
 RUN python3 -m pip install -r /tmp/requirements.container.txt
+
+# torch+cu130 bundles nvidia-cublas/cudnn 13.1 via pip. The base cuda:13.0 image
+# ships older libcublasLt 13.0 — if it wins LD_LIBRARY_PATH, large GEMMs on
+# Blackwell (sm_120) fail with CUBLAS_STATUS_INVALID_VALUE / NOT_INITIALIZED.
+RUN python3 - <<'PY'
+import os
+import nvidia.cublas
+import nvidia.cudnn
+cu13 = os.path.join(os.path.dirname(nvidia.cublas.__file__), "lib")
+cudnn = os.path.join(os.path.dirname(nvidia.cudnn.__file__), "lib")
+assert os.path.isfile(os.path.join(cu13, "libcublas.so.13")), cu13
+assert os.path.isfile(os.path.join(cudnn, "libcudnn.so.9")), cudnn
+with open("/etc/trt-vla-ldpath", "w") as f:
+    f.write(f"{cu13}:{cudnn}:/usr/local/cuda/lib64\n")
+print(open("/etc/trt-vla-ldpath").read().strip())
+PY
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:/usr/local/cuda/lib64
+ENV CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 COPY docker/common/entrypoint.sh /usr/local/bin/trt-vla-entrypoint.sh
 RUN chmod +x /usr/local/bin/trt-vla-entrypoint.sh
