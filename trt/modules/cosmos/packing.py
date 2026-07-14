@@ -7,7 +7,6 @@ import torch
 _SYSTEM_PROMPT_IMAGE = "You are a helpful assistant who will generate images from a give prompt."
 _SYSTEM_PROMPT_VIDEO = "You are a helpful assistant who will generate videos from a give prompt."
 
-
 def get_3d_mrope_ids_text_tokens(
     num_tokens: int,
     temporal_offset: int | float,
@@ -117,6 +116,16 @@ def encode_cosmos_video(vae, pixels: torch.Tensor) -> torch.Tensor:
     mean = torch.tensor(vae.config.latents_mean, device=raw_mu.device, dtype=dtype)
     inv_std = 1.0 / torch.tensor(vae.config.latents_std, device=raw_mu.device, dtype=dtype)
     return ((raw_mu - mean.view(1, -1, 1, 1, 1)) * inv_std.view(1, -1, 1, 1, 1)).to(in_dtype)
+
+
+def decode_cosmos_video(vae, latents: torch.Tensor) -> torch.Tensor:
+    """normalized Cosmos latents [B,C,T,H,W] -> pixels [B,3,T,H,W]."""
+    in_dtype = latents.dtype
+    dtype = vae.dtype
+    mean = torch.tensor(vae.config.latents_mean, device=latents.device, dtype=dtype)
+    inv_std = 1.0 / torch.tensor(vae.config.latents_std, device=latents.device, dtype=dtype)
+    z_raw = latents.to(dtype) / inv_std.view(1, -1, 1, 1, 1) + mean.view(1, -1, 1, 1, 1)
+    return vae.decode(z_raw).sample.to(in_dtype)
 
 
 def build_cosmos_packed_static(
