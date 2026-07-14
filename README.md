@@ -15,9 +15,117 @@ export EDGE_LLM_PLUGIN_SO=/path/to/libNvInfer_edgellm_plugin.so   # Python expor
 export EDGELLM_PLUGIN_PATH=/path/to/libNvInfer_edgellm_plugin.so    # C++ llm_inference
 ```
 
-The plugin `.so` must match the TensorRT major version of the `llm_inference` binary (e.g. TRT 11 plugin with `build-plugin-trt11/.../llm_inference`).
+The plugin `.so` must match the TensorRT major version you compile against:
 
-## Quick start
+| Target | TensorRT | Plugin build dir |
+|--------|----------|------------------|
+| Thor Docker / DriveOS | **10.14** | `build-plugin-trt10/` (aarch64) |
+| Desktop parity Docker (5090) | **10.14** | `build-plugin-trt10/` (x86_64) |
+| Native 5090 conda dev | **11** | `build-plugin-trt11/` (x86_64) |
+
+See [Building the Edge-LLM plugin](#building-the-edge-llm-plugin-libnvinfer_edgellm_pluginso) below.
+
+## Building the Edge-LLM plugin (`libNvInfer_edgellm_plugin.so`)
+
+VLA export scripts call `load_plugins_for_trt()` and require a native TensorRT
+plugin built from [TensorRT-Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM).
+The pip `tensorrt` wheel does **not** ship dev headers (`NvInfer.h`) — you need
+the full TensorRT tarball for the plugin build.
+
+Clone Edge-LLM (same repo/branch used on Thor, e.g. `cosmos`):
+
+```bash
+git clone git@github.com:NVIDIA/TensorRT-Edge-LLM.git   # or your fork
+cd TensorRT-Edge-LLM
+git submodule update --init 3rdParty/nlohmannJson
+```
+
+`ENABLE_CUTE_DSL=OFF` is enough for Pi0.5 / GR00T / SmolVLA VLA export (attention
+plugins only). Use `ALL` only if you need Qwen3.5 GDN / NVFP4 MoE runtime paths.
+
+### Thor (aarch64, DriveOS 7.0.5, TRT 10.14)
+
+TensorRT dev headers are not installed system-wide on Thor — point `TRT_PACKAGE_DIR`
+at the full TRT package (headers + libs). On DriveOS this is typically under `/gtl`:
+
+```bash
+cd /path/to/TensorRT-Edge-LLM
+rm -rf build-plugin-trt10 && mkdir build-plugin-trt10 && cd build-plugin-trt10
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DTRT_PACKAGE_DIR=/gtl/managed/builds/TensorRT-10.14.2.2 \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64_linux_toolchain.cmake \
+  -DEMBEDDED_TARGET=auto-thor \
+  -DCUDA_CTK_VERSION=13.0 \
+  -DENABLE_CUTE_DSL=OFF
+make NvInfer_edgellm_plugin -j"$(nproc)"
+```
+
+Output:
+
+```text
+build-plugin-trt10/libNvInfer_edgellm_plugin.so.1.0
+```
+
+Set in `docker/thor/.env`:
+
+```bash
+EDGE_LLM_PLUGIN_SO=/home/mwilliams/tensorrt-edge-llm/build-plugin-trt10/libNvInfer_edgellm_plugin.so.1.0
+```
+
+### Desktop parity (x86_64, RTX 5090, TRT 10.14)
+
+Download and extract the [TensorRT 10.14 GA](https://developer.nvidia.com/tensorrt)
+x86_64 tarball (CUDA 13). Do **not** reuse a TRT 11 plugin from native conda.
+
+```bash
+cd ~/workspace/TensorRT-Edge-LLM
+rm -rf build-plugin-trt10 && mkdir build-plugin-trt10 && cd build-plugin-trt10
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DTRT_PACKAGE_DIR=$HOME/workspace/TensorRT-10.14.1.48 \
+  -DCUDA_CTK_VERSION=13.0 \
+  -DENABLE_CUTE_DSL=OFF
+make NvInfer_edgellm_plugin -j"$(nproc)"
+```
+
+Verify the plugin registers the VLA attention creators:
+
+```bash
+strings build-plugin-trt10/libNvInfer_edgellm_plugin.so.* | grep -E 'AttentionPlugin|ViTAttentionPlugin'
+```
+
+Set in `docker/desktop/.env`:
+
+```bash
+EDGE_LLM_PLUGIN_SO=/home/micwilliams/workspace/TensorRT-Edge-LLM/build-plugin-trt10/libNvInfer_edgellm_plugin.so.1.0
+```
+
+`docker/desktop/run.sh` auto-resolves `.so.1` vs `.so.1.0` and mounts the plugin
+build directory into the container.
+
+### Native dev (x86_64, TRT 11)
+
+For the native 5090 conda stack (torch 2.14 / TRT 11), build into `build-plugin-trt11`
+and point `TRT_PACKAGE_DIR` at your TRT 11 install:
+
+```bash
+cd ~/workspace/TensorRT-Edge-LLM
+rm -rf build-plugin-trt11 && mkdir build-plugin-trt11 && cd build-plugin-trt11
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DTRT_PACKAGE_DIR=/path/to/TensorRT-11.x \
+  -DENABLE_CUTE_DSL=OFF
+make NvInfer_edgellm_plugin -j"$(nproc)"
+```
+
+```bash
+export EDGE_LLM_PLUGIN_SO=/path/to/build-plugin-trt11/libNvInfer_edgellm_plugin.so.1.0
+export EDGELLM_PLUGIN_PATH="$EDGE_LLM_PLUGIN_SO"
+```
+
+More Thor/Docker troubleshooting: [docker/RUNBOOK.md](docker/RUNBOOK.md).
+
 
 From this directory:
 
@@ -224,7 +332,7 @@ cd ~/workspace/Test/TRT-VLA-Lowering   # or your clone
 git checkout thor                      # same branch as Thor
 
 cp docker/desktop/env.example docker/desktop/.env
-# Edit: TRT_VLA_ROOT, LEROBOT_ROOT, EDGE_LLM_PLUGIN_SO (x86 TRT 10.14 plugin)
+# Edit: TRT_VLA_ROOT, LEROBOT_ROOT, EDGE_LLM_PLUGIN_SO (see plugin build above)
 
 chmod +x docker/desktop/build.sh docker/desktop/run.sh
 ./docker/desktop/build.sh
@@ -244,7 +352,7 @@ TRT_VLA_THOR=0 ./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
 TRT_VLA_THOR=1 ./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
 ```
 
-Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) (`docker run --gpus all`). See `docker/RUNBOOK.md` for the Edge-LLM plugin x86 build notes.
+Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) (`docker run --gpus all`). Build the TRT 10.14 x86 plugin first — see [Building the Edge-LLM plugin](#building-the-edge-llm-plugin-libnvinfer_edgellm_pluginso).
 
 ## Performance metrics
 
