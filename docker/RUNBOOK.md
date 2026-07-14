@@ -155,33 +155,165 @@ EDGE_LLM_PLUGIN_SO=/home/mwilliams/tensorrt-edge-llm/build-plugin-trt10/libNvInf
 On Thor, CUDA `total_memory` is **not fixed VRAM**. It equals the **GPU
 carveout** reserved from unified system RAM via 2 MB hugetlbfs huge pages.
 The boot default is **3072 pages = 6 GB** (`/etc/systemd/scripts/nv_hugetlbfs_init.sh`),
-which is too small for the Pi0.5 fp16 model (~7.9 GB weights) and TRT compile.
+which is too small for Pi0.5 TRT compile.
 
-**Check current size:**
+#### What it does
+
+Thor has **unified memory** (~58 GB total). A slice is reserved for the GPU
+via hugetlbfs; CUDA only sees that slice as `torch.cuda.get_device_properties().total_memory`.
+The rest is **host RAM** for Linux, Docker, and TensorRT's CPU-side builder.
+
+```
+58 GB total RAM
+├── GPU carveout (hugetlbfs)  → CUDA / GPU weights / TRT GPU builder
+└── Host RAM pool             → OS, Docker, TRT graph on CPU (~35 GB peak for language)
+```
+
+**Trade-off:** more carveout → more GPU memory, **less** host RAM. Language TRT
+compile needs both (~20 GB GPU **and** ~35 GB host peak), so you cannot max out
+only one side.
+
+#### Check current size
 
 ```bash
 cat /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
 # pages × 2 MB = GPU memory seen by CUDA
+
+free -h
 ```
 
-**Increase at runtime (until reboot):**
+Inside the container (restart containers after changing carveout):
 
 ```bash
-# 6144 pages = 12 GB — recommended for Pi0.5 e2e
-sudo bash -c 'echo 6144 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
-
-# Verify inside container (restart containers after changing)
-./docker/run.sh python3 -c "import torch; print(torch.cuda.mem_get_info()[1]/1e9, 'GB')"
+./docker/run.sh python3 -c "import torch; print(f'{torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB')"
 ```
 
-**Make permanent:** edit `NumPages=3072` → `NumPages=6144` in
-`/etc/systemd/scripts/nv_hugetlbfs_init.sh`, then reboot.
+#### Increase at runtime (until reboot)
 
-Formula: `pages = target_GB × 512` (e.g. 12 GB → 6144 pages). Each page
-reserves 2 MB from OS RAM — with ~40+ GB free on a 60 GB Thor, 12 GB carveout
-is safe.
+Stop GPU containers first:
+
+```bash
+sudo docker stop $(sudo docker ps -q) 2>/dev/null
+```
+
+Set pages (`pages = target_GB × 512`):
+
+```bash
+# 12 GB — vision + load; language compile may GPU-OOM
+sudo bash -c 'echo 6144 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
+
+# 16 GB — language compile GPU-OOM'd here (builder needs ~9 GB on top of weights)
+sudo bash -c 'echo 8192 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
+
+# 20 GB — recommended for full Pi0.5 e2e compile (validated)
+sudo bash -c 'echo 10240 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
+```
+
+Verify:
+
+```bash
+python3 -c "p=int(open('/sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages').read()); print(f'GPU carveout: {p*2/1024:.1f} GB, host pool: ~{58-p*2/1024:.1f} GB')"
+```
+
+#### Make permanent
+
+Edit `NumPages=10240` (20 GB) in `/etc/systemd/scripts/nv_hugetlbfs_init.sh`, then reboot.
 
 Official reference: [DriveOS GPU Carveout](https://developer.nvidia.com/docs/drive/drive-os/7.0.3/public/drive-os-linux-sdk/platform-customization/Carveout_Customization_and_Profiling/carveout_customization.html)
+
+### Host swap file (Thor — required for language TRT compile)
+
+#### What it does
+
+A **swap file** is disk space used as overflow when **host RAM** is full. It does
+**not** add GPU memory. During language TRT compile, host RSS peaks at **~35 GB**.
+With a 20 GB carveout only **~38 GB** host RAM remains — tight once Docker and
+the OS are included. Swap prevents the kernel OOM-killer (`Killed` with no Python
+traceback) during that spike.
+
+Swap is slower than RAM but acceptable for a **one-time engine build**. Inference
+of finished engines uses far less memory.
+
+#### Why `/gtl` and not `/`
+
+The root filesystem is only **~26 GB** and fills up when writing multi-GB
+`.engine` files. Use the NVMe mount at `/gtl` (~1.8 TB) for both swap and engine output.
+
+Set in `docker/.env`:
+
+```bash
+ENGINE_DIR=/gtl/pi05_edge_llm
+```
+
+#### Create swap (one-time)
+
+```bash
+# 32 GB swap on NVMe (adjust size as needed)
+sudo fallocate -l 32G /gtl/swapfile
+sudo chmod 600 /gtl/swapfile
+sudo mkswap /gtl/swapfile
+sudo swapon /gtl/swapfile
+
+# Persist across reboot
+grep -q '/gtl/swapfile' /etc/fstab || echo '/gtl/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+Verify:
+
+```bash
+free -h
+swapon --show
+```
+
+During compile, watch usage:
+
+```bash
+watch -n2 'free -h; swapon --show'
+```
+
+If `Swap: used` climbs during language compile, swap is doing its job.
+
+#### Disable swap (optional test)
+
+To confirm host RAM alone is insufficient without swap:
+
+```bash
+sudo swapoff /gtl/swapfile
+# run compile — expect Killed during language TRT build
+sudo swapon /gtl/swapfile
+```
+
+### Pi0.5 compile memory requirements (Thor, `test_vla_pi05_e2e.py`)
+
+Measured on DRIVE AGX Thor (~58 GB RAM, DriveOS 7.0.5, TRT 10.14). Values are
+**compile-time** peaks for the default libero frame / fp16 policy — not inference.
+
+| Stage | GPU carveout (min) | Host RAM peak | Engine on disk | Failure mode if short |
+|-------|-------------------:|--------------:|---------------:|------------------------|
+| **Policy load** | 6 GB (boot default) too small; **12 GB+** to fit fp16 weights | ~8 GB | — | CUDA OOM loading weights |
+| **Vision TRT compile** | **12–16 GB** | ~15–20 GB | (in-process; not saved by default) | CUDA OOM or builder warning |
+| **Language TRT compile** | **20 GB** recommended (14 GB → GPU OOM: builder needs **~9.2 GB** on top of weights) | **~35 GB** RSS | **~9.2 GB** (`language.engine`) | `Killed` (host OOM) without swap; GPU OOM if carveout under ~18 GB |
+| **Diffusion TRT compile** | **20 GB** (after freeing language TRT runtime) | ~12–18 GB | varies | CUDA OOM if language TRT still on GPU |
+| **Full e2e (all stages)** | **20 GB carveout** | **~35 GB host** + swap headroom | **10+ GB** total engines | See rows above |
+
+**Recommended Thor compile config (validated end-to-end, `close%=100.0` all stages):**
+
+| Setting | Value |
+|---------|-------|
+| GPU carveout | **10240 pages = 20 GB** |
+| Host swap | **32 GB** at `/gtl/swapfile` |
+| Engine output | `ENGINE_DIR=/gtl/pi05_edge_llm` |
+| Root disk | Keep free; do not write engines to `/tmp` on `/` |
+
+**Carveout vs swap — do you need both?**
+
+| Config | Vision | Language compile | Notes |
+|--------|--------|------------------|-------|
+| 20 GB carveout, no swap | OK | **Killed** (~35 GB host RSS) | GPU OK, host OOM |
+| 14 GB carveout, no swap | OK | **GPU OOM** (builder ~9.2 GB) | More host RAM, not enough GPU |
+| **20 GB carveout + 32 GB swap** | OK | **OK** | Validated full e2e |
+
+Inference of saved engines needs substantially less than compile peaks.
 
 ### GPU access: the `libcuda` group (important)
 
@@ -364,11 +496,27 @@ timedatectl status
 
 NVIDIA recommends ONNX → TensorRT for deployment inference. This project uses PyTorch + Torch-TensorRT for **export and parity** during development — expect best-effort support on Thor.
 
+### `Killed` during language TRT compile (host OOM)
+
+Language TRT build peaks at **~35 GB host RSS**. With a 20 GB GPU carveout only
+**~38 GB** host RAM remains — not enough without swap. `dmesg` shows
+`global_oom` / `Out of memory: Killed process python3`.
+
+Fix: add swap (see **Host swap file** above) and set `ENGINE_DIR=/gtl/pi05_edge_llm`
+so engine writes do not fill root `/`.
+
+### `OSError: [Errno 28] No space left on device` writing `.engine`
+
+Root disk (`/`) is only ~26 GB. Language engine alone is **~9.2 GB**. Use
+`ENGINE_DIR=/gtl/pi05_edge_llm` in `docker/.env` (NVMe mount).
+
 ### `torch.OutOfMemoryError` / CUDA OOM with plenty of system RAM
 
 Thor defaults to a **6 GB GPU carveout** while system RAM may be 60 GB. CUDA only
-sees the carveout pool, not all of unified memory. Increase hugetlbfs pages
-(see **GPU memory carveout** above), stop running containers, and retry.
+sees the carveout pool, not all of unified memory. Language TRT compile also needs
+**~9 GB GPU** for the TensorRT builder on top of model weights — **14 GB carveout
+is not enough**; use **20 GB** (see **GPU memory carveout** and **Pi0.5 compile
+memory requirements** above).
 
 ```bash
 sudo docker stop $(sudo docker ps -q) 2>/dev/null
@@ -403,10 +551,78 @@ See `docker/requirements.container.txt` for the shared pip dependency list.
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Builds Python ML stack on top of local mlperf base |
-| `build.sh` | Build wrapper |
-| `run.sh` | Run wrapper with Thor-specific mounts and flags |
+| `Dockerfile` | Thor aarch64 image (torch 2.10 + TRT 10.14 host mount) |
+| `Dockerfile.desktop` | Desktop x86_64 image (same torch/TRT versions via pip) |
+| `build.sh` | Build Thor image |
+| `build-desktop.sh` | Build desktop parity image |
+| `run.sh` | Run Thor container |
+| `run-desktop.sh` | Run desktop parity container (`--gpus all`) |
 | `entrypoint.sh` | Auto-install LeRobot on first start |
 | `requirements.container.txt` | Pip deps (excluding torch/lerobot) |
-| `env.example` | Template for `docker/.env` |
+| `env.example` | Thor `docker/.env` template |
+| `env.desktop.example` | Desktop `docker/.env` template |
 | `RUNBOOK.md` | This document |
+
+## Desktop parity container (RTX 5090 / x86_64)
+
+Use this when benchmarking against Thor with the **same** PyTorch / TensorRT /
+torch-tensorrt versions. Your native conda env (torch 2.14, TRT 11) is faster
+but not comparable to Thor compile behavior.
+
+### Prerequisites
+
+1. [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed (`docker run --gpus all` works).
+2. Edge-LLM plugin built for **TRT 10.14 on x86_64** (not the TRT 11 plugin used for native 5090 dev).
+3. LeRobot cloned and `docker/.env` paths set.
+
+### Quick start
+
+```bash
+cd /path/to/TRT-VLA-Lowering
+cp docker/env.desktop.example docker/.env
+# edit TRT_VLA_ROOT, LEROBOT_ROOT, EDGE_LLM_PLUGIN_SO
+
+chmod +x docker/build-desktop.sh docker/run-desktop.sh
+./docker/build-desktop.sh
+./docker/run-desktop.sh bash
+```
+
+Inside the container:
+
+```bash
+python3 -c "import torch, torch_tensorrt, tensorrt as trt; print(torch.__version__, torch_tensorrt.__version__, trt.__version__)"
+python3 vla/test_vla_pi05_e2e.py
+```
+
+### Thor vs desktop parity vs native 5090
+
+| | Thor `run.sh` | Desktop `run-desktop.sh` | Native 5090 conda |
+|---|---|---|---|
+| Arch | aarch64 | x86_64 | x86_64 |
+| PyTorch | 2.10+cu130 | 2.10+cu130 | 2.14+cu132 |
+| TensorRT | 10.14 host | 10.14 pip | 11.0 |
+| torch-tensorrt | 2.10 | 2.10 | 2.14 dev |
+| `TRT_VLA_THOR` | `1` | `0` (set `1` to match Thor) | N/A |
+| GPU memory | 20 GB carveout + swap | Full VRAM | Full VRAM |
+| cuDNN | disabled | enabled (unless `TRT_VLA_THOR=1`) | enabled |
+
+Set `TRT_VLA_THOR=1` when calling `run-desktop.sh` to test Thor's cuDNN-disabled
+path inside the otherwise identical stack. On 5090 this barely changes timings;
+the Thor gap vs desktop is mostly TRT version, memory, and SoC bandwidth.
+
+### Edge-LLM plugin on x86_64
+
+Build the TRT **10.14** plugin (same branch/cmake as Thor, x86 toolchain):
+
+```bash
+cd /path/to/tensorrt-edge-llm
+git submodule update --init 3rdParty/nlohmannJson
+rm -rf build-plugin-trt10 && mkdir build-plugin-trt10 && cd build-plugin-trt10
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DTRT_PACKAGE_DIR=/path/to/TensorRT-10.14.x \
+  -DENABLE_CUTE_DSL=OFF
+make NvInfer_edgellm_plugin -j"$(nproc)"
+```
+
+Point `EDGE_LLM_PLUGIN_SO` in `docker/.env` at the resulting `.so`.
