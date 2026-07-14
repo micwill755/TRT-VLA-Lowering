@@ -151,6 +151,159 @@ export EDGELLM_PLUGIN_PATH="$EDGE_LLM_PLUGIN_SO"
 
 More Thor/Docker troubleshooting: [docker/RUNBOOK.md](docker/RUNBOOK.md).
 
+## Docker layout
+
+```text
+docker/
+├── common/entrypoint.sh, requirements.container.txt
+├── thor/          # DRIVE AGX Thor (aarch64, TRT 10.14 host mount)
+├── desktop/       # RTX 5090 parity (x86_64, TRT 10.14 pip)
+├── build.sh       # wrapper → thor/build.sh
+├── run.sh         # wrapper → thor/run.sh
+└── RUNBOOK.md
+```
+
+## Running Pi0.5 e2e (`test_vla_pi05_e2e.py`)
+
+Primary parity script: `vla/test_vla_pi05_e2e.py`. It compiles vision / language /
+diffusion TRT engines, checks `close%=100` parity per stage, and prints eager vs
+TRT timings (100 warmed iterations per stage).
+
+| Target | When to use |
+|--------|-------------|
+| **Thor Docker** | Deployment target (DriveOS 7.0.5, TRT 10.14) |
+| **5090 parity Docker** | Pre-validate Thor behavior on a desktop GPU (same torch/TRT as Thor) |
+| **5090 native conda** | Fastest local dev (torch 2.14, TRT 11) — **not** comparable to Thor |
+
+### DRIVE AGX Thor
+
+**Stack:** PyTorch 2.10+cu130, torch-tensorrt 2.10, TensorRT 10.14 (host mount),
+`TRT_VLA_THOR=1` (cuDNN off), Edge-LLM plugin `build-plugin-trt10/` (aarch64).
+
+**One-time setup:**
+
+```bash
+cd /home/mwilliams/test/TRT-VLA-Lowering   # or your clone
+
+cp docker/thor/env.example docker/thor/.env
+# Edit docker/thor/.env:
+#   LEROBOT_ROOT=/home/mwilliams/test/lerobot
+#   EDGE_LLM_PLUGIN_SO=/home/mwilliams/tensorrt-edge-llm/build-plugin-trt10/libNvInfer_edgellm_plugin.so.1.0
+#   ENGINE_DIR=/gtl/pi05_edge_llm
+
+chmod +x docker/thor/build.sh docker/thor/run.sh
+./docker/thor/build.sh
+```
+
+Build the Edge-LLM plugin on Thor if needed — see
+[Thor (aarch64, DriveOS 7.0.5, TRT 10.14)](#thor-aarch64-driveos-705-trt-1014) above.
+
+| Topic | Guide |
+|-------|-------|
+| Full Thor runbook | [docker/RUNBOOK.md](docker/RUNBOOK.md) |
+| GPU carveout | [RUNBOOK — GPU memory carveout](docker/RUNBOOK.md#gpu-memory-carveout-thor--required-for-pi05) |
+| Host swap | [RUNBOOK — Host swap file](docker/RUNBOOK.md#host-swap-file-thor--required-for-language-trt-compile) |
+| Compile memory | [RUNBOOK — Pi0.5 compile memory](docker/RUNBOOK.md#pi05-compile-memory-requirements-thor-test_vla_pi05_e2epy) |
+
+**Host prep (each boot / before compile):** Pi0.5 language TRT needs ~20 GB GPU
+carveout, host swap, and engine output on `/gtl`. Details:
+[docker/RUNBOOK.md](docker/RUNBOOK.md).
+
+```bash
+sudo docker stop $(sudo docker ps -q) 2>/dev/null
+sudo bash -c 'echo 10240 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
+sudo swapon /gtl/swapfile 2>/dev/null || true
+```
+
+**Run:**
+
+```bash
+cd /home/mwilliams/test/TRT-VLA-Lowering
+./docker/thor/run.sh python3 vla/test_vla_pi05_e2e.py
+```
+
+Interactive shell: `./docker/thor/run.sh bash` then `python3 vla/test_vla_pi05_e2e.py`.
+
+Legacy wrappers `./docker/run.sh` and `./docker/build.sh` delegate to `thor/`.
+
+### RTX 5090 — parity Docker (matches Thor)
+
+**Stack:** Same versions as Thor (torch 2.10+cu130, TRT 10.14 pip, torch-tensorrt 2.10).
+Use this to preview Thor compile behavior and timings before running on hardware.
+
+**One-time setup:**
+
+```bash
+cd ~/workspace/Test   # repo root (directory containing docker/, trt/, vla/)
+
+git checkout thor
+cp docker/desktop/env.example docker/desktop/.env
+# Edit docker/desktop/.env:
+#   TRT_VLA_ROOT=/home/micwilliams/workspace/Test
+#   LEROBOT_ROOT=/home/micwilliams/workspace/lerobot
+#   EDGE_LLM_PLUGIN_SO=/home/micwilliams/workspace/TensorRT-Edge-LLM/build-plugin-trt10/libNvInfer_edgellm_plugin.so.1.0
+
+chmod +x docker/desktop/build.sh docker/desktop/run.sh docker/desktop/build-plugin.sh
+./docker/desktop/build.sh
+```
+
+Build the TRT **10.14** plugin inside the container (avoids host TRT 11 `libnvinfer.so.11` mismatch):
+
+```bash
+EDGE_LLM_SRC=~/workspace/TensorRT-Edge-LLM ./docker/desktop/build-plugin.sh
+# verify: ldd .../libNvInfer_edgellm_plugin.so.* | grep nvinfer  → libnvinfer.so.10
+```
+
+**Run:**
+
+```bash
+./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
+```
+
+`run.sh` sets pip `nvidia/cu13` + `nvidia/cudnn` on `LD_LIBRARY_PATH` (required on
+Blackwell / sm_120 — base-image cuBLAS 13.0 otherwise breaks large GEMMs).
+
+Optional — match Thor cuDNN-disabled behavior:
+
+```bash
+TRT_VLA_THOR=1 ./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
+```
+
+Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+
+### RTX 5090 — native conda (TRT 11 dev)
+
+**Stack:** torch 2.14+cu132, TRT 11, torch-tensorrt 2.14, plugin `build-plugin-trt11/`.
+Fastest on 5090; use for local iteration, not Thor deployment prediction.
+
+```bash
+conda activate lerobot
+export EDGE_LLM_PLUGIN_SO=/path/to/build-plugin-trt11/libNvInfer_edgellm_plugin.so.1.0
+cd /path/to/TRT-VLA-Lowering
+python3 vla/test_vla_pi05_e2e.py
+```
+
+### Pi0.5 timing comparison (RTX 5090, single libero frame)
+
+From `test_vla_pi05_e2e.py` output (`* execute` = per-stage forward; `total` = vision + language + one diffusion step). Eager numbers match across stacks; TRT differences are mostly **language**.
+
+| Stage | Eager (both) | TRT parity Docker (TRT 10.14) | TRT native conda (TRT 11) |
+|-------|----------------|----------------------------------|---------------------------|
+| Vision | ~16.5 ms | 9.0 ms (**1.8×**) | 9.3 ms (**1.8×**) |
+| Language | ~15.0 ms | 35.1 ms (**0.4×**) | 14.0 ms (**1.1×**) |
+| Diffusion | ~12.5 ms | 2.2 ms (**5.6×**) | 2.1 ms (**6.0×**) |
+| **Total** | ~44 ms | 46 ms (**0.95×**) | 25 ms (**1.7×**) |
+
+**Takeaways:**
+
+- **Eager ~identical** → model/data path is the same; container setup is correct.
+- **Vision / diffusion TRT** are similar between TRT 10.14 container and TRT 11 native.
+- **Language TRT** is ~2.5× slower in the TRT 10.14 parity container than TRT 11 native; this drives the total gap.
+- Use **parity Docker** to validate Thor (`close%`, compile, relative TRT 10.14 behavior). Use **native TRT 11** for best 5090 performance.
+
+Thor timings: run the same script on Thor and compare stage-by-stage (expect closer to parity-docker TRT 10.14 than to native TRT 11).
+
+## Quick start
 
 From this directory:
 
@@ -305,81 +458,7 @@ export EDGELLM_PLUGIN_PATH=/path/to/libNvInfer_edgellm_plugin.so
 
 See `docs/source/edge_llm/e2e.rst` for request JSON format, tokenization parity notes, and common failure modes.
 
-```bash
-sudo docker stop $(sudo docker ps -q) 2>/dev/null
-sudo bash -c 'echo 10240 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
-sudo swapon /gtl/swapfile 2>/dev/null || true
-./docker/thor/run.sh python3 vla/test_vla_pi05_e2e.py
-```
-
-## DRIVE AGX Thor (DriveOS)
-
-Pi0.5 TRT compile on **DRIVE AGX Thor** needs extra host setup (GPU carveout,
-swap, engine output path). Desktop GPUs (e.g. RTX 5090) do not need these steps.
-
-| Topic | Guide |
-|-------|-------|
-| Docker + Thor stack | [docker/RUNBOOK.md](docker/RUNBOOK.md) |
-| GPU carveout (hugetlbfs) | [RUNBOOK — GPU memory carveout](docker/RUNBOOK.md#gpu-memory-carveout-thor--required-for-pi05) |
-| Host swap file | [RUNBOOK — Host swap file](docker/RUNBOOK.md#host-swap-file-thor--required-for-language-trt-compile) |
-| Pi0.5 compile RAM/GPU table | [RUNBOOK — Pi0.5 compile memory requirements](docker/RUNBOOK.md#pi05-compile-memory-requirements-thor-test_vla_pi05_e2epy) |
-
-Quick Thor compile checklist:
-
-```bash
-# Host: 20 GB GPU carveout + swap + engine dir on /gtl
-sudo bash -c 'echo 10240 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
-# swap: see docker/RUNBOOK.md if not already configured
-
-cd /path/to/TRT-VLA-Lowering
-cp docker/thor/env.example docker/thor/.env   # ENGINE_DIR=/gtl/pi05_edge_llm
-./docker/thor/run.sh python3 vla/test_vla_pi05_e2e.py
-```
-
-### Desktop parity container (RTX 5090 / x86_64)
-
-Native conda on 5090 (torch **2.14**, TRT **11**) is **not** the same stack as Thor
-(torch **2.10**, TRT **10.14**). For a fair comparison, use the desktop Docker
-image that pins the **same versions as Thor**:
-
-| | Thor (`thor/run.sh`) | Desktop parity (`desktop/run.sh`) | Native 5090 conda |
-|---|---|---|---|
-| PyTorch | 2.10+cu130 | 2.10+cu130 | 2.14+cu132 |
-| TensorRT | 10.14 (host mount) | 10.14 (pip) | 11.0 |
-| torch-tensorrt | 2.10 | 2.10 | 2.14 |
-| `TRT_VLA_THOR` | `1` (cuDNN off) | `0` default; set `1` to match Thor | unset |
-| Edge-LLM plugin | TRT **10.14** aarch64 build | TRT **10.14** x86_64 build | TRT **11** build |
-
-On the 5090 machine:
-
-```bash
-cd ~/workspace/Test/TRT-VLA-Lowering   # or your clone
-git checkout thor                      # same branch as Thor
-
-cp docker/desktop/env.example docker/desktop/.env
-# Edit: TRT_VLA_ROOT, LEROBOT_ROOT, EDGE_LLM_PLUGIN_SO (see plugin build above)
-
-chmod +x docker/desktop/build.sh docker/desktop/run.sh
-./docker/desktop/build.sh
-./docker/desktop/run.sh bash
-
-# Inside container — verify Thor-matched stack
-python3 -c "import torch, torch_tensorrt, tensorrt as trt; print(torch.__version__, torch_tensorrt.__version__, trt.__version__)"
-# expect: 2.10.0+cu130  2.10.0  10.14.x
-
-python3 vla/test_vla_pi05_e2e.py
-```
-
-Compare cuDNN behavior inside the **same** container:
-
-```bash
-TRT_VLA_THOR=0 ./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
-TRT_VLA_THOR=1 ./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
-```
-
-Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) (`docker run --gpus all`). Build the TRT 10.14 x86 plugin first — see [Building the Edge-LLM plugin](#building-the-edge-llm-plugin-libnvinfer_edgellm_pluginso).
-
-## Performance metrics
+## Performance metrics (reference)
 
 Per-engine latency (ms) from `test_vla_*_e2e.py` on a single libero frame. **eager** = PyTorch forward pass; **edge** = Torch-TensorRT compiled engine (same script, warmed up over 100 iterations per stage).
 
