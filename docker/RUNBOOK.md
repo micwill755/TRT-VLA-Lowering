@@ -65,13 +65,13 @@ Optional (admin): add your user to the `docker` group to avoid `sudo`.
 
 `/etc/docker/daemon.json` sets `"default-runtime": "nvidia"`, but `nvidia-container-runtime` is not installed. Both **build** and **run** will fail until this is addressed.
 
-`docker/build.sh` auto-creates a symlink as a workaround:
+`docker/thor/build.sh` auto-creates a symlink as a workaround:
 
 ```bash
 sudo ln -sf "$(command -v runc)" /usr/local/sbin/nvidia-container-runtime
 ```
 
-For runs, also use `--runtime=runc` with host library mounts (handled by `docker/run.sh`):
+For runs, also use `--runtime=runc` with host library mounts (handled by `docker/thor/run.sh`):
 
 Workaround used by this runbook:
 
@@ -185,7 +185,7 @@ free -h
 Inside the container (restart containers after changing carveout):
 
 ```bash
-./docker/run.sh python3 -c "import torch; print(f'{torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB')"
+./docker/thor/run.sh python3 -c "import torch; print(f'{torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB')"
 ```
 
 #### Increase at runtime (until reboot)
@@ -332,7 +332,7 @@ sudo usermod -aG libcuda mwilliams
 ```
 
 Until then, GPU work requires `sudo`. In the container, also add the group:
-add `--group-add libcuda` (or the numeric GID) to `docker/run.sh`.
+add `--group-add libcuda` (or the numeric GID) to `docker/thor/run.sh`.
 
 ### TensorRT Python bindings (Thor-specific)
 
@@ -342,7 +342,7 @@ add `--group-add libcuda` (or the numeric GID) to `docker/run.sh`.
 /usr/local/lib/python3.12/dist-packages/tensorrt  →  container site-packages
 ```
 
-If your host TensorRT dist-info version differs from `10.14.1.31`, update the second mount in `docker/run.sh`.
+If your host TensorRT dist-info version differs from `10.14.1.31`, update the second mount in `docker/thor/run.sh`.
 
 An empty `/home/mwilliams/torch/` directory can shadow the real PyTorch package on the **host**. Inside the container this is not an issue, but remove or rename it on the host if you also run scripts outside Docker:
 
@@ -357,17 +357,17 @@ rmdir ~/torch 2>/dev/null || true
 cd /home/mwilliams/test/TRT-VLA-Lowering
 
 # 1. Configure paths
-cp docker/env.example docker/.env
-# Edit docker/.env:
+cp docker/thor/env.example docker/thor/.env
+# Edit docker/thor/.env:
 #   LEROBOT_ROOT=...
 #   EDGE_LLM_PLUGIN_SO=...
 
 # 2. Build the image (reuses local mlperf base; upgrades PyTorch to cu130)
-chmod +x docker/build.sh docker/run.sh docker/entrypoint.sh
-./docker/build.sh
+chmod +x docker/thor/build.sh docker/thor/run.sh docker/common/entrypoint.sh
+./docker/thor/build.sh
 
 # 3. Open an interactive shell in the container
-./docker/run.sh
+./docker/thor/run.sh
 
 # 4. Inside the container — verify stack
 python3 - <<'PY'
@@ -388,10 +388,10 @@ python3 test_vla_pi05_e2e.py
 ### Run a one-off command without interactive shell
 
 ```bash
-./docker/run.sh python3 vla/test_vla_pi05_e2e.py
+./docker/thor/run.sh python3 vla/test_vla_pi05_e2e.py
 ```
 
-## Configuration reference (`docker/.env`)
+## Configuration reference (`docker/thor/.env`)
 
 | Variable | Purpose |
 |----------|---------|
@@ -404,7 +404,7 @@ python3 test_vla_pi05_e2e.py
 
 ## Validation checklist
 
-Run after `./docker/run.sh` opens a shell:
+Run after `./docker/thor/run.sh` opens a shell:
 
 ```bash
 # Versions aligned with Thor stack
@@ -425,23 +425,23 @@ python3 -c "from lerobot.policies.pi05 import PI05Policy; print('lerobot ok')"
 
 ### `ModuleNotFoundError: No module named 'torch_tensorrt'`
 
-Image not built yet, or running `python3` on the **host** instead of inside the container. Use `./docker/run.sh`.
+Image not built yet, or running `python3` on the **host** instead of inside the container. Use `./docker/thor/run.sh`.
 
 ### `nvidia-container-runtime: executable file not found`
 
-Expected on this device. `docker/run.sh` forces `--runtime=runc` with host lib mounts.
+Expected on this device. `docker/thor/run.sh` forces `--runtime=runc` with host lib mounts.
 
 ### `operation not supported` (bridge networking)
 
-Use `--net=host` (already in `docker/run.sh`).
+Use `--net=host` (already in `docker/thor/run.sh`).
 
 ### `libcuda.so.1: cannot open shared object file`
 
-Missing `/usr/lib` bind mount or container started without `--privileged`. Use `docker/run.sh`.
+Missing `/usr/lib` bind mount or container started without `--privileged`. Use `docker/thor/run.sh`.
 
 ### `libcublas.so.* not found` inside container
 
-PyTorch in the image is not aligned with host CUDA. Rebuild with `./docker/build.sh` (upgrades to `torch+cu130`).
+PyTorch in the image is not aligned with host CUDA. Rebuild with `./docker/thor/build.sh` (upgrades to `torch+cu130`).
 
 ### Segfault on GPU `Conv2d` / vision forward (`GridVisionExportModule`)
 
@@ -449,7 +449,7 @@ Pip PyTorch ships generic `nvidia/cu13` cuBLAS and cuDNN wheels that do **not**
 match DriveOS Thor. Symptoms: `matmul` may work after cuBLAS preload, but
 `nn.Conv2d(...).cuda()` still segfaults.
 
-`docker/run.sh` sets `LD_PRELOAD` for DriveOS cuBLAS (required for GEMM) and
+`docker/thor/run.sh` sets `LD_PRELOAD` for DriveOS cuBLAS (required for GEMM) and
 `TRT_VLA_THOR=1` so test scripts disable the pip cuDNN backend (preloading host
 cuDNN alone is not enough — `Conv2d` still segfaults). VLA scripts call
 `configure_thor_pytorch()` from `trt/utils.py` automatically.
@@ -478,7 +478,7 @@ python3 -c "import torch; torch.backends.cudnn.enabled = False"
 ```
 
 
-Plugin not built or path not set in `docker/.env`.
+Plugin not built or path not set in `docker/thor/.env`.
 
 ### `No module named 'lerobot'`
 
@@ -508,7 +508,7 @@ so engine writes do not fill root `/`.
 ### `OSError: [Errno 28] No space left on device` writing `.engine`
 
 Root disk (`/`) is only ~26 GB. Language engine alone is **~9.2 GB**. Use
-`ENGINE_DIR=/gtl/pi05_edge_llm` in `docker/.env` (NVMe mount).
+`ENGINE_DIR=/gtl/pi05_edge_llm` in `docker/thor/.env` (NVMe mount).
 
 ### `torch.OutOfMemoryError` / CUDA OOM with plenty of system RAM
 
@@ -521,17 +521,17 @@ memory requirements** above).
 ```bash
 sudo docker stop $(sudo docker ps -q) 2>/dev/null
 sudo bash -c 'echo 6144 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
-./docker/run.sh python3 vla/test_vla_pi05_e2e.py
+./docker/thor/run.sh python3 vla/test_vla_pi05_e2e.py
 ```
 
 ## Rebuild / update
 
 ```bash
-# After changing docker/Dockerfile or requirements
-./docker/build.sh
+# After changing docker/thor/Dockerfile or requirements
+./docker/thor/build.sh
 
 # Force LeRobot reinstall inside a fresh container
-./docker/run.sh python3 -m pip install -e /workspace/lerobot[dataset,pi]
+./docker/thor/run.sh python3 -m pip install -e /workspace/lerobot[dataset,pi]
 ```
 
 ## Alternative: conda env (fallback)
@@ -542,26 +542,36 @@ If Docker GPU access remains blocked, use a host-side conda env instead:
 2. `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130`
 3. `pip install torch-tensorrt tensorrt==10.14.1.48`
 4. `pip install -e ../lerobot[dataset,pi]`
-5. `pip install -r docker/requirements.container.txt`
+5. `pip install -r docker/common/requirements.container.txt`
 6. Set `EDGE_LLM_PLUGIN_SO` and run from `vla/`
 
-See `docker/requirements.container.txt` for the shared pip dependency list.
+See `docker/common/requirements.container.txt` for the shared pip dependency list.
 
 ## Files in this directory
 
-| File | Purpose |
-|------|---------|
-| `Dockerfile` | Thor aarch64 image (torch 2.10 + TRT 10.14 host mount) |
-| `Dockerfile.desktop` | Desktop x86_64 image (same torch/TRT versions via pip) |
-| `build.sh` | Build Thor image |
-| `build-desktop.sh` | Build desktop parity image |
-| `run.sh` | Run Thor container |
-| `run-desktop.sh` | Run desktop parity container (`--gpus all`) |
-| `entrypoint.sh` | Auto-install LeRobot on first start |
-| `requirements.container.txt` | Pip deps (excluding torch/lerobot) |
-| `env.example` | Thor `docker/.env` template |
-| `env.desktop.example` | Desktop `docker/.env` template |
-| `RUNBOOK.md` | This document |
+```text
+docker/
+├── common/
+│   ├── entrypoint.sh              # Auto-install LeRobot on first start
+│   └── requirements.container.txt   # Pip deps (excluding torch/lerobot)
+├── thor/                          # DRIVE AGX Thor (aarch64, host TRT mount)
+│   ├── Dockerfile
+│   ├── build.sh
+│   ├── run.sh
+│   ├── env.example
+│   └── .env                       # Local config (not committed)
+├── desktop/                       # Desktop parity (x86_64, pip TRT 10.14)
+│   ├── Dockerfile
+│   ├── build.sh
+│   ├── run.sh
+│   ├── env.example
+│   └── .env                       # Local config (not committed)
+├── build.sh                       # Wrapper → thor/build.sh
+├── run.sh                         # Wrapper → thor/run.sh
+├── build-desktop.sh               # Wrapper → desktop/build.sh
+├── run-desktop.sh                 # Wrapper → desktop/run.sh
+└── RUNBOOK.md                     # This document
+```
 
 ## Desktop parity container (RTX 5090 / x86_64)
 
@@ -573,18 +583,18 @@ but not comparable to Thor compile behavior.
 
 1. [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed (`docker run --gpus all` works).
 2. Edge-LLM plugin built for **TRT 10.14 on x86_64** (not the TRT 11 plugin used for native 5090 dev).
-3. LeRobot cloned and `docker/.env` paths set.
+3. LeRobot cloned and `docker/desktop/.env` paths set.
 
 ### Quick start
 
 ```bash
 cd /path/to/TRT-VLA-Lowering
-cp docker/env.desktop.example docker/.env
+cp docker/desktop/env.example docker/desktop/.env
 # edit TRT_VLA_ROOT, LEROBOT_ROOT, EDGE_LLM_PLUGIN_SO
 
-chmod +x docker/build-desktop.sh docker/run-desktop.sh
-./docker/build-desktop.sh
-./docker/run-desktop.sh bash
+chmod +x docker/desktop/build.sh docker/desktop/run.sh
+./docker/desktop/build.sh
+./docker/desktop/run.sh bash
 ```
 
 Inside the container:
@@ -596,7 +606,7 @@ python3 vla/test_vla_pi05_e2e.py
 
 ### Thor vs desktop parity vs native 5090
 
-| | Thor `run.sh` | Desktop `run-desktop.sh` | Native 5090 conda |
+| | Thor `thor/run.sh` | Desktop `desktop/run.sh` | Native 5090 conda |
 |---|---|---|---|
 | Arch | aarch64 | x86_64 | x86_64 |
 | PyTorch | 2.10+cu130 | 2.10+cu130 | 2.14+cu132 |
@@ -606,7 +616,7 @@ python3 vla/test_vla_pi05_e2e.py
 | GPU memory | 20 GB carveout + swap | Full VRAM | Full VRAM |
 | cuDNN | disabled | enabled (unless `TRT_VLA_THOR=1`) | enabled |
 
-Set `TRT_VLA_THOR=1` when calling `run-desktop.sh` to test Thor's cuDNN-disabled
+Set `TRT_VLA_THOR=1` when calling `desktop/run.sh` to test Thor's cuDNN-disabled
 path inside the otherwise identical stack. On 5090 this barely changes timings;
 the Thor gap vs desktop is mostly TRT version, memory, and SoC bandwidth.
 

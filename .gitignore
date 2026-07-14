@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 *$py.class
 docker/.env
+docker/thor/.env
+docker/desktop/.env

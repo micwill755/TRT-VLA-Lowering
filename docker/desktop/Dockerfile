@@ -2,7 +2,7 @@
 #   PyTorch 2.10+cu130, torch-tensorrt 2.10, TensorRT 10.14 (pip wheels).
 #
 # Build:
-#   ./docker/build-desktop.sh
+#   ./docker/desktop/build.sh
 #
 # This is NOT the native 5090 dev stack (torch 2.14 / TRT 11). Use it when you
 # want apples-to-apples comparison with DRIVE AGX Thor compile behavior.
@@ -52,10 +52,10 @@ RUN python3 -m pip install --upgrade pip setuptools wheel && \
       packaging typing-extensions dllist psutil "nvidia-cuda-runtime-cu13==0.0.0a0" && \
     python3 -m pip install "tensorrt==${TENSORRT_VERSION}" "tensorrt-cu13==${TENSORRT_VERSION}"
 
-COPY docker/requirements.container.txt /tmp/requirements.container.txt
+COPY docker/common/requirements.container.txt /tmp/requirements.container.txt
 RUN python3 -m pip install -r /tmp/requirements.container.txt
 
-COPY docker/entrypoint.sh /usr/local/bin/trt-vla-entrypoint.sh
+COPY docker/common/entrypoint.sh /usr/local/bin/trt-vla-entrypoint.sh
 RUN chmod +x /usr/local/bin/trt-vla-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/trt-vla-entrypoint.sh"]

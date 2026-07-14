@@ -176,7 +176,7 @@ See `docs/source/edge_llm/e2e.rst` for request JSON format, tokenization parity 
 sudo docker stop $(sudo docker ps -q) 2>/dev/null
 sudo bash -c 'echo 10240 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
 sudo swapon /gtl/swapfile 2>/dev/null || true
-./docker/run.sh python3 vla/test_vla_pi05_e2e.py
+./docker/thor/run.sh python3 vla/test_vla_pi05_e2e.py
 ```
 
 ## DRIVE AGX Thor (DriveOS)
@@ -199,8 +199,8 @@ sudo bash -c 'echo 10240 > /sys/devices/system/node/node0/hugepages/hugepages-20
 # swap: see docker/RUNBOOK.md if not already configured
 
 cd /path/to/TRT-VLA-Lowering
-cp docker/env.example docker/.env   # ENGINE_DIR=/gtl/pi05_edge_llm
-./docker/run.sh python3 vla/test_vla_pi05_e2e.py
+cp docker/thor/env.example docker/thor/.env   # ENGINE_DIR=/gtl/pi05_edge_llm
+./docker/thor/run.sh python3 vla/test_vla_pi05_e2e.py
 ```
 
 ### Desktop parity container (RTX 5090 / x86_64)
@@ -209,7 +209,7 @@ Native conda on 5090 (torch **2.14**, TRT **11**) is **not** the same stack as T
 (torch **2.10**, TRT **10.14**). For a fair comparison, use the desktop Docker
 image that pins the **same versions as Thor**:
 
-| | Thor (`run.sh`) | Desktop parity (`run-desktop.sh`) | Native 5090 conda |
+| | Thor (`thor/run.sh`) | Desktop parity (`desktop/run.sh`) | Native 5090 conda |
 |---|---|---|---|
 | PyTorch | 2.10+cu130 | 2.10+cu130 | 2.14+cu132 |
 | TensorRT | 10.14 (host mount) | 10.14 (pip) | 11.0 |
@@ -223,12 +223,12 @@ On the 5090 machine:
 cd ~/workspace/Test/TRT-VLA-Lowering   # or your clone
 git checkout thor                      # same branch as Thor
 
-cp docker/env.desktop.example docker/.env
+cp docker/desktop/env.example docker/desktop/.env
 # Edit: TRT_VLA_ROOT, LEROBOT_ROOT, EDGE_LLM_PLUGIN_SO (x86 TRT 10.14 plugin)
 
-chmod +x docker/build-desktop.sh docker/run-desktop.sh
-./docker/build-desktop.sh
-./docker/run-desktop.sh bash
+chmod +x docker/desktop/build.sh docker/desktop/run.sh
+./docker/desktop/build.sh
+./docker/desktop/run.sh bash
 
 # Inside container — verify Thor-matched stack
 python3 -c "import torch, torch_tensorrt, tensorrt as trt; print(torch.__version__, torch_tensorrt.__version__, trt.__version__)"
@@ -240,8 +240,8 @@ python3 vla/test_vla_pi05_e2e.py
 Compare cuDNN behavior inside the **same** container:
 
 ```bash
-TRT_VLA_THOR=0 ./docker/run-desktop.sh python3 vla/test_vla_pi05_e2e.py
-TRT_VLA_THOR=1 ./docker/run-desktop.sh python3 vla/test_vla_pi05_e2e.py
+TRT_VLA_THOR=0 ./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
+TRT_VLA_THOR=1 ./docker/desktop/run.sh python3 vla/test_vla_pi05_e2e.py
 ```
 
 Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) (`docker run --gpus all`). See `docker/RUNBOOK.md` for the Edge-LLM plugin x86 build notes.

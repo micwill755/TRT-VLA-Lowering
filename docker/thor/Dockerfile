@@ -5,10 +5,10 @@
 # Python ML stack.
 #
 # Build:
-#   ./docker/build.sh
+#   ./docker/thor/build.sh
 #
 # Default base is the local mlperf image already on this device. Override with:
-#   docker build --build-arg BASE_IMAGE=ubuntu:24.04 -f docker/Dockerfile .
+#   docker build --build-arg BASE_IMAGE=ubuntu:24.04 -f docker/thor/Dockerfile .
 
 ARG BASE_IMAGE=mlperf-automotive:jsuh-aarch64-base
 FROM ${BASE_IMAGE}
@@ -51,14 +51,14 @@ RUN python3 -m pip install --upgrade pip setuptools wheel && \
     python3 -m pip install \
       packaging typing-extensions dllist psutil "nvidia-cuda-runtime-cu13==0.0.0a0"
 
-COPY docker/requirements.container.txt /tmp/requirements.container.txt
+COPY docker/common/requirements.container.txt /tmp/requirements.container.txt
 RUN python3 -m pip install -r /tmp/requirements.container.txt
 
 # LeRobot needs numpy 2.x; clear the mlperf base image pip constraint for our installs.
 RUN rm -f /etc/pip/constraint.txt
 
 # Convenience entrypoint used by run.sh
-COPY docker/entrypoint.sh /usr/local/bin/trt-vla-entrypoint.sh
+COPY docker/common/entrypoint.sh /usr/local/bin/trt-vla-entrypoint.sh
 RUN chmod +x /usr/local/bin/trt-vla-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/trt-vla-entrypoint.sh"]
