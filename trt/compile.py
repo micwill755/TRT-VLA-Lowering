@@ -8,8 +8,57 @@ import torch.nn as nn
 import torch_tensorrt
 
 from torch.export import export
-from torch_tensorrt.dynamo._tracer import build_dim_registry, get_dynamic_shapes
 from torch_tensorrt.dynamo.utils import default_device, to_torch_device
+
+try:
+    # Newer torch-tensorrt exposes a shared dim registry so dynamic dims with the
+    # same name are the same symbolic Dim across inputs.
+    from torch_tensorrt.dynamo._tracer import build_dim_registry, get_dynamic_shapes
+except ImportError:
+    # torch-tensorrt 2.10 (TensorRT 10.14 / DriveOS 7.0.5 on Thor) does not ship
+    # build_dim_registry and uses a single-arg get_dynamic_shapes. Provide shims
+    # with the two-arg signature this module expects.
+    from torch.export import Dim
+    from torch_tensorrt._Input import Input as _TRTInput
+
+    def _iter_input_specs(specs):
+        if isinstance(specs, _TRTInput):
+            yield specs
+        elif isinstance(specs, (list, tuple)):
+            for item in specs:
+                yield from _iter_input_specs(item)
+
+    def _dynamic_dim_bounds(spec):
+        min_shape = spec.shape["min_shape"]
+        opt_shape = spec.shape["opt_shape"]
+        max_shape = spec.shape["max_shape"]
+        for dim in range(len(min_shape)):
+            if min_shape[dim] == opt_shape[dim] == max_shape[dim]:
+                continue
+            yield dim, min_shape[dim], max_shape[dim]
+
+    def build_dim_registry(specs, registry=None):
+        registry = dict(registry or {})
+        for spec in _iter_input_specs(specs):
+            if getattr(spec, "shape_mode", None) != _TRTInput._ShapeMode.DYNAMIC:
+                continue
+            for dim, min_v, max_v in _dynamic_dim_bounds(spec):
+                key = f"{spec.name}_{dim}"
+                if key not in registry:
+                    registry[key] = Dim(key, min=min_v, max=max_v)
+        return registry
+
+    def get_dynamic_shapes(spec, registry=None):
+        registry = registry if registry is not None else {}
+        if not isinstance(spec, _TRTInput):
+            return {}
+        if getattr(spec, "shape_mode", None) != _TRTInput._ShapeMode.DYNAMIC:
+            return {}
+        dynamic_dims = {}
+        for dim, min_v, max_v in _dynamic_dim_bounds(spec):
+            key = f"{spec.name}_{dim}"
+            dynamic_dims[dim] = registry.get(key) or Dim(key, min=min_v, max=max_v)
+        return dynamic_dims
 
 from trt.io_spec import VLA_LANGUAGE_LEADING_INPUT_COUNT
 
@@ -143,9 +192,7 @@ def patch_trt_interpreter_output_names(output_names: list[str] | tuple[str, ...]
 
             name = output_names[i] if i < len(output_names) else f"output{i}"
 
-            if self.output_dtypes is not None:
-                output_dtype = self.output_dtypes[i]
-            elif any(
+            if any(
                 op_name in output.name.split("_")
                 for op_name in (
                     "eq",
@@ -162,19 +209,29 @@ def patch_trt_interpreter_output_names(output_names: list[str] | tuple[str, ...]
                 )
             ):
                 output_dtype = dtype.b
+            elif self.output_dtypes is not None:
+                output_dtype = self.output_dtypes[i]
+                if output_dtype == dtype.i64 and not hasattr(self, "_cast_output_dtype"):
+                    output = self.ctx.net.add_cast(
+                        output, dtype.i64.to(trt.DataType)
+                    ).get_output(0)
             else:
                 output_dtype = dtype.unknown
 
             if output_dtype is not dtype.unknown:
-                output = self._cast_output_dtype(
-                    output,
-                    output_dtype.to(trt.DataType, use_default=True),
-                    name,
-                )
+                trt_dtype = output_dtype.to(trt.DataType, use_default=True)
+                if hasattr(self, "_cast_output_dtype"):
+                    output = self._cast_output_dtype(output, trt_dtype, name)
 
             output.name = name
             outputs = outputs[:i] + (output,) + outputs[i + 1 :]
             self.ctx.net.mark_output(output)
+            if (
+                output_dtype is not dtype.unknown
+                and not hasattr(self, "_cast_output_dtype")
+                and output_dtype != dtype.i64
+            ):
+                output.dtype = output_dtype.to(trt.DataType, use_default=True)
             self._output_names.append(name)
 
         return list(outputs)

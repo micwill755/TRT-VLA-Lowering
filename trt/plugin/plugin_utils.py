@@ -135,11 +135,15 @@ def get_trt_plugin_creator(
     version: str = "1",
     namespace: str = "",
 ):
-    """TRT 10: get_plugin_creator; TRT 11+: get_creator."""
+    """Return a TensorRT plugin creator, preferring the TRT 10.14+ V3 API."""
     registry = trt.get_plugin_registry()
+    if hasattr(registry, "get_creator"):
+        creator = registry.get_creator(plugin_name, version, namespace)
+        if creator is not None:
+            return creator
     if hasattr(registry, "get_plugin_creator"):
         return registry.get_plugin_creator(plugin_name, version, namespace)
-    return registry.get_creator(plugin_name, version, namespace)
+    return None
 
 
 def load_plugin():

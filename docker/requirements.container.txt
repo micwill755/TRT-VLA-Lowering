@@ -1,0 +1,15 @@
+# Container Python deps for TRT-VLA-Lowering on Thor (DOS 7.0.5).
+# PyTorch, Torch-TensorRT, and TensorRT are installed in the Dockerfile.
+#
+# LeRobot is installed at runtime from the mounted LEROBOT_ROOT (see run.sh).
+
+transformers==5.13.1
+accelerate
+safetensors
+huggingface_hub
+datasets
+pillow
+einops
+tqdm
+numpy
+pyyaml

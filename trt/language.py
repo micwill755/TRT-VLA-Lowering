@@ -566,16 +566,26 @@ def make_language_edge_input_specs(
                 )
             )
         elif name.startswith("past_key_values_"):
-            if kv_cache_profile is None:
-                raise ValueError("past_key_values_* inputs require a KV cache template tensor")
-            specs.append(
-                torch_tensorrt.Input(
-                    profiles=[kv_cache_profile, kv_cache_profile],
-                    dtype=tensor.dtype,
-                    format=torch.contiguous_format,
-                    name=name,
+            if static_prefill_seq_len:
+                specs.append(
+                    torch_tensorrt.Input(
+                        shape=tuple(tensor.shape),
+                        dtype=tensor.dtype,
+                        format=torch.contiguous_format,
+                        name=name,
+                    )
                 )
-            )
+            elif kv_cache_profile is None:
+                raise ValueError("past_key_values_* inputs require a KV cache template tensor")
+            else:
+                specs.append(
+                    torch_tensorrt.Input(
+                        profiles=[kv_cache_profile, kv_cache_profile],
+                        dtype=tensor.dtype,
+                        format=torch.contiguous_format,
+                        name=name,
+                    )
+                )
         else:
             specs.append(
                 torch_tensorrt.Input(

@@ -10,6 +10,8 @@ then runs its own prepare step:
 
 import torch
 
+from pathlib import Path
+
 from PIL import Image
 
 from collections.abc import Callable
@@ -17,7 +19,7 @@ from typing import Any
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_pre_post_processors
-from lerobot.utils.constants import OBS_STATE
+from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE, OBS_STATE
 
 from trt import helper
 from trt.tokenizer import edge_llm_tokenize_messages, groot_edge_chat_template
@@ -25,6 +27,37 @@ from trt.tokenizer import edge_llm_tokenize_messages, groot_edge_chat_template
 # Camera keys read from a LeRobot dataset frame (libero provides image + image2).
 IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
 DEFAULT_DATASET_ID = "lerobot/libero"
+DEFAULT_DATASET_REVISION = "v3.0"
+
+
+def _lerobot_dataset_has_metadata(root: Path) -> bool:
+    return (root / "meta" / "info.json").is_file()
+
+
+def _resolve_lerobot_dataset_root(
+    dataset_id: str,
+    revision: str = DEFAULT_DATASET_REVISION,
+) -> Path | None:
+    """Prefer an on-disk LeRobot dataset to avoid HuggingFace Hub API calls."""
+    materialized = HF_LEROBOT_HOME / dataset_id
+    if _lerobot_dataset_has_metadata(materialized):
+        return materialized
+
+    hub_dir = HF_LEROBOT_HUB_CACHE / f"datasets--{dataset_id.replace('/', '--')}"
+    ref_file = hub_dir / "refs" / revision
+    if ref_file.is_file():
+        snapshot = hub_dir / "snapshots" / ref_file.read_text().strip()
+        if _lerobot_dataset_has_metadata(snapshot):
+            return snapshot
+
+    snapshots_dir = hub_dir / "snapshots"
+    if snapshots_dir.is_dir():
+        for snapshot in sorted(snapshots_dir.iterdir(), reverse=True):
+            if snapshot.is_dir() and _lerobot_dataset_has_metadata(snapshot):
+                return snapshot
+
+    return None
+
 
 def frame_from_test_data(
     data: dict[str, Any],
@@ -68,7 +101,18 @@ def load_test_data(
     Downstream prepare functions (``prepare_policy_batch``, ``create_pil_messages``,
     etc.) convert this into model-specific tensors.
     """
-    dataset = LeRobotDataset(dataset_id, episodes=[episode_index])
+    # Thor container: torchcodec can't load FFmpeg (libavutil/libavformat).
+    # pyav ships bundled libs and works via LD_LIBRARY_PATH in docker/run.sh.
+    local_root = _resolve_lerobot_dataset_root(dataset_id)
+    dataset_kwargs: dict[str, Any] = {
+        "episodes": [episode_index],
+        "video_backend": "pyav",
+        "revision": DEFAULT_DATASET_REVISION,
+    }
+    if local_root is not None:
+        dataset_kwargs["root"] = local_root
+
+    dataset = LeRobotDataset(dataset_id, **dataset_kwargs)
     frame = dataset[frame_index]
 
     images = {

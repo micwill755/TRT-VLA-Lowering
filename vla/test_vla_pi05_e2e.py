@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import logging
 import torch_tensorrt
@@ -11,18 +12,15 @@ import time
 
 from pathlib import Path
 
-torch_tensorrt.logging.set_level(logging.WARNING)
+if hasattr(getattr(torch_tensorrt, "logging", None), "set_level"):
+    torch_tensorrt.logging.set_level(logging.WARNING)
 
 _TEST_ROOT = Path(__file__).resolve().parents[1]
 if str(_TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(_TEST_ROOT))
 
-from lerobot.policies.groot import GrootPolicy
-from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STATE
-from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
-from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.pi05 import PI05Config, PI05Policy
 from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
@@ -38,9 +36,16 @@ from trt.modules.export.diffusion import (
 )
 
 from trt.measure import parity
-from trt.executor.models.groot.helpers import make_embodiment_id
 from trt.data import create_pil_messages, prepare_model_inputs
-from trt.utils import force_hf_attention, free_cuda_memory
+from trt.utils import (
+    configure_thor_pytorch,
+    force_hf_attention,
+    free_cuda_memory,
+    move_pi05_diffusion_modules_to_device,
+    release_serialized_trt_engine,
+)
+
+configure_thor_pytorch()
 from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.vision import nchw_to_hwc
 from trt.rope import make_rope_rotary_cos_sin
@@ -52,7 +57,11 @@ from trt.data import (
 
 from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_vision_attention, patch_language_attention, patch_vision_attention_reference
-from trt.compile import make_input_spec
+from trt.compile import make_input_spec, save_trt_engine_module
+from trt.executor.models.pi05.load.serialize import SerializedPi05Language
+from trt.io_spec import VLA_LANGUAGE_INPUT_NAMES, VLA_LANGUAGE_OUTPUT_NAMES
+from trt.language import language_edge_llm_config, language_edge_trt_settings, make_language_edge_input_specs
+from trt.serialize import SerializedTRTEngine
 
 from typing import Any
 
@@ -68,6 +77,9 @@ TRT_SETTINGS = {
 
 LANGUAGE_TRT_SETTINGS = {
     **TRT_SETTINGS,
+    # Thor: offload_module_to_cpu balloons host RSS during TRT build (~38GB OOM kill).
+    "offload_module_to_cpu": False,
+    "use_explicit_typing": False,
 }
 
 ACTION_TRT_SETTINGS = {
@@ -156,8 +168,11 @@ def make_pi05_suffix_position_and_mask(core, prefix_pad_masks, x_t, device):
     return position_ids, attention_mask
 
 def load_config(device):
+    # PI05Policy.__init__ moves the model to config.device in fp32. On Thor the
+    # default 6–12 GB GPU carveout cannot hold ~16 GB fp32 weights; init on CPU
+    # and let main() cast to fp16 before the first GPU transfer.
     config = PI05Config(
-        device=str(device),
+        device="cpu",
         chunk_size=50,
         n_action_steps=50,
         max_state_dim=32,      # PI05 default is 32, not 64
@@ -179,7 +194,7 @@ def load_config(device):
         },
     )
     config.validate_features()
-    policy = PI05Policy(config).to(device).eval()
+    policy = PI05Policy(config).eval()
     return config, policy
 
 def main():
@@ -228,17 +243,20 @@ def main():
     ).contiguous()
     projector = paligemma.multi_modal_projector
 
+    # SigLIP expects fp32 activations; fp16 weights + fp32 input segfaults on Thor.
+    vision = vision.float()
+
     # step 2: vision
     visual = GridVisionExportModule(
         vision_model=vision,                 # paligemma.vision_tower
         projector=projector,                 # paligemma.multi_modal_projector
-        sample_pixel_values=pixel_values,
+        sample_pixel_values=pixel_values.float(),
         select_layer=-1,                     # PI05 has no eagle.select_layer
         pixel_shuffle=False,
         downsample_ratio=0.5,
         force_float32_input=True,            # PI05 vision tower runs fp32 internally
         vision_kwargs={},
-    ).eval().to(device=device, dtype=dtype)
+    ).eval().to(device=device)
 
     # --- Rung A: eager SDPA (UNPATCHED) ---
     with torch.no_grad():
@@ -336,34 +354,41 @@ def main():
         hidden_states,
         pixel_values,
     )
+    # Vision TRT is done; keep only the language stack on GPU until diffusion.
+    vision.cpu()
+    paligemma.multi_modal_projector.cpu()
+    model.paligemma_with_expert.gemma_expert.cpu()
+    free_cuda_memory()
 
-    for _ in range(5):
-        language(
+    # Time eager language here, before the TRT builder allocates GPU: the full
+    # language weights are still resident and this is the only window where the
+    # eager path fits alongside nothing else on memory-tight Thor.
+    def _run_eager_language():
+        return language(
             inputs_embeds=inputs_embeds.to(dtype=lm_dtype),
             attention_mask=prefix_attention_mask,
             position_ids=prefix_position_ids,
-            output_hidden_states=True,
+            output_hidden_states=False,
             return_dict=True,
         )
 
-    torch.cuda.synchronize(device)
-    t0 = time.perf_counter()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(100):
-        eager_out = language(
-            inputs_embeds=inputs_embeds.to(dtype=lm_dtype),
-            attention_mask=prefix_attention_mask,
-            position_ids=prefix_position_ids,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-    end.record()
-    torch.cuda.synchronize()
-    eager_elapsed_ms = start.elapsed_time(end) / 100
+    with torch.no_grad():
+        eager_out = _run_eager_language()
+        for _ in range(5):
+            _run_eager_language()
+
+        torch.cuda.synchronize(device)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(100):
+            _run_eager_language()
+        end.record()
+        torch.cuda.synchronize()
+        eager_elapsed_ms = start.elapsed_time(end) / 100
 
     lm_hidden_eager = eager_out.last_hidden_state
+    free_cuda_memory(eager_out)
 
     cfg = language.config
     hidden_size = int(cfg.hidden_size)
@@ -424,25 +449,57 @@ def main():
         with torch.no_grad():
             _, lm_hidden_trt_ref, _, _ = lm(*flat_tensors)
 
-        lm_exported = torch.export.export(lm, args=flat_tensors, strict=False)
-        lm_input_specs = make_input_spec(flat_tensors)
-        lm_trt_engine = torch_tensorrt.dynamo.compile(
-            lm_exported,
-            inputs=lm_input_specs,
-            **LANGUAGE_TRT_SETTINGS,
+        input_names = list(VLA_LANGUAGE_INPUT_NAMES) + [
+            f"past_key_values_{i}" for i in range(num_layers)
+        ]
+        lm_input_specs = make_language_edge_input_specs(
+            input_names,
+            flat_tensors,
+            batch_size=bsz,
+            max_seq_len=seq_len,
+            static_prefill_seq_len=True,
         )
+        free_cuda_memory(policy, pre_processor, post_processor, model_inputs, frame, data)
+        del policy, pre_processor, post_processor
+        free_cuda_memory()
+
+        lang_engine_dir = Path(os.environ.get("ENGINE_DIR", "/tmp/pi05_edge_llm")) / "language_e2e"
+        save_trt_engine_module(
+            lm,
+            flat_tensors,
+            lang_engine_dir,
+            engine_file="language.engine",
+            model_type="language",
+            component="language",
+            input_names=input_names,
+            output_names=list(VLA_LANGUAGE_OUTPUT_NAMES),
+            extra_config={
+                **language_edge_llm_config(
+                    cfg,
+                    max_seq_len=seq_len,
+                    batch_size=bsz,
+                    num_layers=num_layers,
+                ),
+                "context_attention_mask_type": int(ContextAttentionMaskType.PADDING),
+            },
+            input_specs=lm_input_specs,
+            flat_tensors=flat_tensors,
+            trt_settings=language_edge_trt_settings(offload_module_to_cpu=False),
+        )
+        free_cuda_memory(lm)
+        lm_trt_engine = SerializedPi05Language(SerializedTRTEngine(lang_engine_dir))
 
         for _ in range(5):
             with torch.no_grad():
                 lm_trt_engine(*flat_tensors)
 
         torch.cuda.synchronize(device)
-        t0 = time.perf_counter()
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for _ in range(100):
-            trt_out = lm_trt_engine(*flat_tensors)
+            with torch.no_grad():
+                trt_out = lm_trt_engine(*flat_tensors)
         end.record()
         torch.cuda.synchronize()
         trt_elapsed_ms = start.elapsed_time(end) / 100
@@ -452,24 +509,28 @@ def main():
     parity("PI05 language A vs C (TRT)", lm_hidden_eager, trt_out[1])
 
     # step 4 diffusion (no action-context stage for PI05)
-    print("Compiling diffusion")
-    force_hf_attention(model.paligemma_with_expert.gemma_expert.model, "eager")
-
+    print("Releasing language TRT runtime before diffusion compile")
     prefix_k = trt_out[2].to(device=device, dtype=dtype).contiguous()
     prefix_v = trt_out[3].to(device=device, dtype=dtype).contiguous()
 
-    # free the language engine + export artifacts before the diffusion TRT build.
+    release_serialized_trt_engine(lm_trt_engine)
     free_cuda_memory(
         lm_trt_engine,
-        lm_exported,
         lm,
         trt_out,
         flat_tensors,
         kv_caches,
         inputs_embeds,
         lm_hidden_eager,
+        language,
+        lm_head,
     )
+    model.cpu()
+    free_cuda_memory()
+    move_pi05_diffusion_modules_to_device(model, device, dtype)
+    force_hf_attention(model.paligemma_with_expert.gemma_expert.model, "eager")
 
+    print("Compiling diffusion")
     diffusion_model = StaticActionVelocityStepExportModule(
         step_encoder=PI05PrefixKVStepEncoderExportModule(model),
         action_expert=model.paligemma_with_expert.gemma_expert.model,
@@ -552,18 +613,23 @@ def main():
     eager_total_ms = vision_eager_elapsed_ms + eager_elapsed_ms + diffusion_eager_elapsed_ms
     trt_total_ms = vision_trt_elapsed_ms + trt_elapsed_ms + diffusion_trt_elapsed_ms
 
+    def _speedup(eager_ms: float, trt_ms: float) -> str:
+        if eager_ms <= 0.0 or trt_ms <= 0.0:
+            return "n/a (benchmark skipped)"
+        return f"{eager_ms / trt_ms:.3f}x"
+
     print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
     print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
-    print(f"vision speedup: {(vision_eager_elapsed_ms / vision_trt_elapsed_ms):.3f}x")
+    print(f"vision speedup: {_speedup(vision_eager_elapsed_ms, vision_trt_elapsed_ms)}")
     print(f"lm eager execute: {eager_elapsed_ms:.3f} ms")
     print(f"lm trt execute: {trt_elapsed_ms:.3f} ms")
-    print(f"lm speedup: {(eager_elapsed_ms / trt_elapsed_ms):.3f}x")
+    print(f"lm speedup: {_speedup(eager_elapsed_ms, trt_elapsed_ms)}")
     print(f"diffusion eager execute: {diffusion_eager_elapsed_ms:.3f} ms")
     print(f"diffusion trt execute: {diffusion_trt_elapsed_ms:.3f} ms")
-    print(f"diffusion speedup: {(diffusion_eager_elapsed_ms / diffusion_trt_elapsed_ms):.3f}x")
+    print(f"diffusion speedup: {_speedup(diffusion_eager_elapsed_ms, diffusion_trt_elapsed_ms)}")
     print(f"total eager execute: {eager_total_ms:.3f} ms")
     print(f"total trt execute: {trt_total_ms:.3f} ms")
-    print(f"total speedup: {(eager_total_ms / trt_total_ms):.3f}x")
+    print(f"total speedup: {_speedup(eager_total_ms, trt_total_ms)}")
 
     free_cuda_memory(
         diffusion_trt_engine,

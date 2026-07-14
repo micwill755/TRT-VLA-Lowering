@@ -74,7 +74,7 @@ class GridVisionExportModule(ExportModule):
                 self._init_pixel_shuffle_shape()
                 vit_embeds = self._apply_pixel_shuffle(vit_embeds)
 
-            projected = self.projector(vit_embeds)
+            projected = self.projector(self._projector_input(vit_embeds))
             self.batch_size = int(projected.shape[0])
             self.output_seq_len = int(projected.shape[1])
             self.output_hidden_size = int(projected.shape[2])
@@ -92,6 +92,12 @@ class GridVisionExportModule(ExportModule):
         if self.select_layer == -1:
             return out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
         return out.hidden_states[self.select_layer]
+
+    def _projector_input(self, vit_embeds: torch.Tensor) -> torch.Tensor:
+        proj_dtype = next(self.projector.parameters()).dtype
+        if vit_embeds.dtype != proj_dtype:
+            return vit_embeds.to(proj_dtype)
+        return vit_embeds
 
     def _init_pixel_shuffle_shape(self):
         side = int(self.seq_len ** 0.5)
@@ -122,7 +128,7 @@ class GridVisionExportModule(ExportModule):
         if self.pixel_shuffle:
             vit_embeds = self._apply_pixel_shuffle(vit_embeds)
 
-        features = self.projector(vit_embeds)
+        features = self.projector(self._projector_input(vit_embeds))
         return self._finalize_output(features, out_dtype)
 
 # ---------------------------------------------------------------------------
