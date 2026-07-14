@@ -36,13 +36,42 @@ fi
 
 mkdir -p "${ENGINE_DIR}"
 
+# Resolve plugin path (e.g. .so.1 vs .so.1.0) and verify it exists on the host.
+if [[ -n "${EDGE_LLM_PLUGIN_SO:-}" ]]; then
+  if [[ ! -f "${EDGE_LLM_PLUGIN_SO}" ]]; then
+    PLUGIN_DIR="$(dirname "${EDGE_LLM_PLUGIN_SO}")"
+    PLUGIN_BASE="$(basename "${EDGE_LLM_PLUGIN_SO}")"
+    RESOLVED_PLUGIN=""
+    for candidate in \
+      "${PLUGIN_DIR}/${PLUGIN_BASE}"* \
+      "${PLUGIN_DIR}/libNvInfer_edgellm_plugin.so"*; do
+      if [[ -f "${candidate}" ]]; then
+        RESOLVED_PLUGIN="${candidate}"
+        break
+      fi
+    done
+    if [[ -n "${RESOLVED_PLUGIN}" ]]; then
+      echo "Resolved EDGE_LLM_PLUGIN_SO -> ${RESOLVED_PLUGIN}"
+      EDGE_LLM_PLUGIN_SO="${RESOLVED_PLUGIN}"
+    else
+      echo "WARNING: EDGE_LLM_PLUGIN_SO not found on host: ${EDGE_LLM_PLUGIN_SO}" >&2
+      echo "         ls ${PLUGIN_DIR}/libNvInfer_edgellm_plugin.so*  # check actual name" >&2
+    fi
+  fi
+fi
+
 DOCKER_ARGS=(
   --gpus all
   --ipc=host
   --ulimit memlock=-1
   --ulimit stack=67108864
-  -u "${HOST_UID}:${HOST_GID}"
+  -u 0:0
   -w /workspace/TRT-VLA-Lowering
+  -e TRT_VLA_SETUP_HOST_USER=1
+  -e HOST_UID="${HOST_UID}"
+  -e HOST_GID="${HOST_GID}"
+  -e HOST_USER="${HOST_USER}"
+  -e CONTAINER_HOME="/tmp/home-${HOST_USER}"
   -e HOME="/tmp/home-${HOST_USER}"
   -e TRT_VLA_THOR="${TRT_VLA_THOR}"
   -e EDGE_LLM_PLUGIN_SO="${EDGE_LLM_PLUGIN_SO:-}"
@@ -62,6 +91,12 @@ fi
 if [[ -n "${EDGE_LLM_PLUGIN_SO:-}" && -f "${EDGE_LLM_PLUGIN_SO}" ]]; then
   PLUGIN_DIR="$(cd "$(dirname "${EDGE_LLM_PLUGIN_SO}")" && pwd)"
   DOCKER_ARGS+=(-v "${PLUGIN_DIR}:${PLUGIN_DIR}:ro")
+elif [[ -n "${EDGE_LLM_PLUGIN_SO:-}" ]]; then
+  PLUGIN_PARENT="$(dirname "${EDGE_LLM_PLUGIN_SO}")"
+  if [[ -d "${PLUGIN_PARENT}" ]]; then
+    PLUGIN_DIR="$(cd "${PLUGIN_PARENT}" && pwd)"
+    DOCKER_ARGS+=(-v "${PLUGIN_DIR}:${PLUGIN_DIR}:ro")
+  fi
 fi
 
 HF_CACHE="${HF_HOME:-${HOME}/.cache/huggingface}"
