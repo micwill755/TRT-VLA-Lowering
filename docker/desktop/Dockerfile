@@ -53,7 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --upgrade pip setuptools wheel && \
+RUN python3 -m pip install --upgrade --ignore-installed pip setuptools wheel && \
     python3 -m pip install --upgrade \
       "torch==${TORCH_VERSION}+cu130" \
       torchvision \
