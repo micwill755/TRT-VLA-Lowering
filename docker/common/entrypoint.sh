@@ -45,6 +45,25 @@ setup_host_user() {
   chown -R "${uid}:${gid}" "${home}" 2>/dev/null || true
 }
 
+# Copy the host-mounted plugin to a world-readable path as root. test -f can
+# succeed on mode-600 files, but dlopen needs read permission for the container UID.
+stage_edge_llm_plugin() {
+  if [[ "$(id -u)" != "0" ]]; then
+    return 0
+  fi
+  if [[ -z "${EDGE_LLM_PLUGIN_SO:-}" || ! -f "${EDGE_LLM_PLUGIN_SO}" ]]; then
+    return 0
+  fi
+
+  local staged="/tmp/edgellm_plugin/$(basename "${EDGE_LLM_PLUGIN_SO}")"
+  mkdir -p /tmp/edgellm_plugin
+  cp -f "${EDGE_LLM_PLUGIN_SO}" "${staged}"
+  chmod a+r "${staged}"
+  export EDGE_LLM_PLUGIN_SO="${staged}"
+  export EDGELLM_PLUGIN_PATH="${staged}"
+  echo "[entrypoint] Staged Edge-LLM plugin at ${staged}"
+}
+
 run_as_container_user() {
   if [[ "$(id -u)" == "0" && "${TRT_VLA_SETUP_HOST_USER:-0}" == "1" ]]; then
     local home="${CONTAINER_HOME:-/tmp/home-${HOST_USER:-user${HOST_UID}}}"
@@ -52,7 +71,8 @@ run_as_container_user() {
     chown -R "${HOST_UID}:${HOST_GID}" "${home}" 2>/dev/null || true
     # Numeric UID/GID via setpriv works without a passwd entry (corporate AD UIDs).
     setpriv --reuid="${HOST_UID}" --regid="${HOST_GID}" --clear-groups -- \
-      env HOME="${home}" "$@"
+      env HOME="${home}" EDGE_LLM_PLUGIN_SO="${EDGE_LLM_PLUGIN_SO:-}" \
+      EDGELLM_PLUGIN_PATH="${EDGELLM_PLUGIN_PATH:-${EDGE_LLM_PLUGIN_SO:-}}" "$@"
   else
     "$@"
   fi
@@ -65,12 +85,14 @@ exec_as_container_user() {
     mkdir -p "${home}"
     chown -R "${HOST_UID}:${HOST_GID}" "${home}" 2>/dev/null || true
     exec setpriv --reuid="${HOST_UID}" --regid="${HOST_GID}" --clear-groups -- \
-      env HOME="${home}" "$@"
+      env HOME="${home}" EDGE_LLM_PLUGIN_SO="${EDGE_LLM_PLUGIN_SO:-}" \
+      EDGELLM_PLUGIN_PATH="${EDGELLM_PLUGIN_PATH:-${EDGE_LLM_PLUGIN_SO:-}}" "$@"
   fi
   exec "$@"
 }
 
 setup_host_user
+stage_edge_llm_plugin
 
 # Install LeRobot from the mounted workspace on first container start.
 if [[ -f /workspace/lerobot/pyproject.toml || -f /workspace/lerobot/setup.py ]]; then
