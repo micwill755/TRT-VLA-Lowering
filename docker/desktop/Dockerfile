@@ -13,7 +13,9 @@ FROM ${BASE_IMAGE}
 ARG TORCH_VERSION=2.10.0
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu130
 ARG TORCH_TENSORRT_VERSION=2.10.0
-ARG TENSORRT_VERSION=10.14.1.48
+# 10.14.1.48 (no suffix) shipped broken bindings/libs and is excluded by
+# torch-tensorrt 2.10 (!=10.14.1.48). NVIDIA re-released it as .post1.
+ARG TENSORRT_VERSION=10.14.1.48.post1
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
