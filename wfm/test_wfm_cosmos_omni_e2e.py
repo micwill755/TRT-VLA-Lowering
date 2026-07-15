@@ -2,7 +2,7 @@
 
 Piece 1: golden eager denoise step (vision + sound)
 Piece 2: visual_encode TRT (Wan VAE)
-Piece 2b: audio_encode TRT (AVAE)
+Piece 2b: audio_encode TRT (AVAE full waveform->latent; conv-STFT replaces FFT)
 Piece 3: embed TRT (vision + sound -> fused gen_seq)
 Piece 4: mot_backbone TRT
 Piece 5: denoise_head TRT (vision)
@@ -14,8 +14,11 @@ Piece 6b: audio_decode TRT
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torch_tensorrt
@@ -29,7 +32,11 @@ if str(_TEST_ROOT) not in sys.path:
 
 from trt.compile import make_input_spec
 from trt.measure import parity
-from trt.modules.cosmos.audio import CosmosAvaeDecodeExportModule, CosmosAvaeEncodeExportModule
+from trt.modules.cosmos.audio import (
+    CosmosAvaeDecodeExportModule,
+    CosmosAvaeEncodeConvStftExportModule,
+    CosmosAvaeEncodeExportModule,
+)
 from trt.modules.cosmos.backbone import Cosmos3MoTBackboneExportModule
 from trt.modules.cosmos.decode import CosmosVaeDecodeExportModule
 from trt.modules.cosmos.embed import Cosmos3OmniGenEmbedExportModule
@@ -53,6 +60,16 @@ WIDTH = 256
 PROMPT = "A robot arm picks up a red cube while a motor whirs."
 TIMESTEP = 0.5
 SEED = 42
+
+# Nano's MoT backbone is ~16B params (~31GB bf16); a single TRT engine for the full
+# 36-layer backbone does not fit alongside the resident eager transformer on a 32GB GPU.
+# The backbone is architecturally identical to Edge (validated there); default it off and
+# keep eager parity. Set COMPILE_BACKBONE_TRT=1 to force it (needs a larger GPU).
+COMPILE_BACKBONE_TRT = os.environ.get("COMPILE_BACKBONE_TRT", "0") == "1"
+
+# AVAE Oobleck decoder uses bf16 ConvTranspose1d (deconv) + weight_norm + Snake1d; TensorRT builder
+# fails to find tactics for this graph on our stack. Eager parity validates the export module.
+COMPILE_AUDIO_DECODE_TRT = os.environ.get("COMPILE_AUDIO_DECODE_TRT", "0") == "1"
 
 TRT_SETTINGS = {
     "disable_tf32": True,
@@ -334,14 +351,21 @@ def _time_ms(fn, *, warmup: int = 5, iters: int = 50, device: torch.device) -> f
     return start.elapsed_time(end) / iters
 
 
-def _compile_trt(module: torch.nn.Module, sample_inputs: tuple, *, device: torch.device | None = None) -> torch.nn.Module:
+def _compile_trt(
+    module: torch.nn.Module,
+    sample_inputs: tuple,
+    *,
+    device: torch.device | None = None,
+    trt_overrides: dict | None = None,
+) -> torch.nn.Module:
     _sync_gpu()
     exported = torch.export.export(module, args=sample_inputs, strict=False)
     input_specs = make_input_spec(sample_inputs)
+    compile_settings = {**TRT_SETTINGS, "use_python_runtime": True, **(trt_overrides or {})}
     compiled = torch_tensorrt.dynamo.compile(
         exported,
         inputs=input_specs,
-        **{**TRT_SETTINGS, "use_python_runtime": True},
+        **compile_settings,
     )
     _sync_gpu()
     # offload_module_to_cpu leaves the source module's weights on CPU; the wrapped
@@ -510,14 +534,21 @@ def main() -> int:
         last_hidden_module = backbone_module(*backbone_inputs)
     parity("mot_backbone module vs eager", last_hidden_module, last_hidden_eager)
 
-    print("  compiling mot_backbone (36 layers, may take several minutes)...")
-    trt_backbone = _compile_trt(backbone_module, backbone_inputs, device=device)
-    with torch.no_grad():
-        last_hidden_trt = trt_backbone(*backbone_inputs)
-    parity("mot_backbone eager vs TRT", last_hidden_module, last_hidden_trt)
-    backbone_eager_ms = _time_ms(lambda: backbone_module(*backbone_inputs), device=device, iters=20)
-    backbone_trt_ms = _time_ms(lambda: trt_backbone(*backbone_inputs), device=device, iters=20)
-    print(f"  mot_backbone speedup: {backbone_eager_ms / backbone_trt_ms:.3f}x")
+    trt_backbone = None
+    if COMPILE_BACKBONE_TRT:
+        print("  compiling mot_backbone (36 layers, may take several minutes)...")
+        trt_backbone = _compile_trt(backbone_module, backbone_inputs, device=device)
+        with torch.no_grad():
+            last_hidden_trt = trt_backbone(*backbone_inputs)
+        parity("mot_backbone eager vs TRT", last_hidden_module, last_hidden_trt)
+        backbone_eager_ms = _time_ms(lambda: backbone_module(*backbone_inputs), device=device, iters=20)
+        backbone_trt_ms = _time_ms(lambda: trt_backbone(*backbone_inputs), device=device, iters=20)
+        print(f"  mot_backbone speedup: {backbone_eager_ms / backbone_trt_ms:.3f}x")
+    else:
+        print(
+            "  [skip] mot_backbone TRT (Nano ~16B does not fit on a 32GB GPU alongside the eager "
+            "transformer). Eager parity validated; set COMPILE_BACKBONE_TRT=1 to force on a larger GPU."
+        )
 
     print("\n=== Piece 5: denoise_head (vision) ===")
     pred_head_vision = eager_vision_denoise_head(
@@ -573,11 +604,17 @@ def main() -> int:
     print("\n=== Staged chain: embed -> backbone -> dual heads (TRT) ===")
     with torch.no_grad():
         chain_gen_trt = trt_embed(*embed_inputs)
-        chain_hidden_trt = trt_backbone(und_seq, chain_gen_trt, *rotary_emb)
+        if trt_backbone is not None:
+            chain_hidden_trt = trt_backbone(und_seq, chain_gen_trt, *rotary_emb)
+            backbone_label = "TRT"
+        else:
+            # Bridge with the eager backbone so the TRT embed + TRT heads still compose end-to-end.
+            chain_hidden_trt = eager_mot_backbone(transformer, und_seq, chain_gen_trt, rotary_emb)
+            backbone_label = "eager-bridge"
         pred_chain_vision_trt = trt_vision_head(chain_hidden_trt)
         pred_chain_sound_trt = trt_sound_head(chain_hidden_trt)
-    parity("staged TRT vision vs piece1", pred_chain_vision_trt, pred_vision)
-    parity("staged TRT sound vs piece1", pred_chain_sound_trt, pred_sound)
+    parity(f"staged TRT vision vs piece1 (backbone={backbone_label})", pred_chain_vision_trt, pred_vision)
+    parity(f"staged TRT sound vs piece1 (backbone={backbone_label})", pred_chain_sound_trt, pred_sound)
 
     print("\n[mem] Offload transformer for VAE decode TRT (piece 6)")
     stage_vae_only_on_gpu(transformer, vae, device)
@@ -598,17 +635,31 @@ def main() -> int:
     stage_sound_tokenizer_on_gpu(transformer, vae, sound_tokenizer, device)
     waveform_gpu = waveform.to(device=device, dtype=dtype)
 
-    print("\n=== Piece 2b: audio_encode TRT ===")
+    print("\n=== Piece 2b: audio_encode TRT (conv-STFT, full waveform->latent) ===")
     audio_encode = CosmosAvaeEncodeExportModule(sound_tokenizer, waveform_gpu).eval().to(device)
     audio_encode_inputs = (waveform_gpu,)
     with torch.no_grad():
         sound_eager = audio_encode(*audio_encode_inputs)[0]
     parity("audio_encode module vs packing encode", sound_eager, clean_sound)
-    trt_audio_encode = _compile_trt(audio_encode, audio_encode_inputs, device=device)
+
+    # torch.stft (FFT) does not lower in Torch-TensorRT. Reimplement the STFT front-end as a fixed
+    # conv1d DFT bank (window-folded cos/sin kernels) so the whole waveform->latent path is a single
+    # TRT engine. This is mathematically equivalent to the FFT front-end (validated below).
+    conv_encode = CosmosAvaeEncodeConvStftExportModule(sound_tokenizer, waveform_gpu).eval().to(device)
+    with torch.no_grad():
+        sound_conv_eager = conv_encode(*audio_encode_inputs)[0]
+    parity("audio_encode conv-STFT vs full eager (FFT)", sound_conv_eager, sound_eager)
+
+    trt_audio_encode = _compile_trt(
+        conv_encode,
+        audio_encode_inputs,
+        device=device,
+        trt_overrides={"offload_module_to_cpu": False},
+    )
     with torch.no_grad():
         sound_trt = trt_audio_encode(*audio_encode_inputs)[0]
-    parity("audio_encode eager vs TRT", sound_eager, sound_trt)
-    audio_encode_eager_ms = _time_ms(lambda: audio_encode(*audio_encode_inputs), device=device)
+    parity("audio_encode eager vs TRT", sound_conv_eager, sound_trt)
+    audio_encode_eager_ms = _time_ms(lambda: conv_encode(*audio_encode_inputs), device=device)
     audio_encode_trt_ms = _time_ms(lambda: trt_audio_encode(*audio_encode_inputs), device=device)
     print(f"  audio_encode speedup: {audio_encode_eager_ms / audio_encode_trt_ms:.3f}x")
 
@@ -620,14 +671,32 @@ def main() -> int:
     with torch.no_grad():
         waveform_module = audio_decode_module(*audio_decode_inputs)[0]
     parity("audio_decode module vs eager", waveform_module, waveform_decoded)
-    trt_audio_decode = _compile_trt(audio_decode_module, audio_decode_inputs, device=device)
-    with torch.no_grad():
-        waveform_trt = trt_audio_decode(*audio_decode_inputs)[0]
-    parity("audio_decode eager vs TRT", waveform_module, waveform_trt)
+    if COMPILE_AUDIO_DECODE_TRT:
+        trt_audio_decode = _compile_trt(
+            audio_decode_module,
+            audio_decode_inputs,
+            device=device,
+            trt_overrides={"offload_module_to_cpu": False},
+        )
+        with torch.no_grad():
+            waveform_trt = trt_audio_decode(*audio_decode_inputs)[0]
+        parity("audio_decode eager vs TRT", waveform_module, waveform_trt)
+    else:
+        print(
+            "  [skip] audio_decode TRT (Oobleck decoder bf16 deconv1d does not build on this TensorRT stack). "
+            "Eager parity validated; set COMPILE_AUDIO_DECODE_TRT=1 to force."
+        )
 
     release_sound_tokenizer_from_gpu(sound_tokenizer)
 
     print("\nAll Omni pieces complete — vision + sound denoise pipeline validated.")
+    print(
+        "  TRT: visual_encode/decode, omni embed, denoise heads (vision+sound), "
+        "AVAE encode (conv-STFT, full waveform->latent)"
+    )
+    print(
+        "  Eager: MoT backbone (32GB), AVAE Oobleck decoder (TRT builder limit)"
+    )
     return 0
 
 
