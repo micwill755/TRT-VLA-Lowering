@@ -225,3 +225,148 @@ def build_cosmos_packed_static(
         "num_noisy_tokens": len(noisy_frame_indexes) * frame_token_stride,
     }
     return packed_static, latents, pixels
+
+
+def encode_cosmos_sound(sound_tokenizer, waveform: torch.Tensor) -> torch.Tensor:
+    """waveform ``[B, C, N]`` -> sound latents ``[C, T]`` (batch item 0)."""
+    in_dtype = waveform.dtype
+    tokenizer_device = next(sound_tokenizer.parameters()).device
+    encoder_dtype = next(sound_tokenizer.parameters()).dtype
+    waveform = waveform.to(device=tokenizer_device, dtype=encoder_dtype)
+    encoded = sound_tokenizer.encode(waveform, return_dict=True)
+    latents = encoded.latent_dist.mode()
+    return latents[0].to(in_dtype)
+
+
+def decode_cosmos_sound(sound_tokenizer, latents: torch.Tensor) -> torch.Tensor:
+    """sound latents ``[C, T]`` (or ``[B, C, T]``) -> waveform ``[audio_ch, N]``."""
+    if latents.ndim == 3:
+        latents = latents[0]
+    decoder_dtype = next(sound_tokenizer.parameters()).dtype
+    return sound_tokenizer.decode(latents.to(dtype=decoder_dtype))
+
+
+def _sound_waveform_channels(sound_tokenizer) -> int:
+    """Encoder input channels for waveform ``[B, C, N]`` (accounts for stereo doubling)."""
+    cfg = sound_tokenizer.config
+    input_channels = int(cfg.input_channels)
+    stereo = bool(getattr(cfg, "stereo", False))
+    return input_channels * (2 if stereo else 1)
+
+
+def compute_sound_latent_length(
+    *,
+    num_frames: int,
+    fps: float,
+    sampling_rate: int,
+    hop_size: int,
+) -> int:
+    n_audio_samples = int(num_frames / fps * sampling_rate)
+    return (n_audio_samples + hop_size - 1) // hop_size
+
+
+def build_cosmos_omni_packed_static(
+    *,
+    transformer,
+    vae,
+    sound_tokenizer,
+    tokenizer,
+    device: torch.device | str,
+    prompt: str,
+    height: int,
+    width: int,
+    num_frames: int,
+    pixels: torch.Tensor | None = None,
+    waveform: torch.Tensor | None = None,
+    fps: float = 24.0,
+    condition_frame_indexes: tuple[int, ...] = (0,),
+    dtype: torch.dtype = torch.bfloat16,
+    enable_sound: bool = True,
+) -> tuple[dict, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Edge vision packing plus optional Omni sound segment metadata."""
+    packed_static, latents, pixels = build_cosmos_packed_static(
+        transformer=transformer,
+        vae=vae,
+        tokenizer=tokenizer,
+        device=device,
+        prompt=prompt,
+        height=height,
+        width=width,
+        num_frames=num_frames,
+        pixels=pixels,
+        fps=fps,
+        condition_frame_indexes=condition_frame_indexes,
+        dtype=dtype,
+    )
+
+    if not enable_sound:
+        return packed_static, latents, pixels, None, None
+
+    cfg = transformer.config
+    if not getattr(cfg, "sound_gen", False):
+        raise ValueError("Transformer config sound_gen=False; use an Omni-capable checkpoint.")
+
+    device = torch.device(device)
+    und_len = int(packed_static["und_len"])
+    num_vision_tokens = int(packed_static["vision_sequence_indexes"].numel())
+
+    hop_size = int(sound_tokenizer._hop_size)
+    sampling_rate = int(sound_tokenizer.config.sampling_rate)
+    sound_len = compute_sound_latent_length(
+        num_frames=num_frames,
+        fps=fps,
+        sampling_rate=sampling_rate,
+        hop_size=hop_size,
+    )
+
+    tokenizer_device = next(sound_tokenizer.parameters()).device
+    if waveform is None:
+        n_audio_samples = int(num_frames / fps * sampling_rate)
+        audio_channels = _sound_waveform_channels(sound_tokenizer)
+        waveform = torch.randn(1, audio_channels, n_audio_samples, device=tokenizer_device, dtype=dtype)
+    else:
+        waveform = waveform.to(device=tokenizer_device, dtype=dtype)
+
+    clean_sound = encode_cosmos_sound(sound_tokenizer, waveform).to(device)
+    waveform = waveform.cpu()
+
+    text_mrope_ids, next_offset = get_3d_mrope_ids_text_tokens(
+        und_len,
+        temporal_offset=0,
+        use_float_positions=cfg.enable_fps_modulation,
+    )
+    vision_start_offset = next_offset + cfg.unified_3d_mrope_temporal_modality_margin
+    sound_fps = float(cfg.sound_latent_fps)
+    sound_mrope_ids, _ = get_3d_mrope_ids_vae_tokens(
+        grid_t=sound_len,
+        grid_h=1,
+        grid_w=1,
+        temporal_offset=vision_start_offset,
+        reset_spatial_indices=cfg.unified_3d_mrope_reset_spatial_ids,
+        fps=sound_fps if cfg.enable_fps_modulation else None,
+        base_fps=float(cfg.base_fps),
+        temporal_compression_factor=1,
+    )
+
+    curr = und_len + num_vision_tokens
+    sound_sequence_indexes = torch.arange(curr, curr + sound_len, dtype=torch.long, device=device)
+    sound_noisy_frame_indexes = torch.arange(sound_len, device=device, dtype=torch.long)
+
+    text_cols = packed_static["position_ids"][:, :und_len]
+    vision_cols = packed_static["position_ids"][:, und_len : und_len + num_vision_tokens]
+    position_ids = torch.cat([text_cols, vision_cols, sound_mrope_ids.to(device)], dim=1)
+
+    packed_static.update(
+        {
+            "position_ids": position_ids,
+            "sequence_length": und_len + num_vision_tokens + sound_len,
+            "sound_token_shapes": [(sound_len, 1, 1)],
+            "sound_sequence_indexes": sound_sequence_indexes,
+            "sound_mse_loss_indexes": sound_sequence_indexes.clone(),
+            "sound_noisy_frame_indexes": [sound_noisy_frame_indexes],
+            "sound_len": sound_len,
+            "num_noisy_sound_tokens": sound_len,
+            "sound_latent_fps": sound_fps,
+        }
+    )
+    return packed_static, latents, pixels, clean_sound, waveform

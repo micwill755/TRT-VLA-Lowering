@@ -73,7 +73,11 @@ def fix_edge_diffusers_weights(transformer, *, device: str = "cpu", dtype: torch
 
 
 def load_cosmos_from_pipeline(*, dtype: torch.dtype = torch.bfloat16, device: torch.device | str = "cuda") -> dict:
-    pipe = Cosmos3OmniPipeline.from_pretrained(MODEL_ID, torch_dtype=dtype)
+    pipe = Cosmos3OmniPipeline.from_pretrained(
+        MODEL_ID,
+        torch_dtype=dtype,
+        enable_safety_checker=False,
+    )
     fix_edge_diffusers_weights(pipe.transformer, device="cpu", dtype=dtype)
     device = torch.device(device)
     return {
