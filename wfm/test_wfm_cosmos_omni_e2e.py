@@ -8,7 +8,7 @@ Piece 4: mot_backbone TRT
 Piece 5: denoise_head TRT (vision)
 Piece 5b: denoise_head_sound TRT
 Piece 6: visual_decode TRT
-Piece 6b: audio_decode TRT
+Piece 6b: audio_decode TRT (folded weight_norm, fp32 deconv)
 """
 
 from __future__ import annotations
@@ -34,8 +34,10 @@ from trt.compile import make_input_spec
 from trt.measure import parity
 from trt.modules.cosmos.audio import (
     CosmosAvaeDecodeExportModule,
+    CosmosAvaeDecodeTrtExportModule,
     CosmosAvaeEncodeConvStftExportModule,
     CosmosAvaeEncodeExportModule,
+    fold_avae_decoder_weight_norm,
 )
 from trt.modules.cosmos.backbone import Cosmos3MoTBackboneExportModule
 from trt.modules.cosmos.decode import CosmosVaeDecodeExportModule
@@ -66,10 +68,6 @@ SEED = 42
 # The backbone is architecturally identical to Edge (validated there); default it off and
 # keep eager parity. Set COMPILE_BACKBONE_TRT=1 to force it (needs a larger GPU).
 COMPILE_BACKBONE_TRT = os.environ.get("COMPILE_BACKBONE_TRT", "0") == "1"
-
-# AVAE Oobleck decoder uses bf16 ConvTranspose1d (deconv) + weight_norm + Snake1d; TensorRT builder
-# fails to find tactics for this graph on our stack. Eager parity validates the export module.
-COMPILE_AUDIO_DECODE_TRT = os.environ.get("COMPILE_AUDIO_DECODE_TRT", "0") == "1"
 
 TRT_SETTINGS = {
     "disable_tf32": True,
@@ -663,7 +661,7 @@ def main() -> int:
     audio_encode_trt_ms = _time_ms(lambda: trt_audio_encode(*audio_encode_inputs), device=device)
     print(f"  audio_encode speedup: {audio_encode_eager_ms / audio_encode_trt_ms:.3f}x")
 
-    print("\n=== Piece 6b: audio_decode ===")
+    print("\n=== Piece 6b: audio_decode TRT (folded weight_norm, fp32 deconv) ===")
     sound_decode_latents = pred_sound.unsqueeze(0)
     audio_decode_inputs = (sound_decode_latents,)
     waveform_decoded = decode_cosmos_sound(sound_tokenizer, pred_sound)
@@ -671,32 +669,39 @@ def main() -> int:
     with torch.no_grad():
         waveform_module = audio_decode_module(*audio_decode_inputs)[0]
     parity("audio_decode module vs eager", waveform_module, waveform_decoded)
-    if COMPILE_AUDIO_DECODE_TRT:
-        trt_audio_decode = _compile_trt(
-            audio_decode_module,
-            audio_decode_inputs,
-            device=device,
-            trt_overrides={"offload_module_to_cpu": False},
-        )
-        with torch.no_grad():
-            waveform_trt = trt_audio_decode(*audio_decode_inputs)[0]
-        parity("audio_decode eager vs TRT", waveform_module, waveform_trt)
-    else:
-        print(
-            "  [skip] audio_decode TRT (Oobleck decoder bf16 deconv1d does not build on this TensorRT stack). "
-            "Eager parity validated; set COMPILE_AUDIO_DECODE_TRT=1 to force."
-        )
+
+    # Fold weight_norm (immutable conv weights) and run decoder in fp32 so TensorRT can build deconv.
+    folded_decoder = fold_avae_decoder_weight_norm(sound_tokenizer.decoder).eval().to(device)
+    with torch.no_grad():
+        waveform_folded = folded_decoder(sound_decode_latents.to(dtype=next(folded_decoder.parameters()).dtype)).clamp(-1.0, 1.0)[0]
+    parity("audio_decode folded weight_norm vs eager", waveform_folded, waveform_decoded)
+
+    conv_decode = CosmosAvaeDecodeTrtExportModule(sound_tokenizer, sound_decode_latents).eval().to(device)
+    with torch.no_grad():
+        waveform_trt_eager = conv_decode(*audio_decode_inputs)[0]
+    parity("audio_decode TRT module (fp32) vs eager", waveform_trt_eager, waveform_decoded)
+
+    trt_audio_decode = _compile_trt(
+        conv_decode,
+        audio_decode_inputs,
+        device=device,
+        trt_overrides={"offload_module_to_cpu": False},
+    )
+    with torch.no_grad():
+        waveform_trt = trt_audio_decode(*audio_decode_inputs)[0]
+    parity("audio_decode eager vs TRT", waveform_trt_eager, waveform_trt)
+    audio_decode_eager_ms = _time_ms(lambda: conv_decode(*audio_decode_inputs), device=device)
+    audio_decode_trt_ms = _time_ms(lambda: trt_audio_decode(*audio_decode_inputs), device=device)
+    print(f"  audio_decode speedup: {audio_decode_eager_ms / audio_decode_trt_ms:.3f}x")
 
     release_sound_tokenizer_from_gpu(sound_tokenizer)
 
     print("\nAll Omni pieces complete — vision + sound denoise pipeline validated.")
     print(
         "  TRT: visual_encode/decode, omni embed, denoise heads (vision+sound), "
-        "AVAE encode (conv-STFT, full waveform->latent)"
+        "AVAE encode (conv-STFT), AVAE decode (folded weight_norm, fp32 deconv)"
     )
-    print(
-        "  Eager: MoT backbone (32GB), AVAE Oobleck decoder (TRT builder limit)"
-    )
+    print("  Eager: MoT backbone (32GB)")
     return 0
 
 

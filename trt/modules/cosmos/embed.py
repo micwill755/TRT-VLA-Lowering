@@ -6,6 +6,13 @@ import torch
 import torch.nn as nn
 
 
+def _embed_timestep(transformer: nn.Module, timesteps: torch.Tensor) -> torch.Tensor:
+    """Run ``time_proj`` + ``time_embedder`` with dtype alignment for fp16 export."""
+    embed_dtype = next(transformer.time_embedder.parameters()).dtype
+    projected = transformer.time_proj(timesteps).to(dtype=embed_dtype)
+    return transformer.time_embedder(projected)
+
+
 class Cosmos3VisionGenEmbedExportModule(nn.Module):
     """Vision branch of gen_seq embed: patchify + proj_in + timestep on noisy slots.
 
@@ -40,8 +47,10 @@ class Cosmos3VisionGenEmbedExportModule(nn.Module):
         packed_tokens_vision = transformer.proj_in(packed_tokens_vision)
 
         timestep = timestep.to(device=vision_latents.device, dtype=vision_latents.dtype).reshape(())
-        vision_timesteps = timestep.expand(self.num_noisy_tokens) * self.timestep_scale
-        packed_timestep_embeds = transformer.time_embedder(transformer.time_proj(vision_timesteps))
+        vision_timesteps = (timestep.expand(self.num_noisy_tokens) * self.timestep_scale).to(
+            dtype=vision_latents.dtype
+        )
+        packed_timestep_embeds = _embed_timestep(transformer, vision_timesteps)
         packed_timestep_embeds = packed_timestep_embeds.to(dtype=packed_tokens_vision.dtype)
         return transformer._apply_timestep_embeds_to_noisy_tokens(
             packed_tokens=packed_tokens_vision,
@@ -93,8 +102,10 @@ class Cosmos3OmniGenEmbedExportModule(nn.Module):
         packed_tokens_vision = transformer.proj_in(packed_tokens_vision)
 
         timestep = timestep.to(device=vision_latents.device, dtype=vision_latents.dtype).reshape(())
-        vision_timesteps = timestep.expand(self.num_noisy_vision_tokens) * self.timestep_scale
-        packed_timestep_embeds_vision = transformer.time_embedder(transformer.time_proj(vision_timesteps))
+        vision_timesteps = (timestep.expand(self.num_noisy_vision_tokens) * self.timestep_scale).to(
+            dtype=vision_latents.dtype
+        )
+        packed_timestep_embeds_vision = _embed_timestep(transformer, vision_timesteps)
         packed_timestep_embeds_vision = packed_timestep_embeds_vision.to(dtype=packed_tokens_vision.dtype)
         packed_tokens_vision = transformer._apply_timestep_embeds_to_noisy_tokens(
             packed_tokens=packed_tokens_vision,
@@ -107,8 +118,10 @@ class Cosmos3OmniGenEmbedExportModule(nn.Module):
             packed_tokens_vision.dtype
         )
         packed_tokens_sound = transformer.audio_proj_in(packed_tokens_sound) + transformer.audio_modality_embed
-        sound_timesteps = timestep.expand(self.num_noisy_sound_tokens) * self.timestep_scale
-        packed_timestep_embeds_sound = transformer.time_embedder(transformer.time_proj(sound_timesteps))
+        sound_timesteps = (timestep.expand(self.num_noisy_sound_tokens) * self.timestep_scale).to(
+            dtype=vision_latents.dtype
+        )
+        packed_timestep_embeds_sound = _embed_timestep(transformer, sound_timesteps)
         packed_timestep_embeds_sound = packed_timestep_embeds_sound.to(dtype=packed_tokens_sound.dtype)
         packed_tokens_sound = transformer._apply_timestep_embeds_to_noisy_tokens(
             packed_tokens=packed_tokens_sound,

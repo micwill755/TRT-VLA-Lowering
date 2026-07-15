@@ -305,12 +305,18 @@ def save_trt_engine_module(
             for name, t in zip(input_names, flat_tensors)
         )
 
+    settings = dict(trt_settings or {})
+    module_device = _infer_module_device(module)
+
     with patch_trt_interpreter_output_names(output_names):
         engine_bytes = torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(
             exported,
             inputs=input_specs,
-            **trt_settings,
+            **settings,
         )
+
+    if settings.get("offload_module_to_cpu"):
+        module.to(module_device)
 
     engine_path.write_bytes(engine_bytes)
 

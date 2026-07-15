@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -67,6 +69,61 @@ def get_3d_mrope_ids_vae_tokens(
     return mrope_ids, math.ceil(mrope_ids.max().item()) + 1
 
 
+def format_cosmos_user_prompt(
+    prompt: str,
+    *,
+    num_frames: int,
+    height: int,
+    width: int,
+    fps: float = 24.0,
+) -> str:
+    """Augment the user prompt the same way Cosmos training/inference does."""
+    is_image = num_frames == 1
+    text = prompt.rstrip(".")
+
+    if is_image:
+        return f"{text}. This image is of {height}x{width} resolution."
+    return (
+        f"{text}. The video is {num_frames / fps:.1f} seconds long and is of {fps:.0f} FPS."
+        f". This video is of {height}x{width} resolution."
+    )
+
+
+def cosmos_wfm_chat_template() -> dict:
+    """``processed_chat_template.json`` matching Cosmos Qwen-style HF chat templates."""
+    return {
+        "roles": {
+            "system": {
+                "prefix": "\n<|im_start|>system\n",
+                "suffix": "<|im_end|>\n",
+            },
+            "user": {
+                "prefix": "<|im_start|>user\n",
+                "suffix": "<|im_end|>\n",
+            },
+            "assistant": {
+                "prefix": "<|im_start|>assistant\n",
+                "suffix": "<|im_end|>\n",
+            },
+        },
+        "content_types": {},
+        "generation_prompt": "<|im_start|>assistant\n<think>\n",
+        "default_system_prompt": "",
+    }
+
+
+def save_wfm_tokenizer_assets(engine_root: Path, *, tokenizer: Any) -> None:
+    """Write HF tokenizer + ``processed_chat_template.json`` for ``WFMInferenceRuntime``."""
+    from trt.tokenizer import save_tokenizer_for_edge_llm
+
+    tokenizer_dir = Path(engine_root) / "tokenizer"
+    save_tokenizer_for_edge_llm(
+        tokenizer_dir,
+        tokenizer=tokenizer,
+        chat_template=cosmos_wfm_chat_template(),
+    )
+
+
 def tokenize_cosmos_prompt(
     tokenizer,
     prompt: str,
@@ -78,15 +135,14 @@ def tokenize_cosmos_prompt(
     use_system_prompt: bool = True,
 ) -> list[int]:
     is_image = num_frames == 1
-    text = prompt.rstrip(".")
-
-    if is_image:
-        text = f"{text}. This image is of {height}x{width} resolution."
-        system_prompt = _SYSTEM_PROMPT_IMAGE
-    else:
-        text = f"{text}. The video is {num_frames / fps:.1f} seconds long and is of {fps:.0f} FPS."
-        text = f"{text}. This video is of {height}x{width} resolution."
-        system_prompt = _SYSTEM_PROMPT_VIDEO
+    text = format_cosmos_user_prompt(
+        prompt,
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        fps=fps,
+    )
+    system_prompt = _SYSTEM_PROMPT_IMAGE if is_image else _SYSTEM_PROMPT_VIDEO
 
     conversations = []
     if use_system_prompt:
@@ -370,3 +426,111 @@ def build_cosmos_omni_packed_static(
         }
     )
     return packed_static, latents, pixels, clean_sound, waveform
+
+
+def _tensor_to_json_list(value) -> list:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, (list, tuple)):
+        return [_tensor_to_json_list(item) for item in value]
+    return value
+
+
+def _resolve_mrope_section(cfg) -> list[int]:
+    section = getattr(cfg, "mrope_section", None)
+    if section is not None:
+        return list(section)
+    rope_scaling = getattr(cfg, "rope_scaling", None)
+    if isinstance(rope_scaling, dict) and "mrope_section" in rope_scaling:
+        return list(rope_scaling["mrope_section"])
+    return [16, 24, 24]
+
+
+def build_wfm_root_config(
+    *,
+    transformer,
+    vae,
+    sound_tokenizer=None,
+    num_frames: int,
+    height: int,
+    width: int,
+    fps: float,
+    enable_sound: bool = True,
+    num_inference_steps: int = 35,
+) -> dict:
+    """Root ``config.json`` consumed by ``WFMInferenceRuntime``."""
+    cfg = transformer.config
+    sample_rate = 48000
+    if sound_tokenizer is not None:
+        sample_rate = int(sound_tokenizer.config.sampling_rate)
+    return {
+        "num_frames": num_frames,
+        "height": height,
+        "width": width,
+        "fps": fps,
+        "hidden_size": int(cfg.hidden_size),
+        "num_inference_steps": num_inference_steps,
+        "max_batch_size": 1,
+        "num_train_timesteps": int(getattr(cfg, "num_train_timesteps", 1000)),
+        "flow_shift": 5.0,
+        "scheduler_solver_order": 2,
+        "head_dim": int(cfg.head_dim),
+        "rope_theta": float(cfg.rope_theta),
+        "enable_fps_modulation": bool(cfg.enable_fps_modulation),
+        "unified_3d_mrope_temporal_modality_margin": int(cfg.unified_3d_mrope_temporal_modality_margin),
+        "unified_3d_mrope_reset_spatial_ids": bool(cfg.unified_3d_mrope_reset_spatial_ids),
+        "base_fps": float(cfg.base_fps),
+        "temporal_compression_factor": int(vae.config.scale_factor_temporal),
+        "mrope_section": _resolve_mrope_section(cfg),
+        "vision_start_token": "<|vision_start|>",
+        "use_chat_template": True,
+        "use_system_prompt": True,
+        "system_prompt_video": _SYSTEM_PROMPT_VIDEO,
+        "enable_sound": enable_sound,
+        "sound_dim": int(getattr(cfg, "sound_dim", None) or 64),
+        "sample_rate": sample_rate,
+        "sound_latent_fps": float(getattr(cfg, "sound_latent_fps", 25.0)),
+    }
+
+
+def serialize_cosmos_packed_static(packed_static: dict) -> dict:
+    """JSON-serializable ``packing_static.json`` for the C++ WFM runtime."""
+    position_ids = packed_static["position_ids"]
+    if isinstance(position_ids, torch.Tensor) and position_ids.ndim == 2:
+        flat_position_ids = position_ids.detach().cpu().reshape(-1).tolist()
+    else:
+        flat_position_ids = _tensor_to_json_list(position_ids)
+
+    vision_noisy = packed_static["vision_noisy_frame_indexes"]
+    if isinstance(vision_noisy, (list, tuple)):
+        vision_noisy = vision_noisy[0]
+
+    payload = {
+        "input_ids": _tensor_to_json_list(packed_static["input_ids"]),
+        "text_indexes": _tensor_to_json_list(packed_static["text_indexes"]),
+        "und_len": int(packed_static["und_len"]),
+        "position_ids": flat_position_ids,
+        "sequence_length": int(packed_static["sequence_length"]),
+        "vision_token_shapes": packed_static["vision_token_shapes"],
+        "vision_sequence_indexes": _tensor_to_json_list(packed_static["vision_sequence_indexes"]),
+        "vision_mse_loss_indexes": _tensor_to_json_list(packed_static["vision_mse_loss_indexes"]),
+        "vision_noisy_frame_indexes": _tensor_to_json_list(vision_noisy),
+        "num_noisy_tokens": int(packed_static["num_noisy_tokens"]),
+    }
+
+    if "sound_token_shapes" in packed_static:
+        sound_noisy = packed_static["sound_noisy_frame_indexes"]
+        if isinstance(sound_noisy, (list, tuple)):
+            sound_noisy = sound_noisy[0]
+        sound_slots = _tensor_to_json_list(sound_noisy)
+        payload.update(
+            {
+                "sound_token_shapes": packed_static["sound_token_shapes"],
+                "sound_sequence_indexes": _tensor_to_json_list(packed_static["sound_sequence_indexes"]),
+                "sound_mse_loss_indexes": _tensor_to_json_list(packed_static["sound_mse_loss_indexes"]),
+                "sound_noisy_slot_indexes": sound_slots,
+                "num_noisy_sound_tokens": int(packed_static.get("num_noisy_sound_tokens", len(sound_slots))),
+            }
+        )
+
+    return payload

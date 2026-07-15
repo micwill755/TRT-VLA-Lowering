@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import remove_weight_norm
 
 
 def build_stft_dft_conv_weight(n_fft: int, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -24,6 +26,25 @@ def build_stft_dft_conv_weight(n_fft: int, dtype: torch.dtype = torch.float32) -
     imag_kernel = -window.unsqueeze(0) * torch.sin(angle)
     weight = torch.cat([real_kernel, imag_kernel], dim=0).unsqueeze(1)  # [2*num_bins, 1, n_fft]
     return weight.to(dtype)
+
+
+def fold_avae_decoder_weight_norm(decoder: nn.Module) -> nn.Module:
+    """Return a deep copy of the Oobleck decoder with ``weight_norm`` folded into static conv weights.
+
+    TensorRT fails to build the original graph because ``weight_norm`` recomputes normalized weights at
+    runtime and bf16 ``ConvTranspose1d`` tactics are missing on some stacks. Folding produces a plain
+    conv/deconv graph with immutable weights.
+    """
+    folded = copy.deepcopy(decoder)
+    for mod in folded.modules():
+        if hasattr(mod, "weight_g"):
+            remove_weight_norm(mod)
+    return folded.eval()
+
+
+def build_trt_avae_decoder(decoder: nn.Module, *, dtype: torch.dtype = torch.float32) -> nn.Module:
+    """Fold weight_norm and cast to ``dtype`` (fp32 by default) for TensorRT engine build."""
+    return fold_avae_decoder_weight_norm(decoder).to(dtype=dtype)
 
 
 def prepare_avae_waveform_for_encode(waveform: torch.Tensor, sound_tokenizer: nn.Module) -> torch.Tensor:
@@ -178,3 +199,26 @@ class CosmosAvaeDecodeExportModule(nn.Module):
             latents = latents.unsqueeze(0)
         decoder_dtype = next(self.sound_tokenizer.parameters()).dtype
         return self.sound_tokenizer.decode(latents.to(dtype=decoder_dtype))
+
+
+class CosmosAvaeDecodeTrtExportModule(nn.Module):
+    """sound latents [B,C,T] -> waveform [B,audio_ch,N] (TRT-compilable Oobleck decoder).
+
+    Folds ``weight_norm`` into static conv/deconv weights and runs the decoder in fp32 so TensorRT
+    can select deconv tactics. Output is cast back to the input latent dtype.
+    """
+
+    def __init__(self, sound_tokenizer: nn.Module, sample_latents: torch.Tensor):
+        super().__init__()
+        self.decoder = build_trt_avae_decoder(sound_tokenizer.decoder, dtype=torch.float32)
+
+        with torch.no_grad():
+            waveform = self.forward(sample_latents)
+            self.waveform_shape = tuple(waveform.shape)
+
+    def forward(self, latents: torch.Tensor) -> torch.Tensor:
+        if latents.ndim == 2:
+            latents = latents.unsqueeze(0)
+        in_dtype = latents.dtype
+        audio = self.decoder(latents.float()).clamp(-1.0, 1.0)
+        return audio.to(in_dtype)
