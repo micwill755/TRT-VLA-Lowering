@@ -40,11 +40,11 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
     visual_module = inputs["visual_module"]
 
     vision = ctx.model.paligemma_with_expert.paligemma.model.vision_tower
-    hidden_states = vision.vision_model.embeddings(pixel_values.float())
+    hidden_states = vision.embeddings(pixel_values.float())
     batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
 
     patched = patch_vision_attention(
-        vision.vision_model,
+        vision,
         batch_size=batch_size,
         seq_len=seq_len,
         name="SigLIP",

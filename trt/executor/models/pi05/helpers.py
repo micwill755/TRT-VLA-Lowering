@@ -69,6 +69,81 @@ def build_pi05_prefix_embs(
     return compact_embs, compact_pad_mask, compact_attention_mask, compact_position_ids
 
 
+def pi05_seq_len_per_image(image_embs: torch.Tensor, images: list) -> int:
+    """Vision token count per image view after PI05 camera reshape."""
+    per_camera_batch = int(images[0].shape[0])
+    num_images = len(images)
+    reshaped = image_embs.reshape(num_images, per_camera_batch, -1, image_embs.shape[-1])
+    return int(reshaped.shape[2])
+
+
+def pi05_prefix_max_seq_len(
+    *,
+    num_images: int,
+    seq_len_per_image: int,
+    tokenizer_max_length: int,
+) -> int:
+    """Upper bound on compact PI05 prefix length (vision slots + language tokens)."""
+    return int(num_images) * int(seq_len_per_image) + int(tokenizer_max_length)
+
+
+def pi05_compact_prefix_max_seq_len(
+    image_embs: torch.Tensor,
+    images: list,
+    tokenizer_max_length: int,
+) -> int:
+    """Static TRT prefill length for PI05 compact prefix (vision + language slots)."""
+    return pi05_prefix_max_seq_len(
+        num_images=len(images),
+        seq_len_per_image=pi05_seq_len_per_image(image_embs, images),
+        tokenizer_max_length=tokenizer_max_length,
+    )
+
+
+def pad_pi05_compact_prefix(
+    prefix_embs: torch.Tensor,
+    prefix_pad_mask: torch.Tensor,
+    prefix_attention_mask: torch.Tensor,
+    prefix_position_ids: torch.Tensor,
+    *,
+    max_seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Right-pad a compact PI05 prefix to ``max_seq_len`` for static TRT engines.
+
+    Returns padded tensors and the valid (unpadded) sequence length.
+    """
+    valid_len = int(prefix_embs.shape[1])
+    max_seq_len = int(max_seq_len)
+    if valid_len > max_seq_len:
+        raise ValueError(
+            f"PI05 compact prefix length {valid_len} exceeds max_seq_len {max_seq_len}"
+        )
+    if valid_len == max_seq_len:
+        return prefix_embs, prefix_pad_mask, prefix_attention_mask, prefix_position_ids, valid_len
+
+    batch_size = int(prefix_embs.shape[0])
+    pad_len = max_seq_len - valid_len
+    device = prefix_embs.device
+    dtype = prefix_embs.dtype
+
+    padded_embs = torch.zeros(batch_size, max_seq_len, prefix_embs.shape[-1], device=device, dtype=dtype)
+    padded_embs[:, :valid_len, :] = prefix_embs
+
+    padded_pad_mask = torch.zeros(batch_size, max_seq_len, device=device, dtype=torch.bool)
+    padded_pad_mask[:, :valid_len] = prefix_pad_mask.to(device=device, dtype=torch.bool)
+
+    padded_position_ids = torch.zeros(batch_size, max_seq_len, device=device, dtype=prefix_position_ids.dtype)
+    padded_position_ids[:, :valid_len] = prefix_position_ids
+
+    # Bidirectional padding mask: valid x valid block only.
+    padded_attention_mask = torch.zeros(
+        batch_size, 1, max_seq_len, max_seq_len, device=device, dtype=prefix_attention_mask.dtype
+    )
+    padded_attention_mask[:, :, :valid_len, :valid_len] = prefix_attention_mask[:, :, :valid_len, :valid_len]
+
+    return padded_embs, padded_pad_mask, padded_attention_mask, padded_position_ids, valid_len
+
+
 def make_pi05_suffix_position_and_mask(core, prefix_pad_masks, x_t, device):
     """Suffix position ids and 4D attention mask for PI05 diffusion."""
     batch_size, suffix_len = x_t.shape[:2]

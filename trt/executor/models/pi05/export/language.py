@@ -16,7 +16,11 @@ from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.rope import make_rope_rotary_cos_sin
 from trt.context import EdgeContext
 from trt.tokenizer import save_embedding_table, save_tokenizer_for_edge_llm
-from trt.executor.models.pi05.helpers import build_pi05_prefix_embs
+from trt.executor.models.pi05.helpers import (
+    build_pi05_prefix_embs,
+    pad_pi05_compact_prefix,
+    pi05_compact_prefix_max_seq_len,
+)
 
 
 def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
@@ -27,7 +31,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
 
     image_embs = inputs["tensors"]["image_embs"]
 
-    inputs_embeds, prefix_pad_mask, prefix_attention_mask, prefix_position_ids = (
+    compact_embs, compact_pad_mask, compact_attention_mask, compact_position_ids = (
         build_pi05_prefix_embs(
             ctx.model,
             inputs["img_masks"],
@@ -35,6 +39,22 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
             inputs["masks"],
             image_embs,
             inputs["images"],
+        )
+    )
+
+    tokenizer_max_length = int(getattr(ctx.model.config, "tokenizer_max_length", 200))
+    max_seq_len = pi05_compact_prefix_max_seq_len(
+        image_embs,
+        inputs["images"],
+        tokenizer_max_length,
+    )
+    inputs_embeds, prefix_pad_mask, prefix_attention_mask, prefix_position_ids, valid_seq_len = (
+        pad_pi05_compact_prefix(
+            compact_embs,
+            compact_pad_mask,
+            compact_attention_mask,
+            compact_position_ids,
+            max_seq_len=max_seq_len,
         )
     )
 
@@ -64,8 +84,8 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         position_ids=prefix_position_ids,
     )
 
-    ctx_len = torch.full((bsz,), seq_len, device=device, dtype=torch.int32)
-    last_token_ids = torch.full((bsz, 1), seq_len - 1, device=device, dtype=torch.int64)
+    ctx_len = torch.full((bsz,), valid_seq_len, device=device, dtype=torch.int32)
+    last_token_ids = torch.full((bsz, 1), valid_seq_len - 1, device=device, dtype=torch.int64)
 
     kv_caches = [
         torch.zeros(
@@ -100,6 +120,8 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         "lm_hidden": lm_hidden,
         "batch_size": bsz,
         "seq_len": seq_len,
+        "valid_seq_len": valid_seq_len,
+        "max_seq_len": max_seq_len,
         "hidden_size": hidden_size,
         "num_hidden_layers": num_layers,
         "num_attention_heads": num_attention_heads,
@@ -210,7 +232,8 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         "metadata": {
             "batch_size": batch_size,
             "language_inputs": inputs["language_inputs"],
-            "max_seq_len": seq_len,
+            "max_seq_len": int(inputs["max_seq_len"]),
+            "valid_seq_len": int(inputs["valid_seq_len"]),
             "hidden_size": int(inputs["hidden_size"]),
             "prefix_pad_mask": inputs["prefix_pad_mask"],
         },
@@ -242,7 +265,7 @@ def save_artifacts(ctx: EdgeContext, inputs: dict, result: dict) -> None:
             "generation_prompt": "",
             "default_system_prompt": "",
             "prefix_strategy": "pi05_compact_prefix",
-            "max_seq_len": int(inputs["seq_len"]),
+            "max_seq_len": int(inputs["max_seq_len"]),
         },
     )
 

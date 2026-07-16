@@ -703,6 +703,7 @@ def language_edge_llm_config(
 
     edge_config = {
         "vocab_size": int(config_dict["vocab_size"]),
+        "kv_cache_dtype": "fp16",
         "max_position_embeddings": max_position_embeddings,
         "hidden_size": int(config_dict["hidden_size"]),
         "num_hidden_layers": num_hidden_layers,

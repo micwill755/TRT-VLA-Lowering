@@ -7,7 +7,11 @@ from trt.context import EdgeContext
 from trt.rope import make_rope_rotary_cos_sin
 from trt.compile import compile_trt_module
 from trt.executor.models.pi05.load.serialize import SerializedPi05Language
-from trt.executor.models.pi05.helpers import build_pi05_prefix_embs
+from trt.executor.models.pi05.helpers import (
+    build_pi05_prefix_embs,
+    pad_pi05_compact_prefix,
+    pi05_compact_prefix_max_seq_len,
+)
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
 from trt.plugin.attention import ContextAttentionMaskType
@@ -26,7 +30,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
 
     image_embs = inputs["tensors"]["image_embs"]
 
-    inputs_embeds, prefix_pad_mask, prefix_attention_mask, prefix_position_ids = (
+    compact_embs, compact_pad_mask, compact_attention_mask, compact_position_ids = (
         build_pi05_prefix_embs(
             ctx.model,
             inputs["img_masks"],
@@ -34,6 +38,22 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
             inputs["masks"],
             image_embs,
             inputs["images"],
+        )
+    )
+
+    tokenizer_max_length = int(getattr(ctx.model.config, "tokenizer_max_length", 200))
+    max_seq_len = pi05_compact_prefix_max_seq_len(
+        image_embs,
+        inputs["images"],
+        tokenizer_max_length,
+    )
+    inputs_embeds, prefix_pad_mask, prefix_attention_mask, prefix_position_ids, valid_seq_len = (
+        pad_pi05_compact_prefix(
+            compact_embs,
+            compact_pad_mask,
+            compact_attention_mask,
+            compact_position_ids,
+            max_seq_len=max_seq_len,
         )
     )
 
@@ -69,8 +89,8 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         position_ids=prefix_position_ids,
     )
 
-    ctx_len = torch.full((bsz,), seq_len, device=ctx.device, dtype=torch.int32)
-    last_token_ids = torch.full((bsz, 1), seq_len - 1, device=ctx.device, dtype=torch.int64)
+    ctx_len = torch.full((bsz,), valid_seq_len, device=ctx.device, dtype=torch.int32)
+    last_token_ids = torch.full((bsz, 1), valid_seq_len - 1, device=ctx.device, dtype=torch.int64)
 
     kv_caches = [
         torch.zeros(

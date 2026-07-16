@@ -44,14 +44,14 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
     vision = paligemma.vision_tower
     language = paligemma.language_model
 
-    hidden_states = vision.vision_model.embeddings(pixel_values.float())
+    hidden_states = vision.embeddings(pixel_values.float())
     batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
     vocab_size = int(language.config.vocab_size)
     image_token_id = int(getattr(paligemma.config, "image_token_index", 257152))
     images_hwc = nchw_to_hwc(pixel_values)
 
     patched = patch_vision_attention(
-        vision.vision_model,
+        vision,
         batch_size=batch_size,
         seq_len=seq_len,
         name="SigLIP",
