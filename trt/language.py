@@ -38,6 +38,7 @@ from trt.plugin.plugin_utils import (
     patch_language_attention, 
     restore_attention
 )
+from trt.plugin.attention import ContextAttentionMaskType
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class LanguageEngineSpec:
     num_key_value_heads: int
     head_dim: int
     image_token_id: int
-    enable_bidirectional_prefill: int
+    context_attention_mask_type: int
     static_prefill_seq_len: bool
     export_dtype: torch.dtype
     io: ComponentIOSpec
@@ -647,7 +648,7 @@ def save_language_engine_for_edge_llm(
         num_attention_heads=spec.num_attention_heads,
         num_key_value_heads=spec.num_key_value_heads,
         head_dim=spec.head_dim,
-        enable_bidirectional_prefill=spec.enable_bidirectional_prefill,
+        context_attention_mask_type=spec.context_attention_mask_type,
     )
 
     try:

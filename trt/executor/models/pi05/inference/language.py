@@ -10,6 +10,7 @@ from trt.executor.models.pi05.load.serialize import SerializedPi05Language
 from trt.executor.models.pi05.helpers import build_pi05_prefix_embs
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.prefix_cache import PrefixKVCache
 from trt.serialize import SerializedTRTEngine
@@ -121,7 +122,7 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
         num_attention_heads=inputs["num_attention_heads"],
         num_key_value_heads=inputs["num_key_value_heads"],
         head_dim=inputs["head_dim"],
-        enable_bidirectional_prefill=1,
+        context_attention_mask_type=ContextAttentionMaskType.PADDING,
     )
     try:
         lm_engine = compile_trt_module(

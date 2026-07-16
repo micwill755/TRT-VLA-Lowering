@@ -50,6 +50,7 @@ from trt.data import (
     pack_state
 )
 
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_vision_attention, patch_language_attention, patch_vision_attention_reference
 from trt.compile import make_input_spec
 
@@ -258,10 +259,10 @@ def main():
     vision_eager_elapsed_ms = start.elapsed_time(end) / 100
 
     # --- Patch SigLIP attention -> ViTPluginAttention ---
-    hidden_states = vision.vision_model.embeddings(pixel_values.float())
+    hidden_states = vision.embeddings(pixel_values.float())
     batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
     patched = patch_vision_attention(
-        vision.vision_model,
+        vision,
         batch_size=batch_size,
         seq_len=seq_len,
         name="SigLIP",
@@ -408,15 +409,16 @@ def main():
         *kv_caches,
     )
 
-    # PI05 prefix attends bidirectionally; patch_language_attention wires this
-    # flag into the plugin config that the TRT converter reads at compile time.
+    # PI05 prefix attends bidirectionally; patch_language_attention wires the
+    # context attention mask type into the plugin config that the TRT converter
+    # reads at compile time.
     patched = patch_language_attention(
         decoder,
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=1,
+        context_attention_mask_type=ContextAttentionMaskType.PADDING,
     )
     try:
         with torch.no_grad():

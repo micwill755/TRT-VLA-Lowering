@@ -45,6 +45,7 @@ from trt.data import (
     pack_state
 )
 
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_vision_attention, patch_language_attention, patch_vision_attention_reference
 from trt.compile import make_input_spec
 
@@ -409,7 +410,7 @@ def main():
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=0,
+        context_attention_mask_type=ContextAttentionMaskType.CAUSAL,
     )
 
     try:

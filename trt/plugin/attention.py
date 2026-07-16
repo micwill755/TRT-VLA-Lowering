@@ -1,7 +1,23 @@
+from enum import IntEnum
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+
+
+class ContextAttentionMaskType(IntEnum):
+    """Context prefill mask type, mirroring the C++ ``ContextAttentionMaskType`` enum.
+
+    The integer values must stay in sync with
+    ``cpp/kernels/contextAttentionKernels/fmhaParams_v2.h`` since they are passed
+    directly to the ``AttentionPlugin`` ``context_attention_mask_type`` field.
+    """
+
+    PADDING = 0  # Bidirectional full-prefix (attend to all valid tokens)
+    CAUSAL = 1
+    SLIDING_OR_CHUNKED_CAUSAL = 2
+    CUSTOM_MASK = 3
+
 
 class PluginAttention(nn.Module):
     """
@@ -25,7 +41,7 @@ class PluginAttention(nn.Module):
         head_dim: int,
         hidden_size: int,
         layer_idx: int,
-        enable_bidirectional_prefill: int = 1,
+        context_attention_mask_type: int = ContextAttentionMaskType.PADDING,
     ):
         """
         Initialize PluginAttention.
@@ -37,7 +53,8 @@ class PluginAttention(nn.Module):
             head_dim: Per-head dimension.
             hidden_size: Model hidden size.
             layer_idx: Index of this layer in the model.
-            enable_bidirectional_prefill: Whether to enable bidirectional prefill.
+            context_attention_mask_type: Context prefill mask type
+                (``ContextAttentionMaskType`` enum value).
         """
         super().__init__()
         self.q_proj = original_attn.q_proj
@@ -55,7 +72,7 @@ class PluginAttention(nn.Module):
         self.attn_hidden_size = self.num_heads * self.head_dim
         self.hidden_size = int(hidden_size)
         self.layer_idx = layer_idx
-        self.enable_bidirectional_prefill = int(enable_bidirectional_prefill)
+        self.context_attention_mask_type = int(context_attention_mask_type)
 
     def forward(
         self,
@@ -141,7 +158,7 @@ class PluginAttention(nn.Module):
             self.head_dim,
             False,
             -1,
-            bool(self.enable_bidirectional_prefill),
+            self.context_attention_mask_type,
         )
 
         # Use attn_hidden_size for reshape (may differ from hidden_size in Qwen3)
@@ -305,7 +322,7 @@ class MolmoPluginAttention(nn.Module):
         head_dim: int,
         hidden_size: int,
         layer_idx: int,
-        enable_bidirectional_prefill: int = 1,
+        context_attention_mask_type: int = ContextAttentionMaskType.PADDING,
     ):
         super().__init__()
         self.att_proj = original_attn.att_proj
@@ -320,7 +337,7 @@ class MolmoPluginAttention(nn.Module):
         self.attn_hidden_size = self.num_heads * self.head_dim
         self.hidden_size = int(hidden_size)
         self.layer_idx = int(layer_idx)
-        self.enable_bidirectional_prefill = int(enable_bidirectional_prefill)
+        self.context_attention_mask_type = int(context_attention_mask_type)
 
         self.q_dim = self.num_heads * self.head_dim
         self.k_dim = self.num_kv_heads * self.head_dim
@@ -388,7 +405,7 @@ class MolmoPluginAttention(nn.Module):
             self.head_dim,
             False,                  # do_rotary_embedding (RoPE supplied externally)
             -1,
-            bool(self.enable_bidirectional_prefill),
+            self.context_attention_mask_type,
         )
 
         attn_out = attn_out.reshape(batch_size, seq_len, self.attn_hidden_size).to(dtype)

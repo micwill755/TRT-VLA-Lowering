@@ -17,6 +17,7 @@ from trt.language import (
     make_language_edge_input_specs,
 )
 from trt.modules.export.language import CausalLMExportModule
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.rope import make_rope_rotary_cos_sin
 from trt.context import EdgeContext
@@ -189,7 +190,7 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=0,
+        context_attention_mask_type=ContextAttentionMaskType.CAUSAL,
     )
 
     try:

@@ -2,8 +2,8 @@
 TensorRT converter for Edge-LLM attention plugin ops.
 
 Overrides the stock ``trt.attention_plugin`` converter to pass separate Q/K/V
-tensors directly to AttentionPlugin (no fused-qkv slice) and to honor GROOT's
-``enable_bidirectional_prefill`` plugin field.
+tensors directly to AttentionPlugin (no fused-qkv slice) and to honor the
+``context_attention_mask_type`` plugin field.
 """
 import numpy as np
 import tensorrt as trt
@@ -12,7 +12,33 @@ from torch_tensorrt.dynamo.conversion import ConversionContext, dynamo_tensorrt_
 from torch_tensorrt.dynamo.conversion._ConverterRegistry import ConverterPriority
 from torch_tensorrt.dynamo.conversion.converter_utils import get_trt_tensor
 
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import get_trt_plugin_creator
+
+
+def _creator_is_v3(creator) -> bool:
+    return "V3" in type(creator).__name__
+
+
+def _create_trt_plugin(creator, name: str, field_list: list) -> trt.IPluginV2 | trt.IPluginV3:
+    fields = trt.PluginFieldCollection(field_list)
+    if _creator_is_v3(creator):
+        return creator.create_plugin(name, fields, trt.TensorRTPhase.BUILD)
+    return creator.create_plugin(name, fields)
+
+
+def _plugin_is_v3(plugin) -> bool:
+    return "V3" in type(plugin).__name__
+
+
+def _add_plugin_layer(ctx: ConversionContext, inputs: list, plugin, name: str):
+    layer = (
+        ctx.net.add_plugin_v3(inputs, [], plugin)
+        if _plugin_is_v3(plugin)
+        else ctx.net.add_plugin_v2(inputs, plugin)
+    )
+    layer.name = name
+    return layer
 
 
 @dynamo_tensorrt_converter(
@@ -30,7 +56,9 @@ def convert_llm_attention_plugin(ctx: ConversionContext, target, args, kwargs, n
     head_size = args[10]
     enable_fp8_kv_cache = args[11]
     sliding_window_size = args[12] if len(args) > 12 else -1
-    enable_bidirectional_prefill = int(args[13]) if len(args) > 13 else 0
+    context_attention_mask_type = (
+        int(args[13]) if len(args) > 13 else int(ContextAttentionMaskType.CAUSAL)
+    )
     attention_mask = args[14] if len(args) > 14 else None
     position_ids = args[15] if len(args) > 15 else None
     qkv_scales = args[16] if len(args) > 16 else None
@@ -52,7 +80,7 @@ def convert_llm_attention_plugin(ctx: ConversionContext, target, args, kwargs, n
             ("enable_tree_attention", int(enable_tree_attention)),
             ("enable_fp8_kv_cache", int(enable_fp8_kv_cache)),
             ("sliding_window_size", int(sliding_window_size)),
-            ("enable_bidirectional_prefill", enable_bidirectional_prefill),
+            ("context_attention_mask_type", context_attention_mask_type),
         ]
     ]
     if bool(enable_fp8_kv_cache) and qkv_scales is not None:
@@ -64,7 +92,7 @@ def convert_llm_attention_plugin(ctx: ConversionContext, target, args, kwargs, n
             )
         )
 
-    plugin = creator.create_plugin(name, trt.PluginFieldCollection(field_list))
+    plugin = _create_trt_plugin(creator, name, field_list)
     if plugin is None:
         raise RuntimeError("Failed to create AttentionPlugin")
 
@@ -88,8 +116,7 @@ def convert_llm_attention_plugin(ctx: ConversionContext, target, args, kwargs, n
         shuffle_layer.reshape_dims = (inputs[kv_cache_start_idx_input_idx].shape[0],)
         inputs[kv_cache_start_idx_input_idx] = shuffle_layer.get_output(0)
 
-    layer = ctx.net.add_plugin_v2(inputs, plugin)
-    layer.name = name
+    layer = _add_plugin_layer(ctx, inputs, plugin, name)
     return layer.get_output(0), layer.get_output(1)
 
 
@@ -117,7 +144,7 @@ def convert_vit_attention_plugin(ctx: ConversionContext, target, args, kwargs, n
             "head_size", np.array([int(head_size)], dtype=np.int32), trt.PluginFieldType.INT32
         ),
     ]
-    plugin = creator.create_plugin(name, trt.PluginFieldCollection(field_list))
+    plugin = _create_trt_plugin(creator, name, field_list)
     if plugin is None:
         raise RuntimeError("Failed to create ViTAttentionPlugin")
 
@@ -133,8 +160,7 @@ def convert_vit_attention_plugin(ctx: ConversionContext, target, args, kwargs, n
             trt_tensor.name = tensor_name
         inputs.append(trt_tensor)
 
-    layer = ctx.net.add_plugin_v2(inputs, plugin)
-    layer.name = name
+    layer = _add_plugin_layer(ctx, inputs, plugin, name)
     output = layer.get_output(0)
     if not output.name:
         output.name = f"{name}_output"

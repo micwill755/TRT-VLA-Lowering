@@ -9,6 +9,7 @@ from trt.compile import compile_trt_module
 from trt.executor.models.groot.load.serialize import SerializedGrootLanguage
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.serialize import SerializedTRTEngine
 
@@ -143,7 +144,7 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=0,
+        context_attention_mask_type=ContextAttentionMaskType.CAUSAL,
     )
     try:
         lm_engine = compile_trt_module(

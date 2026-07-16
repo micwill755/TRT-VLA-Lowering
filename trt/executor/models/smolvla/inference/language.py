@@ -9,6 +9,7 @@ from trt.executor.models.smolvla.helpers import build_smolvla_prefix_embs
 from trt.executor.models.smolvla.load.serialize import SerializedSmolVLALanguage
 from trt.modules.export.language import CausalLMExportModule
 from trt.pipelines.parity import maybe_override_upstream
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.prefix_cache import PrefixKVCache
 from trt.rope import make_rope_rotary_cos_sin
@@ -124,7 +125,7 @@ def compile(ctx: EdgeContext, inputs: dict) -> dict:
         num_attention_heads=inputs["num_attention_heads"],
         num_key_value_heads=inputs["num_key_value_heads"],
         head_dim=inputs["head_dim"],
-        enable_bidirectional_prefill=1,
+        context_attention_mask_type=ContextAttentionMaskType.PADDING,
     )
     try:
         lm_engine = compile_trt_module(

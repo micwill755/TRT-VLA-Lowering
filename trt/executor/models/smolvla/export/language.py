@@ -13,6 +13,7 @@ from trt.language import (
     make_language_edge_input_specs,
 )
 from trt.modules.export.language import CausalLMExportModule
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_language_attention, restore_attention
 from trt.rope import make_rope_rotary_cos_sin
 from trt.tokenizer import save_embedding_table, save_tokenizer_for_edge_llm
@@ -152,7 +153,7 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=1,
+        context_attention_mask_type=ContextAttentionMaskType.PADDING,
     )
 
     try:
@@ -172,7 +173,7 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
                     batch_size=batch_size,
                     num_layers=num_hidden_layers,
                 ),
-                "enable_bidirectional_prefill": 1,
+                "context_attention_mask_type": int(ContextAttentionMaskType.PADDING),
             },
             input_specs=input_specs,
             flat_tensors=lm_inputs,

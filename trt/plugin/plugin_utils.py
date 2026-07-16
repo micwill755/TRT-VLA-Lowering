@@ -1,5 +1,6 @@
 import os
 import ctypes
+from pathlib import Path
 
 from typing import Any, Optional, Sequence, Tuple
 
@@ -9,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from trt.plugin.attention import (
+    ContextAttentionMaskType,
     PluginAttention, 
     ViTPluginAttention, 
     SiglipReferenceAttention,
@@ -44,14 +46,14 @@ def _register_attention_plugin_op() -> None:
         head_size: int,
         enable_fp8_kv_cache: bool,
         sliding_window_size: int = -1,
-        enable_bidirectional_prefill: bool = False,
+        context_attention_mask_type: int = ContextAttentionMaskType.CAUSAL,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         qkv_scales: Optional[Sequence[float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         del k, v, context_lengths, rope_rotary_cos_sin, kvcache_start_index
         del num_kv_heads, enable_tree_attention, enable_fp8_kv_cache
-        del sliding_window_size, enable_bidirectional_prefill, attention_mask, position_ids, qkv_scales
+        del sliding_window_size, context_attention_mask_type, attention_mask, position_ids, qkv_scales
         batch_size, seq_len, _ = q.shape
         attn_output = torch.zeros(
             batch_size,
@@ -78,14 +80,14 @@ def _register_attention_plugin_op() -> None:
         head_size: int,
         enable_fp8_kv_cache: bool,
         sliding_window_size: int = -1,
-        enable_bidirectional_prefill: bool = False,
+        context_attention_mask_type: int = ContextAttentionMaskType.CAUSAL,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         qkv_scales: Optional[Sequence[float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         del k, v, context_lengths, rope_rotary_cos_sin, kvcache_start_index
         del num_kv_heads, enable_tree_attention, enable_fp8_kv_cache
-        del sliding_window_size, enable_bidirectional_prefill, attention_mask, position_ids, qkv_scales
+        del sliding_window_size, context_attention_mask_type, attention_mask, position_ids, qkv_scales
         batch_size, seq_len, _ = q.shape
         attn_output = torch.empty(
             batch_size,
@@ -223,7 +225,7 @@ def patch_molmo_language_attention(
     num_attention_heads: int,
     num_key_value_heads: int,
     head_dim: int,
-    enable_bidirectional_prefill: int = 1,
+    context_attention_mask_type: int = ContextAttentionMaskType.PADDING,
     name: str = "molmo-language",
 ):
     patched = []
@@ -236,7 +238,7 @@ def patch_molmo_language_attention(
             head_dim=int(head_dim),
             hidden_size=int(hidden_size),
             layer_idx=i,
-            enable_bidirectional_prefill=enable_bidirectional_prefill,
+            context_attention_mask_type=context_attention_mask_type,
         ).eval()
     print(f"patched {name} attention modules: {len(patched)}")
     return patched
@@ -262,7 +264,7 @@ def patch_language_attention(
     num_attention_heads: int,
     num_key_value_heads: int,
     head_dim: int,
-    enable_bidirectional_prefill: int = 1,
+    context_attention_mask_type: int = ContextAttentionMaskType.PADDING,
     name: str = "language",
 ):
     patched = []
@@ -276,7 +278,7 @@ def patch_language_attention(
             head_dim=int(head_dim),
             hidden_size=int(hidden_size),
             layer_idx=i,
-            enable_bidirectional_prefill=enable_bidirectional_prefill,
+            context_attention_mask_type=context_attention_mask_type,
         ).eval()
 
     print(f"patched {name} attention modules: {len(patched)}")

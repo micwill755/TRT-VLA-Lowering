@@ -36,6 +36,7 @@ from trt.modules.export.diffusion import (
     build_molmo_action_context,
     build_molmo_action_modulation,
 )
+from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import (
     restore_attention,
     patch_molmo_language_attention,
@@ -347,7 +348,7 @@ def main():
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=0,
+        context_attention_mask_type=ContextAttentionMaskType.CAUSAL,
     )
     try:
         with torch.no_grad():
@@ -415,7 +416,7 @@ def main():
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        enable_bidirectional_prefill=0,
+        context_attention_mask_type=ContextAttentionMaskType.CAUSAL,
         name="molmo-discrete-language",
     )
     try:
