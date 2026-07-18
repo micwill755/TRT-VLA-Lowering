@@ -67,6 +67,7 @@ DOCKER_ARGS=(
   -e LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/av.libs:${THOR_CUDA_LIB}:/usr/local/cuda-13.0/lib64:/host-usr-lib:/host-lib
   -e LD_PRELOAD="${THOR_LD_PRELOAD}"
   -e TRT_VLA_THOR=1
+  -e TRT_VLA_NO_ATTENTION_PATCH="${TRT_VLA_NO_ATTENTION_PATCH:-}"
   -e EDGE_LLM_PLUGIN_SO="${EDGE_LLM_PLUGIN_SO:-}"
   -e EDGELLM_PLUGIN_PATH="${EDGE_LLM_PLUGIN_SO:-}"
   -e ENGINE_DIR="${ENGINE_DIR}"
