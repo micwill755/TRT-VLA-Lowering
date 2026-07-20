@@ -91,8 +91,45 @@ exec_as_container_user() {
   exec "$@"
 }
 
+# Prefer a locally built opt torch-tensorrt wheel from docker/torchtrt-src/artifacts
+# when present; otherwise keep the image's pip-installed wheel.
+install_torch_tensorrt_from_artifacts() {
+  if [[ "${TRT_VLA_USE_ARTIFACT_TORCHTRT:-1}" != "1" ]]; then
+    return 0
+  fi
+
+  local artifacts_dir="${TORCHTRT_ARTIFACT_DIR:-/workspace/TRT-VLA-Lowering/docker/torchtrt-src/artifacts}"
+  local wheel=""
+  local current_version=""
+  local wheel_version=""
+
+  wheel="$(ls -1t "${artifacts_dir}"/torch_tensorrt-*.whl 2>/dev/null | head -1 || true)"
+  if [[ -z "${wheel}" || ! -f "${wheel}" ]]; then
+    echo "[entrypoint] No torch_tensorrt wheel in ${artifacts_dir}; using image pip install."
+    return 0
+  fi
+
+  current_version="$(run_as_container_user python3 -c 'import importlib.metadata as m; print(m.version("torch-tensorrt"))' 2>/dev/null || true)"
+  # Filename embeds version: torch_tensorrt-<ver>-cp...whl
+  wheel_version="$(basename "${wheel}")"
+  wheel_version="${wheel_version#torch_tensorrt-}"
+  wheel_version="${wheel_version%%-cp*}"
+  wheel_version="${wheel_version%%-py*}"
+
+  if [[ -n "${current_version}" && "${current_version}" == "${wheel_version}" ]]; then
+    echo "[entrypoint] torch_tensorrt ${current_version} already matches artifact wheel."
+    return 0
+  fi
+
+  echo "[entrypoint] Installing opt torch_tensorrt from ${wheel} ..."
+  run_as_container_user env PIP_CONSTRAINT=/dev/null python3 -m pip uninstall -y torch-tensorrt torch_tensorrt >/dev/null 2>&1 || true
+  run_as_container_user env PIP_CONSTRAINT=/dev/null python3 -m pip install --no-deps "${wheel}"
+  run_as_container_user python3 -c 'import torch_tensorrt; print("[entrypoint] torch_tensorrt", torch_tensorrt.__version__, "->", torch_tensorrt.__file__)'
+}
+
 setup_host_user
 stage_edge_llm_plugin
+install_torch_tensorrt_from_artifacts
 
 # Install LeRobot from the mounted workspace on first container start.
 if [[ -f /workspace/lerobot/pyproject.toml || -f /workspace/lerobot/setup.py ]]; then

@@ -73,6 +73,7 @@ DOCKER_ARGS=(
   -e ENGINE_DIR="${ENGINE_DIR}"
   -e HF_TOKEN="${HF_TOKEN:-}"
   -e HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
+  -e TRT_VLA_USE_ARTIFACT_TORCHTRT="${TRT_VLA_USE_ARTIFACT_TORCHTRT:-1}"
   -v "${TRT_VLA_ROOT}:/workspace/TRT-VLA-Lowering"
   -v "${ROOT_DIR}/docker/common/entrypoint.sh:/usr/local/bin/trt-vla-entrypoint.sh:ro"
   -v "${ENGINE_DIR}:${ENGINE_DIR}"
