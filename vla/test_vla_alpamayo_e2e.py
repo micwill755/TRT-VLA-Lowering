@@ -193,11 +193,15 @@ def main():
     with torch.no_grad():
         exported = torch.export.export(visual, args=vision_inputs, strict=False)
         input_specs = make_input_spec(vision_inputs)
+        torch.cuda.synchronize(device)
+        compile_start = time.perf_counter()
         trt_engine = torch_tensorrt.dynamo.compile(
             exported,
             inputs=input_specs,
             **{**VISION_TRT_SETTINGS, "use_python_runtime": True},
         )
+        torch.cuda.synchronize(device)
+        vision_compile_s = time.perf_counter() - compile_start
         embs_trt, deepstack_trt = trt_engine(*vision_inputs)
 
     for _ in range(5):
@@ -398,11 +402,15 @@ def main():
 
         lm_exported = torch.export.export(lm, args=flat_tensors, strict=False)
         free_cuda_memory()
+        torch.cuda.synchronize(device)
+        compile_start = time.perf_counter()
         lm_trt_engine = torch_tensorrt.dynamo.compile(
             lm_exported,
             inputs=list(flat_tensors),
             **LANGUAGE_TRT_SETTINGS,
         )
+        torch.cuda.synchronize(device)
+        language_compile_s = time.perf_counter() - compile_start
         free_cuda_memory(lm_exported)
 
         for _ in range(5):
@@ -522,11 +530,15 @@ def main():
         diffusion_model, args=diffusion_input, strict=False
     )
     diffusion_input_specs = make_input_spec(diffusion_input)
+    torch.cuda.synchronize(device)
+    compile_start = time.perf_counter()
     diffusion_trt_engine = torch_tensorrt.dynamo.compile(
         diffusion_exported,
         inputs=diffusion_input_specs,
         **{**ACTION_TRT_SETTINGS, "use_python_runtime": True},
     )
+    torch.cuda.synchronize(device)
+    diffusion_compile_s = time.perf_counter() - compile_start
 
     with torch.no_grad():
         trt_velocity = diffusion_trt_engine(*diffusion_input)
@@ -548,10 +560,15 @@ def main():
 
     eager_total_ms = vision_eager_elapsed_ms + eager_elapsed_ms + diffusion_eager_elapsed_ms
     trt_total_ms = vision_trt_elapsed_ms + trt_elapsed_ms + diffusion_trt_elapsed_ms
+    compile_total_s = vision_compile_s + language_compile_s + diffusion_compile_s
 
     def _speedup(eager_ms: float, trt_ms: float) -> str:
         return f"{(eager_ms / trt_ms):.3f}x" if trt_ms > 0 else "n/a"
 
+    print(f"vision TRT compile: {vision_compile_s:.3f} s")
+    print(f"lm TRT compile: {language_compile_s:.3f} s")
+    print(f"diffusion TRT compile: {diffusion_compile_s:.3f} s")
+    print(f"total TRT compile: {compile_total_s:.3f} s")
     print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
     print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
     print(f"vision speedup: {_speedup(vision_eager_elapsed_ms, vision_trt_elapsed_ms)}")
