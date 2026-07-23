@@ -17,24 +17,32 @@ def configure_thor_pytorch() -> None:
         torch.backends.cudnn.enabled = False
 
 
-def force_hf_attention(module, attn):
+def force_hf_attention(module, attn, use_cache: bool | None = False):
+    """Force HuggingFace attention implementation (and optional use_cache) on a module tree."""
     for m in module.modules():
         cfg = getattr(m, "config", None)
-        if cfg is not None:
-            if hasattr(cfg, "_attn_implementation"):
-                cfg._attn_implementation = attn
-            if hasattr(cfg, "attn_implementation"):
-                cfg.attn_implementation = attn
+        if cfg is None:
+            continue
+        if hasattr(cfg, "_attn_implementation"):
+            cfg._attn_implementation = attn
+        if hasattr(cfg, "attn_implementation"):
+            cfg.attn_implementation = attn
+        if use_cache is not None and hasattr(cfg, "use_cache"):
+            cfg.use_cache = use_cache
 
     cfg = getattr(module, "config", None)
-    if cfg is not None:
-        for name in ("vision_config", "text_config"):
-            sub_cfg = getattr(cfg, name, None)
-            if sub_cfg is not None:
-                if hasattr(sub_cfg, "_attn_implementation"):
-                    sub_cfg._attn_implementation = attn
-                if hasattr(sub_cfg, "attn_implementation"):
-                    sub_cfg.attn_implementation = attn
+    if cfg is None:
+        return
+    for name in ("vision_config", "text_config"):
+        sub_cfg = getattr(cfg, name, None)
+        if sub_cfg is None:
+            continue
+        if hasattr(sub_cfg, "_attn_implementation"):
+            sub_cfg._attn_implementation = attn
+        if hasattr(sub_cfg, "attn_implementation"):
+            sub_cfg.attn_implementation = attn
+        if use_cache is not None and hasattr(sub_cfg, "use_cache"):
+            sub_cfg.use_cache = use_cache
 
 
 def find_pack_step(preprocessor):

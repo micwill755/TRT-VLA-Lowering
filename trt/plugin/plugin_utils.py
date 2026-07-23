@@ -2,7 +2,7 @@ import os
 import ctypes
 from pathlib import Path
 
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import tensorrt as trt
 
@@ -21,13 +21,82 @@ from trt.plugin.attention import (
 _PLUGIN_CONFIG: dict[str, Any] = {}
 
 def get_plugin_config() -> dict[str, Any]:
-    return _PLUGIN_CONFIG
+    return _PLUGIN_CONFIG.copy()
+
+
+def set_plugin_config(
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    max_seq_len: int = 2048,
+    max_batch_size: int = 4,
+) -> None:
+    """Store LM plugin metadata used by Alpamayo plugin compile helpers."""
+    global _PLUGIN_CONFIG
+    _PLUGIN_CONFIG = {
+        "num_attention_heads": int(num_attention_heads),
+        "num_key_value_heads": int(num_key_value_heads),
+        "head_dim": int(head_dim),
+        "max_seq_len": int(max_seq_len),
+        "max_batch_size": int(max_batch_size),
+    }
+
+
+def set_plugin_config_from_model(model_config: Any, max_seq_len: int = 2048) -> None:
+    """Populate plugin config from a HuggingFace-style model config."""
+    if getattr(model_config, "head_dim", None) is not None:
+        head_dim = int(model_config.head_dim)
+    else:
+        head_dim = int(model_config.hidden_size) // int(model_config.num_attention_heads)
+    set_plugin_config(
+        num_attention_heads=int(model_config.num_attention_heads),
+        num_key_value_heads=int(model_config.num_key_value_heads),
+        head_dim=head_dim,
+        max_seq_len=int(max_seq_len),
+    )
+
+
+def create_kv_caches(
+    config: Any,
+    max_seq_len: int,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float16,
+) -> List[torch.Tensor]:
+    """Allocate empty per-layer KV caches ``[B, 2, n_kv, capacity, head_dim]``."""
+    num_layers = int(config.num_hidden_layers)
+    num_kv_heads = int(config.num_key_value_heads)
+    if getattr(config, "head_dim", None) is not None:
+        head_dim = int(config.head_dim)
+    else:
+        head_dim = int(config.hidden_size) // int(config.num_attention_heads)
+    return [
+        torch.zeros(
+            int(batch_size),
+            2,
+            num_kv_heads,
+            int(max_seq_len),
+            head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        for _ in range(num_layers)
+    ]
 
 def _has_torch_op(namespace: str, name: str) -> bool:
     return hasattr(torch.ops, namespace) and hasattr(getattr(torch.ops, namespace), name)
 
+# These registrations follow the same custom-op pattern as TensorRT-Edge-LLM's
+# ONNX exporter: define a torch.ops.trt operator and register a fake
+# implementation for Dynamo shape propagation. The pipelines diverge only
+# after capture: Edge-LLM translates the op into a custom ONNX node, while
+# Torch-TensorRT lowers it directly through a Dynamo converter.
 def _register_attention_plugin_op() -> None:
-    """Register ``trt::attention_plugin`` for export when edge_plugins is unavailable."""
+    """Register the LLM attention op using Edge-LLM's ONNX-export pattern."""
+    # TODO: Reuse TensorRT-Edge-LLM's canonical attention custom-op registration
+    # once this wrapper and its converter use the same argument order and
+    # present-KV output shape. Preserve context_attention_mask_type, which is
+    # required by VLA models but is not currently exposed by Edge-LLM's schema.
     if _has_torch_op("trt", "attention_plugin"):
         return
 
@@ -100,34 +169,49 @@ def _register_attention_plugin_op() -> None:
         return attn_output, torch.empty_like(past_key_value)
 
 def _register_vit_attention_plugin_op() -> None:
+    """Register the same ViT attention op and fake used by Edge-LLM ONNX export."""
     if _has_torch_op("trt", "vit_attention_plugin"):
         return
 
     @torch.library.custom_op("trt::vit_attention_plugin", mutates_args=())
     def vit_attention_plugin(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen_carrier: torch.Tensor,
+        query_states: torch.Tensor,  # [T, num_heads, head_size]
+        key_states: torch.Tensor,  # [T, num_heads, head_size]
+        value_states: torch.Tensor,  # [T, num_heads, head_size]
+        cu_seqlens: torch.Tensor,  # [batch+1] int32
+        max_seqlen_carrier: torch.Tensor,  # [] or [1] int32 (scalar)
         num_heads: int,
         head_size: int,
     ) -> torch.Tensor:
-        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
-        return torch.zeros_like(q)
+        """ViT ragged self-attention.
+
+        In eager mode, implements varlen SDPA using cu_seqlens to process each
+        sequence segment independently.  During dynamo/ONNX tracing the
+        register_fake shape propagation is used and this body is not executed.
+
+        Unlike AttentionPlugin, ViT attention has no KV cache and takes ragged
+        input with cu_seqlens instead of context_lengths.  RoPE is applied before
+        this call.
+        """
+        import torch.nn.functional as F
+        out = torch.empty_like(query_states)
+        seqlens = cu_seqlens.tolist()
+        for i in range(len(seqlens) - 1):
+            start, end = int(seqlens[i]), int(seqlens[i + 1])
+            if start >= end:
+                continue
+            # q/k/v: [S, H, D] -> [1, H, S, D] for SDPA
+            q = query_states[start:end].permute(1, 0, 2).unsqueeze(0)
+            k = key_states[start:end].permute(1, 0, 2).unsqueeze(0)
+            v = value_states[start:end].permute(1, 0, 2).unsqueeze(0)
+            attn = F.scaled_dot_product_attention(q, k, v)  # [1, H, S, D]
+            out[start:end] = attn.squeeze(0).permute(1, 0, 2)
+        return out
 
     @vit_attention_plugin.register_fake
-    def _vit_attention_plugin_fake(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen_carrier: torch.Tensor,
-        num_heads: int,
-        head_size: int,
-    ) -> torch.Tensor:
-        del k, v, cu_seqlens, max_seqlen_carrier, num_heads, head_size
-        return torch.empty_like(q)
+    def _(query_states, key_states, value_states, cu_seqlens, max_seqlen_carrier,
+          num_heads, head_size):
+        return torch.empty_like(query_states)
 
 
 def get_trt_plugin_creator(
@@ -151,11 +235,7 @@ def load_plugin():
     if not plugin_so:
         raise RuntimeError("Set EDGE_LLM_PLUGIN_SO to libNvInfer_edgellm_plugin.so before running this script")
 
-    try:
-        import torch_tensorrt.dynamo.conversion.edge_plugins as edge_plugins
-        edge_plugins.load_edge_plugin(plugin_so)
-    except ImportError:
-        ctypes.CDLL(plugin_so)
+    ctypes.CDLL(plugin_so)
     trt.init_libnvinfer_plugins(None, "")
     return plugin_so
 
