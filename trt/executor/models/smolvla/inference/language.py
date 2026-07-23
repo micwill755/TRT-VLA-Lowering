@@ -87,6 +87,9 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         for _ in range(num_layers)
     ]
     kvcache_start_index = torch.empty(0, device=ctx.device, dtype=torch.int32)
+    ds_stack = torch.zeros(
+        0, bsz, seq_len, hidden_size, device=ctx.device, dtype=ctx.dtype
+    )
 
     lm_inputs = (
         inputs_embeds,
@@ -94,6 +97,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         ctx_len,
         kvcache_start_index,
         last_token_ids,
+        ds_stack,
         *kv_caches,
     )
 

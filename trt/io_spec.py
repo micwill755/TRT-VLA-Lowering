@@ -70,6 +70,7 @@ VLA_LANGUAGE_INPUT_NAMES = (
     "context_lengths",
     "kvcache_start_index",
     "last_token_ids",
+    "ds_stack",
 )
 VLA_LANGUAGE_OUTPUT_NAMES = ("logits", "lm_hidden_states", "prefix_k", "prefix_v")
 VLA_LANGUAGE_LEADING_INPUT_COUNT = len(VLA_LANGUAGE_INPUT_NAMES)

@@ -23,9 +23,9 @@ class SerializedGrootLanguage:
         self.max_seq_len = int(engine.config["max_seq_len"])
 
     def __call__(self, *args):
-        if len(args) < 6:
+        if len(args) < 7:
             raise ValueError(
-                f"SerializedGrootLanguage expected at least 6 inputs, got {len(args)}"
+                f"SerializedGrootLanguage expected at least 7 inputs, got {len(args)}"
             )
         (
             input_embs,
@@ -33,6 +33,7 @@ class SerializedGrootLanguage:
             ctx_len,
             kvcache_start_index,
             last_token_ids,
+            ds_stack,
             *kv_caches,
         ) = args
         inputs = {
@@ -41,6 +42,7 @@ class SerializedGrootLanguage:
             "context_lengths": ctx_len,
             "kvcache_start_index": kvcache_start_index,
             "last_token_ids": last_token_ids,
+            "ds_stack": ds_stack,
         }
 
         for i, kv_cache in enumerate(kv_caches):

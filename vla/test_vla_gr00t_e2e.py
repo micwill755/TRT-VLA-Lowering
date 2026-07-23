@@ -395,12 +395,14 @@ def main():
         for _ in range(num_layers)
     ]
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)   # fresh prefill
+    ds_stack = torch.zeros(0, bsz, seq_len, hidden_size, device=device, dtype=dtype)
     flat_tensors = (
         inputs_embeds_trt,
         rope_rotary_cos_sin,
         ctx_len,
         kvcache_start_index,
         last_token_ids,
+        ds_stack,
         *kv_caches,
     )
 

@@ -115,6 +115,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         for _ in range(num_layers)
     ]
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)  # fresh prefill
+    ds_stack = torch.zeros(0, bsz, seq_len, hidden_size, device=device, dtype=dtype)
 
     lm_inputs = (
         trt_inputs_embeds,      # spliced vision rows — NOT raw input_embs
@@ -122,6 +123,7 @@ def preprocess(ctx: EdgeContext, inputs: dict) -> dict:
         ctx_len,
         kvcache_start_index,
         last_token_ids,
+        ds_stack,
         *kv_caches,
     )
 
@@ -174,6 +176,7 @@ def export(ctx: EdgeContext, inputs: dict) -> dict:
         "context_lengths",
         "kvcache_start_index",
         "last_token_ids",
+        "ds_stack",
     ] + [f"past_key_values_{i}" for i in range(num_hidden_layers)]
     output_names = ["logits", "lm_hidden_states", "prefix_k", "prefix_v"]
     input_specs = make_language_edge_input_specs(

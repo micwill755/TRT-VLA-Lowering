@@ -32,6 +32,9 @@ class CausalLMExportModule(nn.Module):
     External RoPE and KV-cache controls match ``LLMEngineRunner`` prefill/decode.
     ``select_layer=-1`` (default for GR00T TRT) uses final RMSNorm hidden for
     context; positive values capture an intermediate layer output pre-norm.
+
+    ``ds_stack`` is always an input (``[num_ds, B, S, H]``). Models without
+    deepstack pass ``num_ds=0`` (empty leading dim); the add is a no-op.
     """
 
     def __init__(
@@ -53,10 +56,13 @@ class CausalLMExportModule(nn.Module):
         context_lengths: torch.Tensor,
         kvcache_start_index: torch.Tensor,
         last_token_ids: torch.Tensor,
+        ds_stack: torch.Tensor,
         *past_key_values: torch.Tensor,
     ):
         lm_dtype = next(self.lm.parameters()).dtype
         hidden = _as_tensor(inputs_embeds).to(dtype=lm_dtype)
+        seq_len = inputs_embeds.shape[1]
+        num_ds = int(ds_stack.shape[0])
         context_hidden = hidden if self.select_layer == 0 else None
         new_kvs = []
 
@@ -79,6 +85,9 @@ class CausalLMExportModule(nn.Module):
             hidden = residual + hidden
             new_kvs.append(kv)
 
+            if i < num_ds:
+                hidden = hidden + ds_stack[i, :, :seq_len, :].to(dtype=hidden.dtype)
+
             if self.select_layer > 0 and (i + 1) == self.select_layer:
                 context_hidden = hidden
 
@@ -89,7 +98,6 @@ class CausalLMExportModule(nn.Module):
         last_hidden = gather_last_token_hidden(hidden, last_token_ids)
         logits = self.lm_head(last_hidden).float()
 
-        seq_len = inputs_embeds.shape[1]
         prefix_k = torch.stack(
             [kv[:, 0, :, :seq_len, :] for kv in new_kvs],
             dim=0,

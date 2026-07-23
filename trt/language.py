@@ -305,6 +305,14 @@ def pi05_plugin_lm_smoke_check(
         device=device,
         dtype=torch.int64,
     )
+    ds_stack = torch.zeros(
+        0,
+        trt_prefix_embs.shape[0],
+        trt_prefix_embs.shape[1],
+        int(cfg.hidden_size),
+        device=device,
+        dtype=trt_prefix_embs.dtype,
+    )
     trt_logits, trt_hidden, trt_k, trt_v = unpack_vla_prefix_language_outputs(
         trt_language(
             trt_prefix_embs,
@@ -312,6 +320,7 @@ def pi05_plugin_lm_smoke_check(
             ctx_len,
             kvcache_start_index,
             last_token_ids,
+            ds_stack,
             *kv_caches,
         )
     )
@@ -457,6 +466,15 @@ def make_language_edge_flat_tensors(
         device=device,
         dtype=torch.int64,
     )
+    # VLAs without deepstack pass num_ds=0; CausalLMExportModule treats it as a no-op.
+    ds_stack = torch.zeros(
+        0,
+        batch_size,
+        trace_seq_len,
+        int(trace_embs.shape[-1]),
+        device=device,
+        dtype=dtype,
+    )
 
     flat_tensors = (
         trace_embs,
@@ -464,6 +482,7 @@ def make_language_edge_flat_tensors(
         ctx_len.contiguous(),
         kvcache_start_index,
         last_token_ids,
+        ds_stack.contiguous(),
         *[kv.contiguous() for kv in kv_caches],
     )
     return flat_tensors, trace_seq_len
