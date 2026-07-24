@@ -455,6 +455,7 @@ def main() -> int:
     eager_out = _run_eager_language()
     lm_hidden_eager = eager_out.last_hidden_state
     eager_logits = lm_head(lm_hidden_eager[:, -1:]).float().contiguous()
+    eager_hidden_cpu = lm_hidden_eager.detach().cpu()
     lm_eager_ms = _cuda_time_ms(
         _run_eager_language, warmup=args.warmup, iters=args.iters
     )
@@ -551,6 +552,17 @@ def main() -> int:
         lambda: lm_engine(lm_inputs), warmup=args.warmup, iters=args.iters
     )
     parity("language logits A vs Edge", eager_logits, edge_logits)
+    if "hidden_states" in lm_out:
+        parity(
+            "language hidden A vs Edge",
+            eager_hidden_cpu,
+            lm_out["hidden_states"].detach().cpu(),
+        )
+    else:
+        print(
+            "language hidden A vs Edge: skipped "
+            "(re-export LLM with --emit-normed-hidden-states)"
+        )
 
     present_kv = {
         i: lm_out[f"present_key_values_{i}"].detach().cpu()
@@ -567,6 +579,7 @@ def main() -> int:
         rope_rotary_cos_sin,
         eager_logits,
         edge_logits,
+        eager_hidden_cpu,
     )
     free_cuda_memory()
 

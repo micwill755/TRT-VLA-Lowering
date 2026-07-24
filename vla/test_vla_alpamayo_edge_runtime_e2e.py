@@ -61,6 +61,17 @@ LANGUAGE_TRT_SETTINGS = {
     "offload_module_to_cpu": True,
 }
 
+LANGUAGE_FP16_TRT_SETTINGS = {
+    "enabled_precisions": {torch.float16},
+    "use_explicit_typing": False,
+    "use_fp32_acc": False,
+    "disable_tf32": False,
+    "min_block_size": 1,
+    "decompose_attention": True,
+    "offload_module_to_cpu": True,
+    "require_full_compilation": True,
+}
+
 VISION_PROFILES = {
     "input": ((640, 1536), (37184, 1536), (73728, 1536)),
     "rotary_pos_emb": ((640, 36), (37184, 36), (73728, 36)),
@@ -579,7 +590,13 @@ def _vision_export(model, output_root: Path, device: torch.device) -> float:
     return elapsed
 
 
-def _lm_export(model, output_root: Path, device: torch.device) -> float:
+def _lm_export(
+    model,
+    output_root: Path,
+    device: torch.device,
+    *,
+    precision: str = "fp32-acc",
+) -> float:
     language = model.vlm.model.language_model.to(device=device, dtype=torch.float16).eval()
     lm_head = model.vlm.lm_head.to(device=device, dtype=torch.float16).eval()
     decoder = getattr(language, "model", language)
@@ -687,13 +704,18 @@ def _lm_export(model, output_root: Path, device: torch.device) -> float:
         name="alpamayo-edge-runtime-lm",
     )
     try:
+        trt_settings = (
+            LANGUAGE_FP16_TRT_SETTINGS
+            if precision == "fp16"
+            else LANGUAGE_TRT_SETTINGS
+        )
         elapsed = _export_engine(
             module,
             sample_inputs,
             specs,
             ["logits"] + [f"present_key_values_{i}" for i in range(num_layers)],
             output_root / "llm" / "llm.engine",
-            LANGUAGE_TRT_SETTINGS,
+            trt_settings,
             dynamic_shapes,
         )
     finally:
@@ -882,6 +904,12 @@ def main() -> int:
         default="vision,language,action",
         help="Comma-separated engine components to rebuild.",
     )
+    parser.add_argument(
+        "--language-precision",
+        choices=("fp16", "fp32-acc"),
+        default="fp32-acc",
+        help="TensorRT language compute policy (default: fp32-acc).",
+    )
     parser.add_argument("--skip-run", action="store_true")
     args = parser.parse_args()
 
@@ -905,8 +933,16 @@ def main() -> int:
         timings["vision_s"] = _vision_export(model, output_root, device)
         print(f"vision Torch-TRT engine compile: {timings['vision_s']:.3f} s")
     if "language" in components:
-        print("Exporting Edge-runtime-compatible llm.engine")
-        timings["language_s"] = _lm_export(model, output_root, device)
+        print(
+            "Exporting Edge-runtime-compatible llm.engine "
+            f"({args.language_precision})"
+        )
+        timings["language_s"] = _lm_export(
+            model,
+            output_root,
+            device,
+            precision=args.language_precision,
+        )
         print(f"language Torch-TRT engine compile: {timings['language_s']:.3f} s")
     if "action" in components:
         print("Exporting Edge-runtime-compatible action.engine")

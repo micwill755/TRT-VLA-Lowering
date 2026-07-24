@@ -328,6 +328,7 @@ def main():
         eager_elapsed_ms = start.elapsed_time(end) / 100
 
     lm_hidden_eager = eager_out.last_hidden_state
+    eager_last_logits = lm_head(lm_hidden_eager[:, -1]).float()
     free_cuda_memory(eager_out, ds_for_hf)
 
     ds_stack = pack_deepstack_to_ds_stack(
@@ -432,6 +433,7 @@ def main():
 
     # PI05 compares hidden states (not full-vocab logits).
     parity("language A vs C (TRT)", lm_hidden_eager, trt_out[1])
+    parity("language logits A vs C", eager_last_logits, trt_out[0])
 
     # Language TRT engine still holds ~8B weights on GPU; drop it before diffusion.
     print("Releasing language TRT runtime before diffusion compile")
@@ -448,6 +450,7 @@ def main():
         ds_stack,
         rope_rotary_cos_sin,
         lm_hidden_eager,
+        eager_last_logits,
         language,
         lm_head,
     )
