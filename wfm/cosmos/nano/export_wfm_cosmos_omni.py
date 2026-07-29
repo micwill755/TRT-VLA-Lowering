@@ -16,7 +16,7 @@ Writes the on-disk layout expected by TensorRT-Edge-LLM::
       audio_encode/{config.json, audio_encode.engine}
       audio_decode/{config.json, audio_decode.engine}
 
-Export modules mirror ``test_wfm_cosmos_omni_e2e.py`` (conv-STFT encode, folded fp32 decode).
+Uses conv-STFT audio encode and folded-fp32 audio decode.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torch_tensorrt
+from diffusers import Cosmos3OmniPipeline
 
 torch_tensorrt.logging.set_level(logging.WARNING)
 
@@ -54,19 +55,16 @@ from trt.modules.cosmos.vision import CosmosVaeEncodeExportModule
 from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.utils import force_hf_attention
 
-from wfm.test_wfm_cosmos_omni_e2e import (
-    TRT_SETTINGS,
-    build_rotary_emb,
-    build_und_seq,
-    eager_mot_backbone,
-    eager_omni_gen_embed,
-    load_cosmos_from_pipeline,
-    release_sound_tokenizer_from_gpu,
-    stage_sound_tokenizer_on_gpu,
-    stage_transformer_only_on_gpu,
-    stage_transformer_vae_on_gpu,
-    stage_vae_only_on_gpu,
-)
+TRT_SETTINGS = {
+    "disable_tf32": True,
+    "use_explicit_typing": True,
+    "use_fp32_acc": True,
+    "truncate_double": True,
+    "immutable_weights": True,
+    "decompose_attention": True,
+    "require_full_compilation": True,
+    "offload_module_to_cpu": True,
+}
 
 TRT_SETTINGS_AUDIO = {**TRT_SETTINGS, "offload_module_to_cpu": False}
 
@@ -75,6 +73,119 @@ def _sync_gpu() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
+
+
+def stage_transformer_vae_on_gpu(transformer, vae, device: torch.device) -> None:
+    transformer.to(device)
+    vae.to(device)
+    _sync_gpu()
+
+
+def stage_vae_only_on_gpu(transformer, vae, device: torch.device) -> None:
+    transformer.to("cpu")
+    vae.to(device)
+    _sync_gpu()
+
+
+def stage_transformer_only_on_gpu(transformer, vae, device: torch.device) -> None:
+    vae.to("cpu")
+    transformer.to(device)
+    _sync_gpu()
+
+
+def stage_sound_tokenizer_on_gpu(transformer, vae, sound_tokenizer, device: torch.device) -> None:
+    transformer.to("cpu")
+    vae.to("cpu")
+    _sync_gpu()
+    sound_tokenizer.to(device)
+    _sync_gpu()
+
+
+def release_sound_tokenizer_from_gpu(sound_tokenizer) -> None:
+    sound_tokenizer.to("cpu")
+    _sync_gpu()
+
+
+def load_cosmos_from_pipeline(model_id: str, *, dtype: torch.dtype) -> dict:
+    """Load pipeline on CPU; the exporter stages components as needed."""
+    pipe = Cosmos3OmniPipeline.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        enable_safety_checker=False,
+    )
+    if pipe.sound_tokenizer is None:
+        raise RuntimeError(f"{model_id} is missing sound_tokenizer; use an Omni checkpoint.")
+    if not getattr(pipe.transformer.config, "sound_gen", False):
+        raise RuntimeError(f"{model_id} transformer.config.sound_gen=False.")
+    return {
+        "transformer": pipe.transformer.eval(),
+        "vae": pipe.vae.eval(),
+        "sound_tokenizer": pipe.sound_tokenizer.eval(),
+        "tokenizer": pipe.text_tokenizer,
+        "scheduler": pipe.scheduler,
+    }
+
+
+@torch.no_grad()
+def build_und_seq(transformer, input_ids: torch.Tensor) -> torch.Tensor:
+    return transformer.embed_tokens(input_ids)
+
+
+@torch.no_grad()
+def build_rotary_emb(
+    transformer,
+    position_ids: torch.Tensor,
+    und_len: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cos, sin = transformer.rotary_emb(
+        position_ids=position_ids.unsqueeze(1),
+        device=device,
+        dtype=dtype,
+    )
+    cos = cos.squeeze(0)
+    sin = sin.squeeze(0)
+    return (
+        cos[:und_len].contiguous(),
+        sin[:und_len].contiguous(),
+        cos[und_len:].contiguous(),
+        sin[und_len:].contiguous(),
+    )
+
+
+@torch.no_grad()
+def eager_omni_gen_embed(
+    transformer,
+    packed_static: dict,
+    vision_latents: torch.Tensor,
+    sound_latents: torch.Tensor,
+    timestep: torch.Tensor | float,
+) -> torch.Tensor:
+    module = Cosmos3OmniGenEmbedExportModule(
+        transformer,
+        packed_static=packed_static,
+        sample_vision_latents=vision_latents,
+        sample_sound_latents=sound_latents,
+        sample_timestep=float(timestep) if not torch.is_tensor(timestep) else float(timestep.item()),
+    ).eval().to(device=vision_latents.device)
+    if not torch.is_tensor(timestep):
+        timestep = torch.tensor(timestep, device=vision_latents.device, dtype=vision_latents.dtype)
+    return module(vision_latents, sound_latents, timestep)
+
+
+@torch.no_grad()
+def eager_mot_backbone(
+    transformer,
+    und_seq: torch.Tensor,
+    gen_seq: torch.Tensor,
+    rotary_emb: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    cos_und, sin_und, cos_gen, sin_gen = rotary_emb
+    for layer in transformer.layers:
+        und_seq, gen_seq = layer(und_seq, gen_seq, (cos_und, sin_und, cos_gen, sin_gen))
+    return torch.cat([transformer.norm(und_seq), transformer.norm_moe_gen(gen_seq)], dim=0)
 
 
 def _parse_dtype(name: str) -> torch.dtype:
@@ -136,7 +247,7 @@ def export_engines(args: argparse.Namespace) -> Path:
 
     load_plugins_for_trt()
     print(f"[1] Load {args.model_id} (export dtype={dtype})")
-    components = load_cosmos_from_pipeline(dtype=dtype)
+    components = load_cosmos_from_pipeline(args.model_id, dtype=dtype)
     transformer = components["transformer"]
     vae = components["vae"]
     sound_tokenizer = components["sound_tokenizer"]

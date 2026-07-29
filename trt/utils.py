@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import gc
 import os
 from pathlib import Path
@@ -6,7 +8,7 @@ from typing import Any
 import torch
 
 _THOR_CUDA_LIB = Path("/usr/local/cuda-13.0/thor/targets/aarch64-linux/lib")
-
+DEFAULT_FPS = 5.0
 
 def configure_thor_pytorch() -> None:
     """Use PyTorch fallbacks for ops whose pip CUDA wheels mismatch DriveOS Thor."""
