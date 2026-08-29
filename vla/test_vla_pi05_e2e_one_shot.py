@@ -1,45 +1,46 @@
+"""PI05 e2e identical to ``test_vla_pi05_e2e.py``, but compile via one-shot APIs.
+
+Stock path (original script)::
+
+    ep = torch.export.export(mod, args=...)
+    engine = torch_tensorrt.dynamo.compile(ep, inputs=..., **settings)
+
+This script::
+
+    ep = torch_tensorrt.dynamo.export_for_tensorrt(mod, args=..., ...)
+    engine = torch_tensorrt.dynamo.compile(
+        ep, inputs=..., skip_decompositions=True, **settings
+    )
+
+Language still goes through ``save_trt_engine_module`` (dynamic-shape Edge export);
+that path is timed but not yet switched to one-shot.
+
+Run both scripts and compare the printed ``*_compile_seconds`` lines.
+"""
+
 from __future__ import annotations
 
 import os
 import sys
 import logging
-import argparse
-import time
-from pathlib import Path
-
-import torch
 import torch_tensorrt
+import torch
+import time
+
+from pathlib import Path
 
 if hasattr(getattr(torch_tensorrt, "logging", None), "set_level"):
     torch_tensorrt.logging.set_level(logging.WARNING)
 
-# Prefer this package's local `trt/` (examples/pi05), then TRT_VLA_ROOT / siblings.
-_CANDIDATE_ROOTS = [
-    Path(__file__).resolve().parent,  # examples/pi05/ or Test/vla/
-]
-_env_root = os.environ.get("TRT_VLA_ROOT")
-if _env_root:
-    _CANDIDATE_ROOTS.append(Path(_env_root))
-_CANDIDATE_ROOTS.extend(
-    [
-        Path("/workspace/TRT-VLA-Lowering"),
-        Path("/workspace/pi05"),
-        Path(__file__).resolve().parents[1],  # Test/vla/ → Test/, or TRT-VLA-Lowering/vla/ → repo root
-    ]
-)
-_TEST_ROOT = next((p for p in _CANDIDATE_ROOTS if (p / "trt").is_dir()), None)
-if _TEST_ROOT is None:
-    raise ModuleNotFoundError(
-        "Could not locate the `trt/` package. "
-        "Run from examples/pi05/ or set TRT_VLA_ROOT."
-    )
+_TEST_ROOT = Path(__file__).resolve().parents[1]
 if str(_TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(_TEST_ROOT))
 
 from lerobot.configs import FeatureType, PolicyFeature
-from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
-from lerobot.policies.pi05 import PI05Policy
+from lerobot.utils.constants import ACTION, OBS_STATE
+from lerobot.policies.pi05 import PI05Config, PI05Policy
 from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
+from lerobot.utils.constants import OBS_IMAGES
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.utils.constants import OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK
 from trt.plugin.plugin_utils import restore_attention
@@ -62,109 +63,107 @@ from trt.utils import (
 
 configure_thor_pytorch()
 from trt.plugin.plugin_utils import load_plugins_for_trt
-from trt.vision import nchw_to_hwc
 from trt.rope import make_rope_rotary_cos_sin
+
 from trt.plugin.attention import ContextAttentionMaskType
 from trt.plugin.plugin_utils import patch_vision_attention, patch_language_attention
 from trt.compile import make_input_spec, save_trt_engine_module
-from trt.tokenizer import (
-    pi05_edge_chat_template,
-    save_embedding_table,
-    save_tokenizer_for_edge_llm,
-)
+from trt.compile_stage_timing import print_stage_breakdown, stage_timing
 from trt.executor.models.pi05.load.serialize import SerializedPi05Language
-from trt.io_spec import (
-    VLA_LANGUAGE_INPUT_NAMES,
-    VLA_LANGUAGE_OUTPUT_NAMES,
-    PI05_ACTION_ROLLOUT,
-    PI05_EDGE_IO,
-    action_rollout_extra_config,
-)
-from trt.language import (
-    language_edge_llm_config,
-    make_language_edge_flat_tensors,
-    make_language_edge_input_specs,
-)
-from trt.serialize import SerializedTRTEngine, SerializedPositionalEngine
+from trt.io_spec import VLA_LANGUAGE_INPUT_NAMES, VLA_LANGUAGE_OUTPUT_NAMES
+from trt.language import language_edge_llm_config, language_edge_trt_settings, make_language_edge_input_specs
+from trt.serialize import SerializedTRTEngine
 
-DEFAULT_MAX_SEQ_LEN = 968
-
-
-def extract_edge_tokenizer(pre_processor):
-    """Pull the PaliGemma tokenizer out of the PI0.5 preprocessor pipeline.
-
-    The pipeline's TokenizerProcessorStep already loaded
-    ``google/paligemma-3b-pt-224``; reuse it so §3 writes the language sidecars
-    itself (no copy from a prior export, no second gated download).
-    """
-    for step in getattr(pre_processor, "steps", []):
-        tok = getattr(step, "input_tokenizer", None)
-        if tok is not None:
-            return tok
-    raise RuntimeError(
-        "Could not find a tokenizer in the preprocessor pipeline "
-        "(expected a TokenizerProcessorStep with .input_tokenizer)"
-    )
-
-
-# Per-stage Torch-TRT compile kwargs. Language/action use Alpamayo-style strong
-# typing + fp32 matmul acc (real PI05 weights overflow fp16 layernorm Reduce/Pow
-# under weak typing). Vision stays on the older fp16 precision set.
-VISION_TRT_SETTINGS = {
-    "disable_tf32": False,
-    "use_fp32_acc": False,
-    "use_explicit_typing": False,
+TRT_SETTINGS = {
+    "disable_tf32": True,
+    "use_explicit_typing": True,
+    "use_fp32_acc": True,
     "truncate_double": True,
     "immutable_weights": True,
     "decompose_attention": True,
     "require_full_compilation": True,
-    "enabled_precisions": {torch.float16},
 }
 
 LANGUAGE_TRT_SETTINGS = {
-    "disable_tf32": True,
-    "use_fp32_acc": True,
-    "use_explicit_typing": True,
-    "truncate_double": True,
-    "immutable_weights": True,
-    "decompose_attention": True,
-    "require_full_compilation": True,
-    "assume_dynamic_shape_support": True,
+    **TRT_SETTINGS,
     # Thor: offload_module_to_cpu balloons host RSS during TRT build (~38GB OOM kill).
     "offload_module_to_cpu": False,
+    "use_explicit_typing": False,
 }
 
 ACTION_TRT_SETTINGS = {
-    "disable_tf32": True,
-    "use_fp32_acc": True,
-    "use_explicit_typing": True,
-    "truncate_double": True,
-    "immutable_weights": True,
-    "decompose_attention": True,
-    "require_full_compilation": True,
+    **TRT_SETTINGS,
+}
+
+VISION_TRT_SETTINGS = {
+    **TRT_SETTINGS,
 }
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Run PI0.5 eager/TensorRT parity and export the visual, dual-profile "
-            "language, and action engines used by vla_inference."
+def _cuda_sync(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+
+
+def compile_one_shot(
+    module: torch.nn.Module,
+    args: tuple,
+    settings: dict,
+    *,
+    label: str,
+) -> tuple[torch.nn.Module, dict[str, float], dict[str, float]]:
+    """One-shot export+decomp, then compile with ``skip_decompositions=True``."""
+    from torch_tensorrt.dynamo import export_for_tensorrt
+
+    module = module.eval()
+    input_specs = make_input_spec(args)
+    decomp_keys = (
+        "enable_experimental_decompositions",
+        "decompose_attention",
+        "use_distributed_mode_trace",
+        "use_fp32_acc",
+    )
+    export_decomp_kwargs = {k: settings[k] for k in decomp_keys if k in settings}
+
+    _cuda_sync(next(module.parameters()).device)
+    with stage_timing() as timer:
+        t0 = time.perf_counter()
+        exported = export_for_tensorrt(
+            module,
+            args=args,
+            strict=False,
+            prefer_deferred_runtime_asserts_over_guards=True,
+            **export_decomp_kwargs,
         )
+        export_s = time.perf_counter() - t0
+
+        t1 = time.perf_counter()
+        engine = torch_tensorrt.dynamo.compile(
+            exported,
+            inputs=input_specs,
+            skip_decompositions=True,
+            **settings,
+        )
+        compile_s = time.perf_counter() - t1
+    total_s = export_s + compile_s
+
+    stage_buckets = print_stage_breakdown(
+        f"{label} one-shot",
+        export_seconds=export_s,
+        compile_seconds=compile_s,
+        snapshot=timer.snapshot(),
     )
-    parser.add_argument(
-        "--max-seq-len",
-        type=int,
-        default=int(os.environ.get("PI05_MAX_SEQ_LEN", DEFAULT_MAX_SEQ_LEN)),
-        help="Minimum language prefill/KV-cache capacity before generation reserve",
+    timings = {
+        "export_seconds": export_s,
+        "compile_seconds": compile_s,
+        "export_plus_compile_seconds": total_s,
+    }
+    print(
+        f"[{label} one-shot] export={export_s:.3f}s  "
+        f"compile(skip_decomp)={compile_s:.3f}s  "
+        f"export+compile={total_s:.3f}s"
     )
-    parser.add_argument(
-        "--generation-reserve",
-        type=int,
-        default=int(os.environ.get("PI05_GENERATION_RESERVE", "5")),
-        help="KV-cache positions reserved after the parity prompt for generated tokens (default: 5)",
-    )
-    return parser.parse_args()
+    return engine, timings, stage_buckets
 
 
 def build_pi05_prefix_embs(
@@ -246,51 +245,43 @@ def make_pi05_suffix_position_and_mask(core, prefix_pad_masks, x_t, device):
 
 
 def load_config(device):
-    # Load real Libero PI0.5 weights. Keep on CPU first — Thor carveout
-    # cannot hold ~fp32 PI05; main() still does .to(device, dtype=fp16).
-    policy = PI05Policy.from_pretrained(
-        "lerobot/pi05_libero_base",
-    ).eval()
-    config = policy.config
-    config.device = "cpu"
-    # Keep these aligned with vla_inference / smoke JSON if the checkpoint
-    # defaults differ (docs note libero_base often stores n_action_steps=10).
-    config.chunk_size = 50
-    config.n_action_steps = 50
-    config.max_state_dim = 32
-    config.max_action_dim = 32
-    # Ensure 4 camera slots so visual.engine stays [4,224,224,3].
-    config.input_features = {
-        f"{OBS_IMAGES}.image": PolicyFeature(
-            type=FeatureType.VISUAL, shape=(3, 224, 224)
-        ),
-        f"{OBS_IMAGES}.image2": PolicyFeature(
-            type=FeatureType.VISUAL, shape=(3, 224, 224)
-        ),
-        f"{OBS_IMAGES}.image3": PolicyFeature(
-            type=FeatureType.VISUAL, shape=(3, 224, 224)
-        ),
-        f"{OBS_IMAGES}.image4": PolicyFeature(
-            type=FeatureType.VISUAL, shape=(3, 224, 224)
-        ),
-        OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(32,)),
-    }
-    config.output_features = {
-        ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(32,)),
-    }
-    config.empty_cameras = 0
+    # PI05Policy.__init__ moves the model to config.device in fp32. On Thor the
+    # default 6–12 GB GPU carveout cannot hold ~16 GB fp32 weights; init on CPU
+    # and let main() cast to fp16 before the first GPU transfer.
+    config = PI05Config(
+        device="cpu",
+        chunk_size=50,
+        n_action_steps=50,
+        max_state_dim=32,  # PI05 default is 32, not 64
+        max_action_dim=32,
+        image_resolution=(224, 224),
+        input_features={
+            f"{OBS_IMAGES}.image": PolicyFeature(
+                type=FeatureType.VISUAL, shape=(3, 224, 224)
+            ),
+            f"{OBS_IMAGES}.image2": PolicyFeature(
+                type=FeatureType.VISUAL, shape=(3, 224, 224)
+            ),
+            OBS_STATE: PolicyFeature(
+                type=FeatureType.STATE, shape=(32,)  # padded to max_state_dim
+            ),
+        },
+        output_features={
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(32,)),
+        },
+    )
     config.validate_features()
+    policy = PI05Policy(config).eval()
     return config, policy
 
 
 def main():
-    args = parse_args()
-    engine_base_dir = Path(os.environ.get("ENGINE_DIR", "/tmp/pi05_edge_llm"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     load_plugins_for_trt()
 
     dtype = torch.float16
+    compile_timings: dict[str, dict[str, float]] = {}
 
     # step 1 - load policy, retrieve vision, lm diffusion,
     # create processors, data sample and replace attention
@@ -308,9 +299,6 @@ def main():
         None,
         preprocessor_overrides={"device_processor": {"device": str(device)}},
     )
-    # Capture the PaliGemma tokenizer now; pre_processor is freed before the
-    # language engine is written, and §3 uses it to emit the language sidecars.
-    edge_tokenizer = extract_edge_tokenizer(pre_processor)
 
     data = load_test_data(
         "lerobot/libero",
@@ -338,13 +326,13 @@ def main():
 
     # step 2: vision
     visual = GridVisionExportModule(
-        vision_model=vision,                 # paligemma.vision_tower
-        projector=projector,                 # paligemma.multi_modal_projector
+        vision_model=vision,  # paligemma.vision_tower
+        projector=projector,  # paligemma.multi_modal_projector
         sample_pixel_values=pixel_values.float(),
-        select_layer=-1,                     # PI05 has no eagle.select_layer
+        select_layer=-1,  # PI05 has no eagle.select_layer
         pixel_shuffle=False,
         downsample_ratio=0.5,
-        force_float32_input=True,            # PI05 vision tower runs fp32 internally
+        force_float32_input=True,  # PI05 vision tower runs fp32 internally
         vision_kwargs={},
     ).eval().to(device=device)
 
@@ -379,14 +367,15 @@ def main():
         with torch.no_grad():
             embs_eager_plugin = visual(pixel_values)
 
-        # --- Rung C: TRT compiled from patched module ---
-        exported = torch.export.export(visual, args=(pixel_values,), strict=False)
-        input_specs = make_input_spec((pixel_values,))
-        trt_engine = torch_tensorrt.dynamo.compile(
-            exported,
-            inputs=input_specs,
-            **VISION_TRT_SETTINGS,
+        # --- Rung C: TRT compiled from patched module (one-shot) ---
+        print("Compiling vision (one-shot export_for_tensorrt)")
+        trt_engine, vision_compile_timings, vision_stage_buckets = compile_one_shot(
+            visual,
+            (pixel_values,),
+            VISION_TRT_SETTINGS,
+            label="vision",
         )
+        compile_timings["vision"] = vision_compile_timings
         with torch.no_grad():
             embs_trt = trt_engine(pixel_values)
 
@@ -403,44 +392,13 @@ def main():
         torch.cuda.synchronize()
         vision_trt_elapsed_ms = start.elapsed_time(end) / 100
 
-        # Serialize the runtime visual engine while plugin attention is still
-        # patched. VitRunner feeds HWC [B, 224, 224, 3], so trace with nchw_to_hwc.
-        visual_engine_dir = engine_base_dir / "visual"
-        print(f"Exporting visual engine to {visual_engine_dir}")
-        save_trt_engine_module(
-            visual,
-            (nchw_to_hwc(pixel_values),),
-            visual_engine_dir,
-            engine_file="visual.engine",
-            model_type="vit",
-            component="vision",
-            input_names=["pixel_values"],
-            output_names=["visual_embeds"],
-            extra_config={
-                "vocab_size": int(language.config.vocab_size),
-                "image_token_id": int(
-                    getattr(paligemma.config, "image_token_index", 257152)
-                ),
-                "builder_config": {"seq_len": int(seq_len)},
-            },
-            trt_settings=VISION_TRT_SETTINGS,
-        )
-
-        # Parity on the SAVED engine at its real (HWC) contract — the parity
-        # engine above used NCHW, so this is what vla_inference actually loads.
-        saved_visual = SerializedPositionalEngine(SerializedTRTEngine(visual_engine_dir))
-        with torch.no_grad():
-            saved_visual_embs = saved_visual.forward_one(nchw_to_hwc(pixel_values))
-        parity("PI05 vision SAVED engine vs eager", embs_eager, saved_visual_embs)
-        free_cuda_memory(saved_visual, saved_visual_embs)
-
     finally:
         restore_attention(patched)
 
     parity("PI05 vision A vs C", embs_eager, embs_trt)
 
     # step 3 language
-    print("Compiling language")
+    print("Compiling language (stock save_trt_engine_module; not one-shot yet)")
     lm_head = model.paligemma_with_expert.paligemma.lm_head
     decoder = getattr(language, "model", language)
 
@@ -457,18 +415,6 @@ def main():
     )
 
     bsz, seq_len, hidden = inputs_embeds.shape
-    requested_max_seq_len = int(args.max_seq_len)
-    if requested_max_seq_len < seq_len:
-        raise ValueError(
-            f"--max-seq-len ({requested_max_seq_len}) must be at least the "
-            f"current parity sample length ({seq_len})"
-        )
-    if args.generation_reserve < 0:
-        raise ValueError("--generation-reserve must be non-negative")
-    engine_max_seq_len = max(
-        requested_max_seq_len,
-        seq_len + int(args.generation_reserve),
-    )
     inputs_embeds = inputs_embeds.to(device=device, dtype=dtype).contiguous()
     lm_dtype = next(language.parameters()).dtype
 
@@ -476,7 +422,6 @@ def main():
     # TensorRT has enough contiguous GPU memory for its builder allocation.
     free_cuda_memory(
         trt_engine,
-        exported,
         visual,
         embs_trt,
         embs_eager,
@@ -534,37 +479,29 @@ def main():
         select_layer=-1,
     ).eval().to(device=device)
 
-    # The RoPE cache is a capacity-sized static engine input, so it must span
-    # engine_max_seq_len rather than the sample. Positions are left as the
-    # default arange; the compacted PI05 prefix is contiguous from 0, so the
-    # leading seq_len entries match prefix_position_ids exactly.
     rope_rotary_cos_sin = make_rope_rotary_cos_sin(
         cfg,
-        engine_max_seq_len,
+        seq_len,
         device,
         language_model=language,
+        position_ids=prefix_position_ids,
     )
-    # Dual-profile export traces below the prefill profile max so inputs_embeds
-    # keeps a dynamic seq_len; execution and parity still use the full prefix.
-    trace_tensors, _trace_seq_len = make_language_edge_flat_tensors(
-        inputs_embeds,
-        batch_size=bsz,
-        max_seq_len=engine_max_seq_len,
-        num_layers=num_layers,
-        num_key_value_heads=num_key_value_heads,
-        head_dim=head_dim,
-        device=device,
-        dtype=dtype,
-        rope_rotary_cos_sin=rope_rotary_cos_sin,
-        static_prefill_seq_len=False,
-    )
-    kv_caches = list(trace_tensors[len(VLA_LANGUAGE_INPUT_NAMES):])
     ctx_len = torch.full((bsz,), seq_len, device=device, dtype=torch.int32)
     last_token_ids = torch.full((bsz, 1), seq_len - 1, device=device, dtype=torch.int64)
+    kv_caches = [
+        torch.zeros(
+            bsz,
+            2,
+            num_key_value_heads,
+            seq_len,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        for _ in range(num_layers)
+    ]
     kvcache_start_index = torch.empty(0, dtype=torch.int32, device=device)
-    # PI05 has no deepstack (num_ds=0). TRT freezes unused ``ds_stack`` at the
-    # dual-profile trace seq, so reuse the trace dummy instead of the sample seq.
-    ds_stack = trace_tensors[VLA_LANGUAGE_INPUT_NAMES.index("ds_stack")]
+    ds_stack = torch.zeros(0, bsz, seq_len, hidden_size, device=device, dtype=dtype)
     flat_tensors = (
         inputs_embeds,
         rope_rotary_cos_sin,
@@ -573,30 +510,6 @@ def main():
         last_token_ids,
         ds_stack,
         *kv_caches,
-    )
-
-    # save_trt_engine_module executes these once to record full-capacity config
-    # metadata. The TensorRT graph itself is traced with trace_tensors, while
-    # parity below executes the real seq_len sample through flat_tensors.
-    config_inputs_embeds = torch.zeros(
-        bsz,
-        engine_max_seq_len,
-        hidden,
-        device=device,
-        dtype=dtype,
-    )
-    config_inputs_embeds[:, :seq_len].copy_(inputs_embeds)
-    config_tensors, _ = make_language_edge_flat_tensors(
-        config_inputs_embeds,
-        batch_size=bsz,
-        max_seq_len=engine_max_seq_len,
-        num_layers=num_layers,
-        num_key_value_heads=num_key_value_heads,
-        head_dim=head_dim,
-        device=device,
-        dtype=dtype,
-        rope_rotary_cos_sin=rope_rotary_cos_sin,
-        static_prefill_seq_len=True,
     )
 
     # PI05 prefix attends bidirectionally; patch_language_attention wires the
@@ -619,23 +532,20 @@ def main():
         ]
         lm_input_specs = make_language_edge_input_specs(
             input_names,
-            trace_tensors,
+            flat_tensors,
             batch_size=bsz,
-            max_seq_len=engine_max_seq_len,
-            static_prefill_seq_len=False,
+            max_seq_len=seq_len,
+            static_prefill_seq_len=True,
         )
         free_cuda_memory(policy, pre_processor, post_processor, model_inputs, frame, data)
         del policy, pre_processor, post_processor
         free_cuda_memory()
 
-        lang_engine_dir = engine_base_dir / "language"
-        print(
-            f"Exporting dual-profile language engine to {lang_engine_dir} "
-            f"(sample_seq_len={seq_len}, max_seq_len={engine_max_seq_len})"
-        )
+        lang_engine_dir = Path(os.environ.get("ENGINE_DIR", "/tmp/pi05_edge_llm")) / "language_e2e_one_shot"
+        t_lang0 = time.perf_counter()
         save_trt_engine_module(
             lm,
-            config_tensors,
+            flat_tensors,
             lang_engine_dir,
             engine_file="language.engine",
             model_type="language",
@@ -645,29 +555,24 @@ def main():
             extra_config={
                 **language_edge_llm_config(
                     cfg,
-                    max_seq_len=engine_max_seq_len,
+                    max_seq_len=seq_len,
                     batch_size=bsz,
                     num_layers=num_layers,
                 ),
                 "context_attention_mask_type": int(ContextAttentionMaskType.PADDING),
             },
             input_specs=lm_input_specs,
-            flat_tensors=config_tensors,
-            trace_tensors=trace_tensors,
-            trt_settings=LANGUAGE_TRT_SETTINGS,
+            flat_tensors=flat_tensors,
+            trt_settings=language_edge_trt_settings(offload_module_to_cpu=False),
         )
-        # Language sidecars for vla_inference (§4), written into the same
-        # language/ dir. tokenizer + chat template are weight-independent; the
-        # embedding table comes from this run's language model so it stays
-        # self-consistent with language.engine (no copy from a prior export).
-        print(f"Writing language sidecars to {lang_engine_dir}")
-        save_embedding_table(language, lang_engine_dir)
-        save_tokenizer_for_edge_llm(
-            lang_engine_dir,
-            tokenizer=edge_tokenizer,
-            chat_template=pi05_edge_chat_template(max_seq_len=engine_max_seq_len),
+        language_compile_s = time.perf_counter() - t_lang0
+        compile_timings["language_stock_save"] = {
+            "export_plus_compile_seconds": language_compile_s,
+        }
+        print(
+            f"[language stock] save_trt_engine_module={language_compile_s:.3f}s "
+            f"(not one-shot; dynamic-shape Edge export)"
         )
-
         free_cuda_memory(lm)
         lm_trt_engine = SerializedPi05Language(SerializedTRTEngine(lang_engine_dir))
 
@@ -701,9 +606,6 @@ def main():
         lm,
         trt_out,
         flat_tensors,
-        config_tensors,
-        config_inputs_embeds,
-        trace_tensors,
         kv_caches,
         inputs_embeds,
         lm_hidden_eager,
@@ -715,7 +617,7 @@ def main():
     move_pi05_diffusion_modules_to_device(model, device, dtype)
     force_hf_attention(model.paligemma_with_expert.gemma_expert.model, "eager")
 
-    print("Compiling diffusion")
+    print("Compiling diffusion (one-shot export_for_tensorrt)")
     diffusion_model = StaticActionVelocityStepExportModule(
         step_encoder=PI05PrefixKVStepEncoderExportModule(model),
         action_expert=model.paligemma_with_expert.gemma_expert.model,
@@ -768,13 +670,13 @@ def main():
     torch.cuda.synchronize()
     diffusion_eager_elapsed_ms = start.elapsed_time(end) / 100
 
-    diffusion_exported = torch.export.export(diffusion_model, args=diffusion_input, strict=False)
-    diffusion_input_specs = make_input_spec(diffusion_input)
-    diffusion_trt_engine = torch_tensorrt.dynamo.compile(
-        diffusion_exported,
-        inputs=diffusion_input_specs,
-        **ACTION_TRT_SETTINGS,
+    diffusion_trt_engine, diffusion_compile_timings, diffusion_stage_buckets = compile_one_shot(
+        diffusion_model,
+        diffusion_input,
+        ACTION_TRT_SETTINGS,
+        label="diffusion",
     )
+    compile_timings["diffusion"] = diffusion_compile_timings
     with torch.no_grad():
         trt_velocity = diffusion_trt_engine(*diffusion_input)
 
@@ -801,6 +703,40 @@ def main():
             return "n/a (benchmark skipped)"
         return f"{eager_ms / trt_ms:.3f}x"
 
+    print()
+    print("=== one-shot compile timings (compare to stock script wall times) ===")
+    for name, t in compile_timings.items():
+        export_s = t.get("export_seconds")
+        compile_s = t.get("compile_seconds")
+        total_s = t["export_plus_compile_seconds"]
+        if export_s is not None and compile_s is not None:
+            print(
+                f"  {name:24s}  export={export_s:7.3f}s  "
+                f"compile={compile_s:7.3f}s  total={total_s:7.3f}s"
+            )
+        else:
+            print(f"  {name:24s}  total={total_s:7.3f}s")
+    one_shot_export_compile = sum(
+        t["export_plus_compile_seconds"]
+        for k, t in compile_timings.items()
+        if k in ("vision", "diffusion")
+    )
+    print(f"  {'vision+diffusion one-shot':24s}  total={one_shot_export_compile:7.3f}s")
+    print()
+    print("=== one-shot stage focus (vision + diffusion) ===")
+    for name, buckets in (
+        ("vision", vision_stage_buckets),
+        ("diffusion", diffusion_stage_buckets),
+    ):
+        print(
+            f"  {name:10s}  "
+            f"export={buckets['export_aot']:6.3f}s  "
+            f"decomp={buckets['run_decompositions']:6.3f}s  "
+            f"lower+part={buckets['post_lowering_partition']:6.3f}s  "
+            f"engine={buckets['engine_build']:6.3f}s"
+        )
+
+    print()
     print(f"vision eager execute: {vision_eager_elapsed_ms:.3f} ms")
     print(f"vision trt execute: {vision_trt_elapsed_ms:.3f} ms")
     print(f"vision speedup: {_speedup(vision_eager_elapsed_ms, vision_trt_elapsed_ms)}")
@@ -814,86 +750,9 @@ def main():
     print(f"total trt execute: {trt_total_ms:.3f} ms")
     print(f"total speedup: {_speedup(eager_total_ms, trt_total_ms)}")
 
-    # Free the parity engine before building the serialized action engine so the
-    # TRT builder has contiguous GPU memory on Thor.
-    free_cuda_memory(diffusion_trt_engine, diffusion_exported)
-
-    # The runtime language prefill pads its KV to engine capacity, so serialize the
-    # action engine with a capacity-length prefix (engine_max_seq_len) rather than
-    # the compact parity prefix. Positions/mask are rebuilt from the padded mask.
-    prefix_len = int(prefix_pad_mask.shape[1])
-    prefix_pad = engine_max_seq_len - prefix_len
-    prefix_k_cap = torch.nn.functional.pad(prefix_k, (0, 0, 0, prefix_pad)).contiguous()
-    prefix_v_cap = torch.nn.functional.pad(prefix_v, (0, 0, 0, prefix_pad)).contiguous()
-    prefix_pad_mask_cap = torch.cat(
-        [
-            prefix_pad_mask.to(device=device),
-            torch.zeros(
-                prefix_pad_mask.shape[0],
-                prefix_pad,
-                dtype=prefix_pad_mask.dtype,
-                device=device,
-            ),
-        ],
-        dim=1,
-    )
-    save_position_ids, save_attention_mask = make_pi05_suffix_position_and_mask(
-        model,
-        prefix_pad_mask_cap,
-        step_actions,
-        device,
-    )
-    save_diffusion_input = (
-        step_actions,
-        step_timestep,
-        prefix_k_cap,
-        prefix_v_cap,
-        save_position_ids,
-        save_attention_mask,
-    )
-
-    action_engine_dir = engine_base_dir / "action"
-    print(f"Exporting action engine to {action_engine_dir}")
-    save_trt_engine_module(
-        diffusion_model,
-        save_diffusion_input,
-        action_engine_dir,
-        engine_file="action.engine",
-        model_type="action",
-        component="diffusion",
-        input_names=list(PI05_EDGE_IO.action.input_names),
-        output_names=list(PI05_EDGE_IO.action.output_names),
-        extra_config=action_rollout_extra_config(
-            PI05_EDGE_IO,
-            PI05_ACTION_ROLLOUT,
-            num_steps=int(model.config.num_inference_steps),
-            action_horizon=int(model.config.chunk_size),
-            action_dim=int(model.config.max_action_dim),
-            prefix_seq_len=int(engine_max_seq_len),
-        ),
-        trt_settings=ACTION_TRT_SETTINGS,
-    )
-
-    # Parity on the SAVED engine at its real (capacity-length prefix) contract.
-    # The parity engine above used the compact prefix, so this validates both the
-    # capacity padding and the serialized engine vla_inference actually loads.
-    with torch.no_grad():
-        eager_velocity_cap = diffusion_model(*save_diffusion_input)
-    parity("PI05 diffusion capacity eager vs compact eager", eager_velocity, eager_velocity_cap)
-    saved_action = SerializedPositionalEngine(SerializedTRTEngine(action_engine_dir))
-    with torch.no_grad():
-        saved_action_vel = saved_action.forward_one(*save_diffusion_input)
-    parity("PI05 diffusion SAVED engine vs eager (capacity)", eager_velocity_cap, saved_action_vel)
-
     free_cuda_memory(
-        saved_action,
-        saved_action_vel,
-        eager_velocity_cap,
+        diffusion_trt_engine,
         diffusion_model,
-        prefix_k,
-        prefix_v,
-        prefix_k_cap,
-        prefix_v_cap,
     )
 
     return 0

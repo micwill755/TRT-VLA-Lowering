@@ -212,32 +212,6 @@ def _stage_transformer_only_on_gpu(transformer, vae, device: torch.device) -> No
     _sync_gpu()
 
 
-def _export_component(
-    module: torch.nn.Module,
-    sample_inputs: tuple,
-    engine_dir: Path,
-    *,
-    engine_file: str,
-    model_type: str,
-    component: str,
-    input_names: list[str],
-    output_names: list[str],
-) -> Path:
-    engine_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  compiling {component} -> {engine_dir / engine_file}")
-    return save_trt_engine_module(
-        module,
-        sample_inputs,
-        engine_dir,
-        engine_file=engine_file,
-        model_type=model_type,
-        component=component,
-        input_names=input_names,
-        output_names=output_names,
-        trt_settings=TRT_SETTINGS_EXPORT,
-    )
-
-
 def export_engines(args: argparse.Namespace) -> Path:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
@@ -308,7 +282,8 @@ def export_engines(args: argparse.Namespace) -> Path:
     print("[4] Export visual_encode")
     _stage_vae_only_on_gpu(transformer, vae, device)
     visual_encode = CosmosVaeEncodeExportModule(vae, pixels).eval().to(device=device, dtype=dtype)
-    _export_component(
+    print(f"  compiling visual_encode -> {engine_root / 'visual_encode' / 'visual_encode.engine'}")
+    save_trt_engine_module(
         visual_encode,
         (pixels,),
         engine_root / "visual_encode",
@@ -317,6 +292,7 @@ def export_engines(args: argparse.Namespace) -> Path:
         component="visual_encode",
         input_names=["pixels"],
         output_names=["latents"],
+        trt_settings=TRT_SETTINGS_EXPORT,
     )
     del visual_encode
     _sync_gpu()
@@ -329,7 +305,8 @@ def export_engines(args: argparse.Namespace) -> Path:
         sample_latents=clean_latents,
         sample_timestep=args.timestep,
     ).eval().to(device=device, dtype=dtype)
-    _export_component(
+    print(f"  compiling embed -> {engine_root / 'embed' / 'embed.engine'}")
+    save_trt_engine_module(
         embed_module,
         (clean_latents, timestep_t),
         engine_root / "embed",
@@ -338,6 +315,7 @@ def export_engines(args: argparse.Namespace) -> Path:
         component="embed",
         input_names=["vision_latents", "timestep"],
         output_names=["gen_seq"],
+        trt_settings=TRT_SETTINGS_EXPORT,
     )
     del embed_module
     _sync_gpu()
@@ -353,7 +331,8 @@ def export_engines(args: argparse.Namespace) -> Path:
             sample_gen_seq=gen_seq,
             sample_rotary_emb=rotary_emb,
         ).eval().to(device=device, dtype=dtype)
-        _export_component(
+        print(f"  compiling mot_backbone -> {engine_root / 'mot_backbone' / 'mot_backbone.engine'}")
+        save_trt_engine_module(
             backbone_module,
             (und_seq, gen_seq, *rotary_emb),
             engine_root / "mot_backbone",
@@ -362,6 +341,7 @@ def export_engines(args: argparse.Namespace) -> Path:
             component="mot_backbone",
             input_names=["und_seq", "gen_seq", "cos_und", "sin_und", "cos_gen", "sin_gen"],
             output_names=["last_hidden_state"],
+            trt_settings=TRT_SETTINGS_EXPORT,
         )
         del backbone_module
         _sync_gpu()
@@ -374,7 +354,8 @@ def export_engines(args: argparse.Namespace) -> Path:
         sample_latents=clean_latents,
         sample_last_hidden=last_hidden,
     ).eval().to(device=device, dtype=dtype)
-    _export_component(
+    print(f"  compiling denoise_head -> {engine_root / 'denoise_head' / 'denoise_head.engine'}")
+    save_trt_engine_module(
         vision_head,
         (last_hidden,),
         engine_root / "denoise_head",
@@ -383,6 +364,7 @@ def export_engines(args: argparse.Namespace) -> Path:
         component="denoise_head",
         input_names=["last_hidden_state"],
         output_names=["pred_vision_latents"],
+        trt_settings=TRT_SETTINGS_EXPORT,
     )
     del vision_head, last_hidden, und_seq, gen_seq
     _sync_gpu()
@@ -390,7 +372,8 @@ def export_engines(args: argparse.Namespace) -> Path:
     print("[8] Export visual_decode")
     _stage_vae_only_on_gpu(transformer, vae, device)
     visual_decode = CosmosVaeDecodeExportModule(vae, clean_latents).eval().to(device=device, dtype=dtype)
-    _export_component(
+    print(f"  compiling visual_decode -> {engine_root / 'visual_decode' / 'visual_decode.engine'}")
+    save_trt_engine_module(
         visual_decode,
         (clean_latents,),
         engine_root / "visual_decode",
@@ -399,6 +382,7 @@ def export_engines(args: argparse.Namespace) -> Path:
         component="visual_decode",
         input_names=["latents"],
         output_names=["pixels"],
+        trt_settings=TRT_SETTINGS_EXPORT,
     )
     del visual_decode
     _sync_gpu()

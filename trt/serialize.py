@@ -78,10 +78,20 @@ class SerializedTRTEngine:
                 raise KeyError(f"Missing TensorRT input {config_name!r} for {self.engine_path}")
             actual_name = self.input_name_map[config_name]
             tensor = inputs[config_name].to(device=device).contiguous()
-            ok = self.context.set_input_shape(actual_name, tuple(tensor.shape))
+            requested = tuple(int(d) for d in tensor.shape)
+            ok = self.context.set_input_shape(actual_name, requested)
+            if ok is False and tensor.numel() == 0:
+                # Unused dummy inputs (PI05 ``ds_stack`` with num_ds=0) are
+                # frozen at the TRT trace shape. Rebind to the engine dims.
+                engine_dims = tuple(
+                    int(d) for d in self.engine.get_tensor_shape(actual_name)
+                )
+                if all(d >= 0 for d in engine_dims) and engine_dims != requested:
+                    tensor = tensor.new_zeros(engine_dims)
+                    ok = self.context.set_input_shape(actual_name, engine_dims)
             if ok is False:
                 raise RuntimeError(
-                    f"Failed to set input shape for {actual_name}: {tuple(tensor.shape)}"
+                    f"Failed to set input shape for {actual_name}: {requested}"
                 )
             if tensor.numel() == 0:
                 bound_inputs[actual_name] = self._zero_size_input_binding(

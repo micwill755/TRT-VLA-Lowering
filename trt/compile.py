@@ -328,10 +328,14 @@ def save_trt_engine_module(
     trt_settings=None,
     input_specs=None,
     flat_tensors=None,
+    trace_tensors=None,
 ):
     module = module.eval()
     sample_inputs = tuple(sample_inputs)
     flat_tensors = tuple(flat_tensors if flat_tensors is not None else sample_inputs)
+    # Dual-profile language traces below capacity so ``inputs_embeds`` stays
+    # dynamic; ``flat_tensors`` still records full-capacity config metadata.
+    trace_for_export = tuple(trace_tensors) if trace_tensors is not None else flat_tensors
 
     engine_dir = pathlib.Path(engine_dir)
     engine_dir.mkdir(parents=True, exist_ok=True)
@@ -345,7 +349,7 @@ def save_trt_engine_module(
     if input_specs is not None:
         exported = trace_language_for_edge_llm(
             module,
-            flat_tensors,
+            trace_for_export,
             input_specs,
             device=_infer_module_device(module),
             leading_input_count=count_leading_language_inputs(input_names),

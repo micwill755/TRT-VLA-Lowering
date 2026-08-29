@@ -231,9 +231,15 @@ def get_trt_plugin_creator(
 
 
 def load_plugin():
-    plugin_so = os.environ.get("EDGE_LLM_PLUGIN_SO") or os.environ.get("EDGELLM_TRT_PLUGIN_SO")
+    plugin_so = (
+        os.environ.get("EDGE_LLM_PLUGIN_SO")
+        or os.environ.get("EDGELLM_TRT_PLUGIN_SO")
+        or os.environ.get("EDGELLM_PLUGIN_PATH")
+    )
     if not plugin_so:
-        raise RuntimeError("Set EDGE_LLM_PLUGIN_SO to libNvInfer_edgellm_plugin.so before running this script")
+        raise RuntimeError(
+            "Set EDGE_LLM_PLUGIN_SO (or EDGELLM_PLUGIN_PATH) to libNvInfer_edgellm_plugin.so"
+        )
 
     ctypes.CDLL(plugin_so)
     trt.init_libnvinfer_plugins(None, "")

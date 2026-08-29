@@ -163,6 +163,25 @@ def groot_edge_chat_template(
     }
 
 
+def pi05_edge_chat_template(*, max_seq_len: int) -> dict[str, Any]:
+    """Sidecar template for PI0.5 compact-prefix language engines."""
+    return {
+        "model_path": "pi05",
+        "roles": {
+            "system": {"prefix": "", "suffix": ""},
+            "user": {"prefix": "", "suffix": "\n"},
+            "assistant": {"prefix": "", "suffix": ""},
+        },
+        "content_types": {
+            "image": {"format": "<image>"},
+        },
+        "generation_prompt": "",
+        "default_system_prompt": "",
+        "prefix_strategy": "pi05_compact_prefix",
+        "max_seq_len": int(max_seq_len),
+    }
+
+
 def save_tokenizer_for_edge_llm(
     language_engine_dir: str | pathlib.Path,
     *,

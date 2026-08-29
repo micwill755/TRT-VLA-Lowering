@@ -425,35 +425,6 @@ def _stage_tokenizer_and_embed(checkpoint: Path, engine_root: Path, transformer,
     save_file({"embed_tokens.weight": weight}, engine_root / "embed_tokens.safetensors")
 
 
-def _export_component(
-    module: torch.nn.Module,
-    sample_inputs: tuple,
-    engine_dir: Path,
-    *,
-    engine_file: str,
-    model_type: str,
-    component: str,
-    input_names: list[str],
-    output_names: list[str],
-    extra_config: dict | None = None,
-    trt_settings: dict[str, Any] | None = None,
-) -> Path:
-    engine_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  compiling {component} -> {engine_dir / engine_file}")
-    return save_trt_engine_module(
-        module,
-        sample_inputs,
-        engine_dir,
-        engine_file=engine_file,
-        model_type=model_type,
-        component=component,
-        input_names=input_names,
-        output_names=output_names,
-        extra_config=extra_config,
-        trt_settings=trt_settings or TRT_SETTINGS_EXPORT,
-    )
-
-
 def _compile_parity(
     module: torch.nn.Module,
     sample_inputs: tuple,
@@ -508,7 +479,8 @@ def export_engines(args: argparse.Namespace) -> Path:
     parity("live-MoT VAE A vs C", cond_eager, cond_trt)
 
     if not args.skip_save:
-        _export_component(
+        print(f"  compiling vae_encoder -> {engine_root / 'vae_encoder' / 'vae_encoder.engine'}")
+        save_trt_engine_module(
             vae_module,
             (pixels,),
             engine_root / "vae_encoder",
@@ -518,6 +490,7 @@ def export_engines(args: argparse.Namespace) -> Path:
             input_names=["pixel_values"],
             output_names=["cond_latent"],
             extra_config=make_vae_encoder_config(args.height, args.width, args.num_frames),
+            trt_settings=TRT_SETTINGS_EXPORT,
         )
 
     cond_latent = cond_eager.detach().clone()
@@ -557,7 +530,8 @@ def export_engines(args: argparse.Namespace) -> Path:
 
     und_in_names, und_out_names = und_prefill_io_names(n_layers)
     if not args.skip_save:
-        _export_component(
+        print(f"  compiling und_prefill -> {engine_root / 'und_prefill' / 'und_prefill.engine'}")
+        save_trt_engine_module(
             und,
             und_inputs,
             engine_root / "und_prefill",
@@ -642,7 +616,8 @@ def export_engines(args: argparse.Namespace) -> Path:
 
     gen_in_names, gen_out_names = gen_io_names(n_layers)
     if not args.skip_save:
-        _export_component(
+        print(f"  compiling gen -> {engine_root / 'gen' / 'gen.engine'}")
+        save_trt_engine_module(
             gen,
             gen_inputs,
             engine_root / "gen",
