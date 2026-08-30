@@ -11,8 +11,9 @@ import torch.nn as nn
 
 from trt.plugin.attention import (
     ContextAttentionMaskType,
-    PluginAttention, 
-    ViTPluginAttention, 
+    PluginAttention,
+    PluginNemotronAttention,
+    ViTPluginAttention,
     SiglipReferenceAttention,
     MolmoPluginAttention,
     MolmoViTPluginAttention,
@@ -247,8 +248,13 @@ def load_plugin():
 
 
 def load_plugins_for_trt():
+    from trt.plugin.mamba import register_mamba_plugin_ops
+    from trt.plugin.moe import register_moe_plugin_ops
+
     _register_attention_plugin_op()
     _register_vit_attention_plugin_op()
+    register_mamba_plugin_ops()
+    register_moe_plugin_ops()
     load_plugin()
     from trt.plugin import plugin_converter as _plugin_converter  # noqa: F401,E402
 
@@ -373,6 +379,30 @@ def patch_language_attention(
 
     print(f"patched {name} attention modules: {len(patched)}")
     return patched
+
+
+def patch_nemotron_mixers(model, config):
+    """Replace Nemotron hybrid mixers with plugin wrappers. MLP stays native."""
+    from trt.plugin.mamba import PluginNemotronMamba
+    from trt.plugin.moe import PluginNemotronMoE
+
+    wrappers = {
+        "NemotronHAttention": lambda mixer, idx: PluginNemotronAttention(mixer, config, idx),
+        "NemotronHMamba2Mixer": lambda mixer, idx: PluginNemotronMamba(mixer),
+        "NemotronHMoE": lambda mixer, idx: PluginNemotronMoE(mixer, config),
+    }
+    layers = (getattr(model, "backbone", None) or model.model).layers
+    patched = []
+    for i, block in enumerate(layers):
+        wrap = wrappers.get(type(block.mixer).__name__)
+        if wrap is None:
+            continue
+        original = block.mixer
+        block.mixer = wrap(original, i).eval()
+        patched.append((block, "mixer", original))
+    print(f"patched nemotron mixers: {len(patched)}")
+    return patched
+
 
 @torch.no_grad()
 def infer_smolvlm_seq_len(vision_model, image):

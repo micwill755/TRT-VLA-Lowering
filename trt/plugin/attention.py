@@ -472,3 +472,19 @@ class SiglipReferenceAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
 
         return attn_output, attn_weights
+
+
+class PluginNemotronAttention(PluginAttention):
+    """``PluginAttention`` constructed from a Nemotron HF config."""
+
+    def __init__(self, original_attn: nn.Module, config, layer_idx: int):
+        head_dim = int(getattr(config, "head_dim", 0) or original_attn.head_dim)
+        super().__init__(
+            original_attn,
+            num_attention_heads=int(config.num_attention_heads),
+            num_key_value_heads=int(config.num_key_value_heads),
+            head_dim=head_dim,
+            hidden_size=int(config.hidden_size),
+            layer_idx=layer_idx,
+            context_attention_mask_type=ContextAttentionMaskType.CAUSAL,
+        )

@@ -223,6 +223,30 @@ def make_rope_rotary_cos_sin_from_model(
     )
 
 
+def config_is_nope(config) -> bool:
+    """True when attention has no positional encoding (Nemotron-H / Nano)."""
+    if getattr(config, "use_rope", None) is False:
+        return True
+    model_type = str(getattr(config, "model_type", "") or "").lower()
+    return model_type.startswith("nemotron_h")
+
+
+def make_nope_rotary_cos_sin(
+    max_seq_len: int,
+    rotary_dim: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Identity cos/sin cache so AttentionPlugin is a RoPE pass-through.
+
+    Matches Edge-LLM ``initializeNopeCosSinCache``: first half 1.0 (cos),
+    second half 0.0 (sin). Nemotron-H / Nano omit RoPE; position lives in SSM.
+    """
+    half = int(rotary_dim) // 2
+    cos = torch.ones(1, int(max_seq_len), half, dtype=torch.float32, device=device)
+    sin = torch.zeros(1, int(max_seq_len), half, dtype=torch.float32, device=device)
+    return torch.cat([cos, sin], dim=-1)
+
+
 @torch.no_grad()
 def make_rope_rotary_cos_sin(
     config,
@@ -236,7 +260,12 @@ def make_rope_rotary_cos_sin(
 
     Prefers the model's ``rotary_emb`` when available for eager parity. Falls back
     to config-based generation that matches Edge-LLM ``initializeNormalRopeCosSin``.
+    Nemotron-H has no ``rotary_emb`` / ``rope_theta``; uses the NoPE identity cache.
     """
+    if config_is_nope(config):
+        return make_nope_rotary_cos_sin(
+            max_seq_len, rotary_dim_from_config(config), device
+        )
     if language_model is not None:
         try:
             return make_rope_rotary_cos_sin_from_model(
