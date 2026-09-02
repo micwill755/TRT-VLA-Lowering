@@ -53,14 +53,19 @@ def parse_args(description: str) -> argparse.Namespace:
         action="store_true",
         help="Retrace after --compile (screenshot execute_engine IR)",
     )
+    parser.add_argument(
+        "--save",
+        default=None,
+        help="Serialize named engines (vision / language / action*) to this directory",
+    )
     return parser.parse_args()
 
 
-def edge_config(*, compile_engines: bool) -> EdgeConfig:
+def edge_config(*, compile_engines: bool, full: bool = False) -> EdgeConfig:
     return EdgeConfig(
-        require_full_compilation=False,
+        require_full_compilation=full,
         decompose_attention=False,
-        compare=compile_engines,
+        compare=compile_engines and not full,
         extra_compile_kwargs={
             "disable_tf32": True,
             "use_fp32_acc": True,
@@ -87,7 +92,15 @@ def dump_partition(compiled: torch.fx.GraphModule, title: str) -> None:
         dump_graph(leftover, "leftover  _run_on_gpu_1")
 
 
-def maybe_retrace(compiled, step_args: tuple, *, compile_engines: bool, retrace: bool) -> None:
+def maybe_retrace(
+    compiled,
+    step_args: tuple,
+    *,
+    compile_engines: bool,
+    retrace: bool,
+    policy=None,
+    components: tuple[str, ...] = ("vision", "language"),
+) -> None:
     if not compile_engines:
         print("\ndry-run only (no engines). Re-run with --compile to build TRT.")
         return
@@ -95,4 +108,10 @@ def maybe_retrace(compiled, step_args: tuple, *, compile_engines: bool, retrace:
         return
     retraced = torch_tensorrt.dynamo.export(compiled, arg_inputs=step_args)
     dump_graph(retraced.graph_module, "retrace")
-    named_runtime_preview(retraced.graph_module)
+    if policy is not None:
+        from exporter import EdgeExporter
+
+        EdgeExporter().specialize(retraced.graph_module, policy, *components)
+        dump_graph(retraced.graph_module, "graph 3 (edgellm ops)")
+    else:
+        named_runtime_preview(retraced.graph_module)

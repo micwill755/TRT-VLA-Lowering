@@ -1,14 +1,17 @@
-"""GR00T through EdgeExporter.export_for_policy().
+"""GR00T through EdgeExporter: hybrid VLM graph + action context + action expert.
 
 Same load / Eagle chat template / libero frame path as ``vla/test_vla_gr00t_e2e.py``.
-Vision and language are one PolicyStep; leftover glue is
-``edge.scatter_image_tokens`` (image-slot splice, not cat). DiT / action stay out.
+
+    exporter.export_for_policy(...)   # vision | scatter | language
+    exporter.export(action_context, ...)  # action_context
+    exporter.export(action_module, ...)   # action_expert
+    exporter.save_engines(out_dir)
 
 Run::
 
     python graph/examples/groot.py
     python graph/examples/groot.py --compile
-    python graph/examples/groot.py --compile --retrace
+    python graph/examples/groot.py --compile --save /tmp/groot_engines
 """
 
 from __future__ import annotations
@@ -34,7 +37,8 @@ from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.groot.processor_groot import GrootEagleEncodeStep
 from lerobot.utils.constants import ACTION, OBS_STATE
 
-from exporter import EdgeExporter
+from exporter import EdgeExporter, dump_graph
+from models.groot import wrap_action, wrap_action_context
 from trt.data import create_pil_messages, load_test_data
 from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.rope import make_rope_rotary_cos_sin
@@ -166,26 +170,54 @@ def main() -> None:
         "past_key_values": past_key_values,
     }
 
-    compiled = EdgeExporter().export_for_policy(
+    exporter = EdgeExporter()
+    compiled = exporter.export_for_policy(
         model, inputs, config=common.edge_config(compile_engines=args.compile)
     )
     common.dump_partition(compiled, "GR00T PolicyStep partition")
-    common.maybe_retrace(
-        compiled,
-        (
-            pixel_values,
-            lang_embeds,
-            image_token_mask,
-            rope,
-            ctx_len,
-            kvcache_start_index,
-            last_token_ids,
-            ds_stack,
-            *past_key_values,
-        ),
-        compile_engines=args.compile,
-        retrace=args.retrace,
+    if args.compile:
+        dump_graph(compiled, "graph 3  edgellm.vision_tower | scatter | text_encoder")
+
+    action_head = model.action_head
+    action_horizon = int(action_head.config.action_horizon)
+    action_dim = int(action_head.config.action_dim)
+    # Dummy language hidden — action_context input is [B, S, H_lm], not projected.
+    lm_hidden = torch.zeros(bsz, seq_len, hidden_size, device=device, dtype=dtype)
+    context_module = wrap_action_context(model).to(device=device, dtype=dtype)
+    context = exporter.export(
+        context_module,
+        (lm_hidden,),
+        config=common.edge_config(compile_engines=args.compile, full=True),
+        components=("action_context",),
     )
+    common.dump_partition(context, "GR00T action_context partition")
+    if args.compile:
+        dump_graph(context, "graph 3  edgellm.action_context")
+
+    with torch.no_grad():
+        context_embs = torch.zeros_like(context_module(lm_hidden))
+    step_actions = torch.randn(bsz, action_horizon, action_dim, device=device, dtype=dtype)
+    step_timestep = torch.zeros(bsz, device=device, dtype=torch.long)
+    state = torch.zeros(bsz, 1, int(config.max_state_dim), device=device, dtype=dtype)
+    embodiment_id = torch.zeros(bsz, device=device, dtype=torch.long)
+    action_inputs = (step_actions, step_timestep, context_embs, state, embodiment_id)
+    action_module = wrap_action(
+        model, {"embodiment_id": embodiment_id}
+    ).to(device=device, dtype=dtype)
+    expert = exporter.export(
+        action_module,
+        action_inputs,
+        config=common.edge_config(compile_engines=args.compile, full=True),
+        components=("action",),
+    )
+    common.dump_partition(expert, "GR00T action_expert partition")
+    if args.compile:
+        dump_graph(expert, "graph 3  edgellm.action_expert")
+
+    if args.save:
+        written = exporter.save_engines(args.save)
+        for name, path in written.items():
+            print(f"saved {name}: {path}")
 
 
 if __name__ == "__main__":

@@ -108,7 +108,7 @@ def main() -> None:
         compiled, arg_inputs=(pixels, lang_embeds)
     )
     dump_graph(retraced.graph_module, "graph 2b  retrace (screenshot IR)")
-    named_runtime_preview(retraced.graph_module)
+    named_runtime_preview(retraced.graph_module, ("vision_tower", "text_encoder"))
 
     with torch.no_grad():
         eager = step(pixels, lang_embeds)

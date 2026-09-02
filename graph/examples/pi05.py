@@ -1,14 +1,16 @@
-"""PI05 through EdgeExporter.export_for_policy().
+"""PI05 through EdgeExporter: hybrid VLM graph + action expert.
 
 Same load / libero frame / preprocessor path as ``vla/test_vla_pi05_e2e.py``.
-Vision and language are one PolicyStep; leftover glue is ``edge.fuse_prefix``
-(cat). Compact packing, Euler, and diffusion stay out.
+
+    exporter.export_for_policy(...)   # vision | fuse | language
+    exporter.export(action_module, ...)  # action_expert
+    exporter.save_engines(out_dir)    # serialized engines + config.json
 
 Run::
 
     python graph/examples/pi05.py
     python graph/examples/pi05.py --compile
-    python graph/examples/pi05.py --compile --retrace
+    python graph/examples/pi05.py --compile --save /tmp/pi05_engines
 """
 
 from __future__ import annotations
@@ -37,12 +39,14 @@ from lerobot.utils.constants import (
     OBS_STATE,
 )
 
-from exporter import EdgeExporter
+from exporter import EdgeExporter, dump_graph
+from models.pi05 import wrap_action
 from models.pi05.patches.vision import wrap_vision
 from trt.data import frame_from_test_data, load_test_data
+from trt.executor.models.pi05.helpers import make_pi05_suffix_position_and_mask
 from trt.plugin.plugin_utils import load_plugins_for_trt
 from trt.rope import make_rope_rotary_cos_sin
-from trt.utils import configure_thor_pytorch, force_hf_attention, free_cuda_memory
+from trt.utils import configure_thor_pytorch, force_hf_attention
 
 configure_thor_pytorch()
 
@@ -82,9 +86,7 @@ def main() -> None:
     language = paligemma.language_model
     force_hf_attention(vision, "eager")
     force_hf_attention(language, "eager")
-
-    model.paligemma_with_expert.gemma_expert.cpu()
-    free_cuda_memory()
+    force_hf_attention(model.paligemma_with_expert.gemma_expert.model, "eager")
 
     pre_processor, _ = make_pre_post_processors(
         config,
@@ -140,25 +142,50 @@ def main() -> None:
         "past_key_values": past_key_values,
     }
 
-    compiled = EdgeExporter().export_for_policy(
+    exporter = EdgeExporter()
+    compiled = exporter.export_for_policy(
         model, inputs, config=common.edge_config(compile_engines=args.compile)
     )
     common.dump_partition(compiled, "PI05 PolicyStep partition")
-    common.maybe_retrace(
-        compiled,
-        (
-            pixel_values,
-            lang_embeds,
-            rope,
-            ctx_len,
-            kvcache_start_index,
-            last_token_ids,
-            ds_stack,
-            *past_key_values,
-        ),
-        compile_engines=args.compile,
-        retrace=args.retrace,
+    if args.compile:
+        dump_graph(compiled, "graph 3  edgellm.vision_tower | fuse | text_encoder")
+
+    prefix_k = torch.zeros(
+        num_layers, batch, num_key_value_heads, fused_seq, head_dim, device=device, dtype=dtype
     )
+    prefix_v = torch.zeros_like(prefix_k)
+    step_actions = torch.randn(
+        batch, int(model.config.chunk_size), int(model.config.max_action_dim),
+        device=device, dtype=dtype,
+    )
+    step_timestep = torch.full((batch,), 1.0, device=device, dtype=torch.float32)
+    prefix_pad = torch.ones(batch, fused_seq, dtype=torch.bool, device=device)
+    suffix_position_ids, suffix_attention_mask = make_pi05_suffix_position_and_mask(
+        model, prefix_pad, step_actions, device
+    )
+    action_inputs = (
+        step_actions,
+        step_timestep,
+        prefix_k,
+        prefix_v,
+        suffix_position_ids,
+        suffix_attention_mask,
+    )
+    action_module = wrap_action(model).to(device=device)
+    expert = exporter.export(
+        action_module,
+        action_inputs,
+        config=common.edge_config(compile_engines=args.compile, full=True),
+        components=("action",),
+    )
+    common.dump_partition(expert, "PI05 action_expert partition")
+    if args.compile:
+        dump_graph(expert, "graph 3  edgellm.action_expert")
+
+    if args.save:
+        written = exporter.save_engines(args.save)
+        for name, path in written.items():
+            print(f"saved {name}: {path}")
 
 
 if __name__ == "__main__":

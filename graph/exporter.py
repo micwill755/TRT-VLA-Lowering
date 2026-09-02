@@ -2,18 +2,20 @@
 
 Public API::
 
+    from models.groot import wrap_action, wrap_action_context
+
     exporter = EdgeExporter()
-    compiled = exporter.export(model, inputs, config=EdgeConfig(...))
-    compiled = exporter.export_for_policy(policy, inputs, config=EdgeConfig(...))
+    vlm = exporter.export_for_policy(policy, vlm_inputs, config=hybrid)
+    exporter.export(wrap_action_context(policy), (lm_hidden,), config=full, components=("action_context",))
+    exporter.export(wrap_action(policy), action_inputs, config=full, components=("action",))
+    exporter.save_engines("out/")
 
 ``export()`` is ``torch.export`` + ``torch_tensorrt.dynamo.compile`` (no fork).
-Around ``torch.export`` it installs model wrappers (``apply_model_patches``)
-then Edge-LLM plugin attention (``apply_edge_plugins``).
-``export_for_policy`` looks up vision / language / fuse adapters, builds one
-``PolicyStep``, and calls ``export()`` once so the partitioner emits the
-screenshot hybrid graph. Model diffs live under ``models/<name>/``:
-``adapters.py`` discovers towers + leftover fuse; ``patches/`` registers
-``@register_model_patch`` wrappers. The public call does not change.
+On a real compile it retraces and rewrites ``execute_engine`` to named
+``edgellm::*`` ops from ``models/<family>/config.py``.
+``save_engines`` writes serialized ``.engine`` + ``config.json`` the same way
+as the e2e tests (``save_trt_engine_module``).
+Model-specific wraps live in ``models/<family>/``, not on the exporter.
 """
 
 from __future__ import annotations
@@ -90,6 +92,43 @@ class FuseSpec:
     extra_keys: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class EngineSaveConfig:
+    """On-disk serialized engine for one named runtime op. Lives in ``models/<name>/config.py``."""
+
+    directory: str
+    engine_file: str
+    model_type: str
+    component: str
+    runtime_op: str
+    input_names: tuple[str, ...]
+    output_names: tuple[str, ...]
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ModelSaveConfig:
+    """Vision / language / action dump layout for one policy family."""
+
+    vision: EngineSaveConfig
+    language: EngineSaveConfig
+    action: EngineSaveConfig
+    action_context: EngineSaveConfig | None = None
+
+
+@dataclass
+class EngineSaveJob:
+    """Runtime tensors + settings for one ``save_trt_engine_module`` call."""
+
+    module: nn.Module
+    inputs: tuple
+    extra: dict[str, Any] = field(default_factory=dict)
+    trt_settings: dict[str, Any] | None = None
+    input_specs: Any = None
+    flat_tensors: Any = None
+    trace_tensors: Any = None
+
+
 @dataclass
 class CompareReport:
     """Eager SDPA (A) vs compiled TRT (C) for one hybrid graph."""
@@ -141,6 +180,54 @@ def _as_args_kwargs(inputs: Any) -> tuple[tuple, dict]:
 
 def _is_dryrun(config: EdgeConfig) -> bool:
     return bool(config.extra_compile_kwargs.get("dryrun"))
+
+
+def _save_settings(config: EdgeConfig) -> dict[str, Any]:
+    settings = {
+        "min_block_size": config.min_block_size,
+        "require_full_compilation": True,
+        "decompose_attention": config.decompose_attention,
+        "immutable_weights": config.immutable_weights,
+    }
+    extra = dict(config.extra_compile_kwargs)
+    extra.pop("dryrun", None)
+    settings.update(extra)
+    return settings
+
+
+def _action_save_extra(policy: nn.Module | None) -> dict[str, Any]:
+    extra: dict[str, Any] = {}
+    if policy is None:
+        return extra
+    cfg = getattr(policy, "config", None)
+    if cfg is None:
+        return extra
+    if hasattr(cfg, "num_inference_steps"):
+        extra["num_inference_steps"] = int(cfg.num_inference_steps)
+    if hasattr(cfg, "chunk_size"):
+        extra["action_horizon"] = int(cfg.chunk_size)
+    if hasattr(cfg, "max_action_dim"):
+        extra["action_dim"] = int(cfg.max_action_dim)
+    action_head = getattr(policy, "action_head", None)
+    head_cfg = getattr(action_head, "config", None) if action_head is not None else None
+    if head_cfg is not None:
+        if hasattr(head_cfg, "action_horizon"):
+            extra["action_horizon"] = int(head_cfg.action_horizon)
+        if hasattr(head_cfg, "action_dim"):
+            extra["action_dim"] = int(head_cfg.action_dim)
+    if hasattr(action_head, "num_inference_timesteps"):
+        extra["num_inference_timesteps"] = int(action_head.num_inference_timesteps)
+    if hasattr(action_head, "num_timestep_buckets"):
+        extra["num_timestep_buckets"] = int(action_head.num_timestep_buckets)
+    return extra
+
+
+def _input_names_for_job(cfg: EngineSaveConfig, job: EngineSaveJob) -> list[str]:
+    names = list(cfg.input_names)
+    extra = len(job.inputs) - len(names)
+    if extra > 0:
+        names.extend(f"past_key_values_{i}" for i in range(extra))
+    return names
 
 
 def _call(model: nn.Module, args: tuple, kwargs: dict):
@@ -196,6 +283,9 @@ _ADAPTERS: dict[str, list[tuple[Callable[[nn.Module], bool], Callable]]] = {
     "vision": [],
     "language": [],
     "fuse": [],
+    "action": [],
+    "action_context": [],
+    "save": [],
 }
 
 _PATCHES: list[tuple[Callable[[nn.Module], bool], Callable]] = []
@@ -453,12 +543,20 @@ def apply_edge_plugins(module: nn.Module):
 class EdgeExporter:
     def __init__(self) -> None:
         self.last_compare: CompareReport | None = None
+        self._policy: nn.Module | None = None
+        self._jobs: dict[str, EngineSaveJob] = {}
+        self._pending_components: tuple[str, ...] = ()
+        self._vlm_args: tuple | None = None
+        self._fuse_extra: int = 0
+        self._fuse_op: Target | None = None
 
     def export(
         self,
         model: nn.Module,
         inputs: Any,
         config: EdgeConfig | dict[str, Any],
+        *,
+        components: tuple[str, ...] | None = None,
     ) -> torch.fx.GraphModule:
         if isinstance(config, dict):
             config = EdgeConfig(**config)
@@ -470,9 +568,28 @@ class EdgeExporter:
         if config.compare and _is_dryrun(config):
             print("compare=True ignored during dryrun (no engines)")
 
+        if components is None:
+            if isinstance(model, PolicyStep):
+                components = ("vision", "language")
+            else:
+                components = ()
+        self._pending_components = components
+
         eager_out = None
         eager_ms: float | None = None
         with apply_model_patches(model, inputs):
+            if isinstance(model, PolicyStep) and args:
+                settings = _save_settings(config)
+                n_extra = len(model.fuse_extra_keys)
+                self._fuse_extra = n_extra
+                self._fuse_op = model.fuse_op
+                self._vlm_args = args
+                self._jobs["vision"] = EngineSaveJob(
+                    model.vision_tower, (args[0],), trt_settings=settings
+                )
+                self._jobs["language"] = EngineSaveJob(
+                    model.language_model, args[2 + n_extra :], trt_settings=settings
+                )
             if compare:
                 model.eval()
                 with torch.no_grad():
@@ -497,6 +614,24 @@ class EdgeExporter:
                     ),
                 )
 
+        if components == ("action",) and args:
+            extra = _action_save_extra(self._policy)
+            if len(args) > 2 and isinstance(args[2], torch.Tensor) and args[2].ndim == 5:
+                extra.setdefault("prefix_seq_len", int(args[2].shape[-2]))
+            self._jobs["action"] = EngineSaveJob(
+                model, args, extra=extra, trt_settings=_save_settings(config)
+            )
+        elif components == ("action_context",) and args:
+            extra: dict[str, Any] = {}
+            hidden = args[0]
+            if isinstance(hidden, torch.Tensor) and hidden.ndim >= 2:
+                extra["batch_size"] = int(hidden.shape[0])
+                extra["max_seq_len"] = int(hidden.shape[1])
+                extra["hidden_size"] = int(hidden.shape[-1])
+            self._jobs["action_context"] = EngineSaveJob(
+                model, args, extra=extra, trt_settings=_save_settings(config)
+            )
+
         compile_kwargs = config.compile_kwargs()
         if args:
             compile_kwargs["arg_inputs"] = args
@@ -513,6 +648,9 @@ class EdgeExporter:
             )
         else:
             self.last_compare = None
+
+        if not _is_dryrun(config):
+            compiled = self._maybe_specialize(compiled, args, kwargs)
         return compiled
 
     def _compare_eager(
@@ -560,6 +698,7 @@ class EdgeExporter:
         if isinstance(config, dict):
             config = EdgeConfig(**config)
 
+        self._policy = policy
         fuse = _as_fuse_spec(_lookup("fuse", policy, inputs))
         config = replace(
             config,
@@ -574,8 +713,140 @@ class EdgeExporter:
             policy=policy,
         ).eval()
         return self.export(
-            step, _policy_step_inputs(inputs, fuse.extra_keys), config=config
+            step,
+            _policy_step_inputs(inputs, fuse.extra_keys),
+            config=config,
+            components=("vision", "language"),
         )
+
+    def save_engines(self, out_dir: str | Path) -> dict[str, Path]:
+        """Out-of-framework dump: ``{runtime_op}/{runtime_op}.engine`` + ``config.json``.
+
+        Call after ``export_for_policy``, optional ``export(action_context)``,
+        and ``export(action_module, ...)``. I/O names come from
+        ``models/<family>/config.py``. Bytes from ``save_trt_engine_module``.
+        """
+        from trt.compile import save_trt_engine_module
+
+        if self._policy is None:
+            raise RuntimeError("save_engines() needs export_for_policy() first")
+        spec = _lookup("save", self._policy, {})
+        if not isinstance(spec, ModelSaveConfig):
+            raise TypeError(
+                "policy has no ModelSaveConfig; register @register_edge_adapter('save', ...)"
+            )
+
+        jobs = dict(self._jobs)
+        if "language" in jobs and self._vlm_args is not None:
+            jobs["language"] = self._language_job_with_prefix(jobs)
+
+        required = ["vision", "language", "action"]
+        if spec.action_context is not None:
+            required.append("action_context")
+        missing = [name for name in required if name not in jobs]
+        if missing:
+            raise RuntimeError(f"save_engines() missing {missing}; export those graphs first")
+
+        selected = {
+            "vision": (spec.vision, jobs["vision"]),
+            "language": (spec.language, jobs["language"]),
+            "action": (spec.action, jobs["action"]),
+        }
+        if spec.action_context is not None:
+            selected["action_context"] = (spec.action_context, jobs["action_context"])
+
+        root = Path(out_dir)
+        written: dict[str, Path] = {}
+        for name, (cfg, job) in selected.items():
+            extra = {**cfg.extra, **job.extra}
+            input_names = _input_names_for_job(cfg, job)
+            with apply_edge_plugins(job.module):
+                written[name] = save_trt_engine_module(
+                    job.module,
+                    job.inputs,
+                    root / cfg.runtime_op,
+                    engine_file=f"{cfg.runtime_op}.engine",
+                    model_type=cfg.model_type,
+                    component=cfg.component,
+                    input_names=input_names,
+                    output_names=list(cfg.output_names),
+                    extra_config=extra,
+                    trt_settings=job.trt_settings,
+                    input_specs=job.input_specs,
+                    flat_tensors=job.flat_tensors,
+                    trace_tensors=job.trace_tensors,
+                )
+        return written
+
+    def _language_job_with_prefix(self, jobs: dict[str, EngineSaveJob]) -> EngineSaveJob:
+        """Fuse eager vision tokens into language embeds so the language wrap has a real prefix."""
+        vis = jobs["vision"]
+        lang = jobs["language"]
+        args = self._vlm_args
+        assert args is not None
+        lang_embeds = args[1]
+        extra = args[2 : 2 + self._fuse_extra]
+        fuse = self._fuse_op
+        with torch.no_grad():
+            vision_tokens = vis.module(*vis.inputs)
+            if vision_tokens.ndim == 2:
+                batch = lang_embeds.shape[0]
+                vision_tokens = vision_tokens.reshape(batch, -1, lang_embeds.shape[-1])
+            prefix = fuse(vision_tokens, lang_embeds, *extra)
+        return EngineSaveJob(
+            lang.module,
+            (prefix, *lang.inputs),
+            extra=lang.extra,
+            trt_settings=lang.trt_settings,
+            input_specs=lang.input_specs,
+            flat_tensors=lang.flat_tensors,
+            trace_tensors=lang.trace_tensors,
+        )
+
+    def _maybe_specialize(
+        self,
+        compiled: torch.fx.GraphModule,
+        args: tuple,
+        kwargs: dict,
+    ) -> torch.fx.GraphModule:
+        if self._policy is None or not self._pending_components:
+            return compiled
+        spec = _lookup("save", self._policy, {})
+        if not isinstance(spec, ModelSaveConfig):
+            return compiled
+        retraced = torch_tensorrt.dynamo.export(
+            compiled,
+            arg_inputs=args or None,
+            kwarg_inputs=kwargs or None,
+        )
+        return self.specialize(retraced.graph_module, self._policy, *self._pending_components)
+
+    def specialize(
+        self,
+        gm: torch.fx.GraphModule,
+        policy: nn.Module,
+        *components: str,
+    ) -> torch.fx.GraphModule:
+        """Graph 3: rewrite ``execute_engine`` to named ``edgellm::*`` ops from model config.
+
+        Policy VLM graph: ``specialize(gm, policy, "vision", "language")``.
+        Action-context graph: ``specialize(gm, policy, "action_context")``.
+        Action graph (one engine): ``specialize(gm, policy, "action")``.
+        """
+        from runtime_ops import specialize_runtime_ops
+
+        spec = _lookup("save", policy, {})
+        if not isinstance(spec, ModelSaveConfig):
+            raise TypeError(
+                "policy has no ModelSaveConfig; register @register_edge_adapter('save', ...)"
+            )
+        names: list[str] = []
+        for component in components:
+            cfg = getattr(spec, component, None)
+            if not isinstance(cfg, EngineSaveConfig):
+                raise ValueError(f"model config has no engine {component!r}")
+            names.append(cfg.runtime_op)
+        return specialize_runtime_ops(gm, names)
 
 
 _LM_ARG_KEYS = (
@@ -676,17 +947,26 @@ def dump_graph(gm: torch.fx.GraphModule | torch.fx.Graph, title: str) -> None:
             print(f"  %{node.name} = {node.op} {node.target} {node.args}")
 
 
-def named_runtime_preview(gm: torch.fx.GraphModule | torch.fx.Graph) -> None:
-    """Graph 3: rename only. First execute_engine → vision_tower, second → text_encoder."""
+def named_runtime_preview(
+    gm: torch.fx.GraphModule | torch.fx.Graph,
+    names: Sequence[str] | None = None,
+) -> None:
+    """Graph 3 dump. With ``names``, rewrite ``execute_engine`` to ``edgellm::*`` first."""
+    graph_mod = gm if isinstance(gm, torch.fx.GraphModule) else None
+    if names:
+        if graph_mod is None:
+            raise TypeError("specialize needs a GraphModule")
+        from runtime_ops import specialize_runtime_ops
+
+        specialize_runtime_ops(graph_mod, names)
+        dump_graph(graph_mod, "graph 3 (edgellm ops)")
+        return
     graph = gm.graph if isinstance(gm, torch.fx.GraphModule) else gm
     engines = [
         n
         for n in graph.nodes
         if n.op == "call_function" and "execute_engine" in str(n.target)
     ]
-    aliases = ["tensorrt::vision_tower", "tensorrt::text_encoder"]
-    print("\n===== graph 3 (rename) =====")
-    for node, alias in zip(engines, aliases):
-        print(f"  %{node.name}  {node.target}  →  {alias}")
-    if len(engines) < 2:
-        print("  (expected two execute_engine nodes; partitioner cut differently)")
+    print("\n===== graph 3 (execute_engine, unnamed) =====")
+    for node in engines:
+        print(f"  %{node.name}  {node.target}")

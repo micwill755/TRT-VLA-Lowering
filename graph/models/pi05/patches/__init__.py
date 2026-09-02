@@ -17,6 +17,8 @@ def root(policy: nn.Module) -> nn.Module | None:
 
 
 def _match(module: nn.Module) -> bool:
+    if not hasattr(module, "vision_tower") or not hasattr(module, "language_model"):
+        return False
     return root(source_policy(module)) is not None
 
 

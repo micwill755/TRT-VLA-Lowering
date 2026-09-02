@@ -71,8 +71,8 @@ class TRTDynamicCategorySpecificLinearExportModule(nn.Module):
 
         # selected_w: [B, input_dim, output_dim]
         # selected_b: [B, output_dim]
-        selected_w = torch.index_select(self.W, dim=0, index=cat_ids)
-        selected_b = torch.index_select(self.b, dim=0, index=cat_ids)
+        selected_w = torch.index_select(self.W, dim=0, index=cat_ids).to(dtype=x.dtype)
+        selected_b = torch.index_select(self.b, dim=0, index=cat_ids).to(dtype=x.dtype)
 
         # out: [B, T, output_dim]
         out = torch.bmm(x, selected_w)
