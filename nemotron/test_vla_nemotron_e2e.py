@@ -206,6 +206,7 @@ def main():
     input_ids, attention_mask = encode_prompt(tokenizer, "Hello.", device)
     embeddings = model.get_input_embeddings()(input_ids)
     bsz, prompt_len, hidden = embeddings.shape
+
     # Time/export the engine capacity, not the 2-token prompt. HF naive Mamba
     # still pads internally to chunk_size (256 on 4B); TRT scans context_lengths.
     if prompt_len < max_seq_len:
@@ -227,6 +228,7 @@ def main():
     with torch.no_grad():
         eager = model(inputs_embeds=embeddings, attention_mask=attention_mask)
         eager_logits = eager.logits[:, -1, :]
+        
     eager_elapsed_ms = _cuda_time_ms(
         lambda: model(inputs_embeds=embeddings, attention_mask=attention_mask),
         device,
@@ -252,7 +254,13 @@ def main():
     with torch.no_grad():
         plugin_out = lm(*flat)
         plugin_logits = plugin_out[0]
-    
+
+    # Fresh states: TRT AttentionPlugin may write KV in place.
+    kvs, convs, ssms = allocate_plugin_states(
+        model, config, bsz, max_seq_len, device, dtype
+    )
+    flat = (embeddings, rope, ctx_len, kv_start, last_token_ids, *kvs, *convs, *ssms)
+
     exported = torch.export.export(lm, args=flat, strict=False)
     trt_engine = torch_tensorrt.dynamo.compile(
         exported, inputs=make_input_spec(flat), **TRT_SETTINGS
@@ -263,11 +271,8 @@ def main():
         trt_logits = trt_out[0]
     trt_elapsed_ms = _cuda_time_ms(lambda: trt_engine(*flat), device)
 
-    # attention_plugin / causal_conv1d / update_ssm_state return zeros in eager
-    # PyTorch (Dynamo shape stubs). MLP still runs, so this is not all-zero, but
-    # it is not a numerical check. PI05 only reports unpatched eager vs TRT.
-    parity("nemotron wrapper (stub ops)", eager_logits, plugin_logits)
-    parity("nemotron stub vs TRT", plugin_logits, trt_logits)
+    parity("nemotron eager vs wrapper", eager_logits, plugin_logits)
+    parity("nemotron wrapper vs TRT", plugin_logits, trt_logits)
     parity("nemotron eager vs TRT", eager_logits, trt_logits)
 
     print(

@@ -8,6 +8,7 @@ import tensorrt as trt
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from trt.plugin.attention import (
     ContextAttentionMaskType,
@@ -87,6 +88,77 @@ def create_kv_caches(
 def _has_torch_op(namespace: str, name: str) -> bool:
     return hasattr(torch.ops, namespace) and hasattr(getattr(torch.ops, namespace), name)
 
+
+def _apply_plugin_rope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    rope_rotary_cos_sin: torch.Tensor,
+    head_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Apply AttentionPlugin cos/sin layout: first half cos, second half sin."""
+    half = head_size // 2
+    seq_len = q.shape[1]
+    cos = rope_rotary_cos_sin[:, :seq_len, :half]
+    sin = rope_rotary_cos_sin[:, :seq_len, half:]
+    cos = torch.cat([cos, cos], dim=-1).unsqueeze(2)
+    sin = torch.cat([sin, sin], dim=-1).unsqueeze(2)
+
+    def rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., :half]
+        x2 = x[..., half:]
+        return torch.cat((-x2, x1), dim=-1)
+
+    return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
+
+
+def _attention_plugin_eager(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    past_key_value: torch.Tensor,
+    context_lengths: torch.Tensor,
+    rope_rotary_cos_sin: torch.Tensor,
+    kvcache_start_index: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    context_attention_mask_type: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Eager SDPA stand-in for ``AttentionPlugin`` (prefill, linear KV)."""
+    del kvcache_start_index
+    orig_dtype = q.dtype
+    batch, seq_len, _ = q.shape
+    q = q.view(batch, seq_len, num_q_heads, head_size)
+    k = k.view(batch, seq_len, num_kv_heads, head_size)
+    v = v.view(batch, seq_len, num_kv_heads, head_size)
+    q, k = _apply_plugin_rope(q, k, rope_rotary_cos_sin.float(), head_size)
+    q = q.to(dtype=orig_dtype)
+    k = k.to(dtype=orig_dtype)
+    v = v.to(dtype=orig_dtype)
+
+    present = past_key_value.clone()
+    present[:, 0, :, :seq_len, :] = k.permute(0, 2, 1, 3).to(dtype=present.dtype)
+    present[:, 1, :, :seq_len, :] = v.permute(0, 2, 1, 3).to(dtype=present.dtype)
+
+    q = q.permute(0, 2, 1, 3)
+    k = k.permute(0, 2, 1, 3)
+    v = v.permute(0, 2, 1, 3)
+    if num_q_heads != num_kv_heads:
+        repeats = num_q_heads // num_kv_heads
+        k = k.repeat_interleave(repeats, dim=1)
+        v = v.repeat_interleave(repeats, dim=1)
+
+    is_causal = int(context_attention_mask_type) == int(ContextAttentionMaskType.CAUSAL)
+    attn = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal and seq_len > 1)
+    attn = attn.permute(0, 2, 1, 3).contiguous()
+    if context_lengths is not None:
+        lengths = context_lengths.to(device=attn.device, dtype=torch.long)
+        token = torch.arange(seq_len, device=attn.device)
+        valid = token.unsqueeze(0) < lengths.unsqueeze(1)
+        attn = attn.masked_fill(~valid[:, :, None, None], 0)
+    return attn.to(dtype=q.dtype), present
+
+
 # These registrations follow the same custom-op pattern as TensorRT-Edge-LLM's
 # ONNX exporter: define a torch.ops.trt operator and register a fake
 # implementation for Dynamo shape propagation. The pipelines diverge only
@@ -121,19 +193,21 @@ def _register_attention_plugin_op() -> None:
         position_ids: Optional[torch.Tensor] = None,
         qkv_scales: Optional[Sequence[float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        del k, v, context_lengths, rope_rotary_cos_sin, kvcache_start_index
-        del num_kv_heads, enable_tree_attention, enable_fp8_kv_cache
-        del sliding_window_size, context_attention_mask_type, attention_mask, position_ids, qkv_scales
-        batch_size, seq_len, _ = q.shape
-        attn_output = torch.zeros(
-            batch_size,
-            seq_len,
-            num_q_heads,
-            head_size,
-            dtype=q.dtype,
-            device=q.device,
+        del enable_tree_attention, enable_fp8_kv_cache, sliding_window_size
+        del attention_mask, position_ids, qkv_scales
+        return _attention_plugin_eager(
+            q,
+            k,
+            v,
+            past_key_value,
+            context_lengths,
+            rope_rotary_cos_sin,
+            kvcache_start_index,
+            int(num_q_heads),
+            int(num_kv_heads),
+            int(head_size),
+            int(context_attention_mask_type),
         )
-        return attn_output, past_key_value.clone()
 
     @attention_plugin.register_fake
     def _attention_plugin_fake(
